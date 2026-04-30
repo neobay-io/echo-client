@@ -93,7 +93,7 @@ done:
 	}
 }
 
-func TestSend_PlacesExtraWorkspacesBeforeManagedWorkspace(t *testing.T) {
+func TestSend_UsesAddDirForExtraWorkspaces(t *testing.T) {
 	workDir := t.TempDir()
 	primaryDir := filepath.Join(workDir, "repo")
 	if err := os.MkdirAll(primaryDir, 0o755); err != nil {
@@ -147,17 +147,21 @@ done:
 		t.Fatalf("ReadFile args: %v", err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
+	var addDirs []string
 	var workspaces []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "-w" && i+1 < len(args) {
+		if args[i] == "--add-dir" && i+1 < len(args) {
+			addDirs = append(addDirs, args[i+1])
+		}
+		if (args[i] == "-w" || args[i] == "--workspace") && i+1 < len(args) {
 			workspaces = append(workspaces, args[i+1])
 		}
 	}
-	if len(workspaces) != 2 {
-		t.Fatalf("workspace args = %#v, want 2", workspaces)
+	if len(addDirs) != 1 || addDirs[0] != primaryDir {
+		t.Fatalf("add-dir args = %#v, want [%q]", addDirs, primaryDir)
 	}
-	if workspaces[0] != primaryDir || workspaces[1] != workDir {
-		t.Fatalf("workspace args = %#v, want [%q, %q]", workspaces, primaryDir, workDir)
+	if len(workspaces) != 1 || workspaces[0] != workDir {
+		t.Fatalf("workspace args = %#v, want [%q]", workspaces, workDir)
 	}
 }
 
@@ -222,11 +226,18 @@ done:
 		t.Fatalf("ReadFile args: %v", err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
+	var addDirs []string
 	var workspaces []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "-w" && i+1 < len(args) {
+		if args[i] == "--add-dir" && i+1 < len(args) {
+			addDirs = append(addDirs, args[i+1])
+		}
+		if (args[i] == "-w" || args[i] == "--workspace") && i+1 < len(args) {
 			workspaces = append(workspaces, args[i+1])
 		}
+	}
+	if len(addDirs) != 0 {
+		t.Fatalf("add-dir args = %#v, want none", addDirs)
 	}
 	if len(workspaces) != 1 || workspaces[0] != workDir {
 		t.Fatalf("workspace args = %#v, want [%q]", workspaces, workDir)

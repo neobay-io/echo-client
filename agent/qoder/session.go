@@ -82,7 +82,7 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 			continue
 		}
 		seenDirs[key] = struct{}{}
-		args = append(args, "-w", dir)
+		args = append(args, "--add-dir", dir)
 	}
 	args = append(args, "-w", qs.workDir)
 	for _, attachment := range attachments {

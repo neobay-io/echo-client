@@ -63,14 +63,21 @@ func TestAgentSessionSmoke_UsesManagedWorkspaceAndExtraDirs(t *testing.T) {
 
 	waitForQoderResult(t, sess.Events())
 	args := readQoderArgs(t, argsFile)
+	var addDirs []string
 	var workspaces []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "-w" && i+1 < len(args) {
+		if args[i] == "--add-dir" && i+1 < len(args) {
+			addDirs = append(addDirs, args[i+1])
+		}
+		if (args[i] == "-w" || args[i] == "--workspace") && i+1 < len(args) {
 			workspaces = append(workspaces, args[i+1])
 		}
 	}
-	if len(workspaces) != 2 || workspaces[0] != repoDir || workspaces[1] != managedDir {
-		t.Fatalf("workspace args = %#v, want [%q, %q]", workspaces, repoDir, managedDir)
+	if len(addDirs) != 1 || addDirs[0] != repoDir {
+		t.Fatalf("add-dir args = %#v, want [%q]", addDirs, repoDir)
+	}
+	if len(workspaces) != 1 || workspaces[0] != managedDir {
+		t.Fatalf("workspace args = %#v, want [%q]", workspaces, managedDir)
 	}
 	if got := strings.TrimSpace(readQoderText(t, cwdFile)); canonicalQoderPath(got) != canonicalQoderPath(managedDir) {
 		t.Fatalf("cwd = %q, want %q", got, managedDir)
