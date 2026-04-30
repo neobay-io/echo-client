@@ -666,7 +666,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
 			"/stop\n  Stop current execution\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/cron [add|list|del|enable|disable]\n  Manage scheduled cron tasks\n\n" +
+			"/loop [list|new|del|enable|disable]\n  Manage scheduled loop tasks\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
@@ -704,7 +705,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
 			"/stop\n  停止当前执行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
+			"/cron [add|list|del|enable|disable]\n  管理 cron 定时任务\n\n" +
+			"/loop [list|new|del|enable|disable]\n  管理 loop 定时任务\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
@@ -742,7 +744,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
 			"/stop\n  停止當前執行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
+			"/cron [add|list|del|enable|disable]\n  管理 cron 定時任務\n\n" +
+			"/loop [list|new|del|enable|disable]\n  管理 loop 定時任務\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
@@ -779,7 +782,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
-			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/cron [add|list|del|enable|disable]\n  cron スケジュールタスク管理\n\n" +
+			"/loop [list|new|del|enable|disable]\n  loop スケジュールタスク管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
@@ -816,7 +820,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/cron [add|list|del|enable|disable]\n  Gestionar tareas cron programadas\n\n" +
+			"/loop [list|new|del|enable|disable]\n  Gestionar tareas loop programadas\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +

@@ -171,18 +171,20 @@ type Engine struct {
 	turnTimeout       time.Duration
 
 	// Interactive agent session management
-	interactiveMu     sync.Mutex
-	interactiveStates map[string]*interactiveState // key = sessionKey
-	promptMu          sync.Mutex
-	prompts           map[string]*pendingInteractionPrompt
-	voiceConfirmMu    sync.Mutex
-	voiceConfirms     map[string]*pendingVoiceConfirmation
-	pendingAttachMu   sync.Mutex
-	pendingAttach     map[string]*pendingAttachments
-	cronEditMu        sync.Mutex
-	pendingCronEdits  map[string]*pendingCronPromptEdit
-	reviewMu          sync.Mutex
-	reviewFlows       map[string]*reviewFlow
+	interactiveMu      sync.Mutex
+	interactiveStates  map[string]*interactiveState // key = sessionKey
+	promptMu           sync.Mutex
+	prompts            map[string]*pendingInteractionPrompt
+	voiceConfirmMu     sync.Mutex
+	voiceConfirms      map[string]*pendingVoiceConfirmation
+	pendingAttachMu    sync.Mutex
+	pendingAttach      map[string]*pendingAttachments
+	cronEditMu         sync.Mutex
+	pendingCronEdits   map[string]*pendingCronPromptEdit
+	loopCreateMu       sync.Mutex
+	pendingLoopCreates map[string]bool
+	reviewMu           sync.Mutex
+	reviewFlows        map[string]*reviewFlow
 
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
@@ -280,28 +282,29 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:              name,
-		agent:             ag,
-		platforms:         platforms,
-		sessions:          NewSessionManager(sessionStorePath),
-		ctx:               ctx,
-		cancel:            cancel,
-		i18n:              NewI18n(lang),
-		display:           DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
-		commands:          NewCommandRegistry(),
-		skills:            NewSkillRegistry(),
-		aliases:           make(map[string]string),
-		interactiveStates: make(map[string]*interactiveState),
-		prompts:           make(map[string]*pendingInteractionPrompt),
-		voiceConfirms:     make(map[string]*pendingVoiceConfirmation),
-		pendingAttach:     make(map[string]*pendingAttachments),
-		pendingCronEdits:  make(map[string]*pendingCronPromptEdit),
-		reviewFlows:       make(map[string]*reviewFlow),
-		startedAt:         time.Now(),
-		streamPreview:     DefaultStreamPreviewCfg(),
-		eventIdleTimeout:  defaultEventIdleTimeout,
-		firstEventTimeout: defaultFirstEventTimeout,
-		turnTimeout:       defaultTurnTimeout,
+		name:               name,
+		agent:              ag,
+		platforms:          platforms,
+		sessions:           NewSessionManager(sessionStorePath),
+		ctx:                ctx,
+		cancel:             cancel,
+		i18n:               NewI18n(lang),
+		display:            DisplayCfg{ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen},
+		commands:           NewCommandRegistry(),
+		skills:             NewSkillRegistry(),
+		aliases:            make(map[string]string),
+		interactiveStates:  make(map[string]*interactiveState),
+		prompts:            make(map[string]*pendingInteractionPrompt),
+		voiceConfirms:      make(map[string]*pendingVoiceConfirmation),
+		pendingAttach:      make(map[string]*pendingAttachments),
+		pendingCronEdits:   make(map[string]*pendingCronPromptEdit),
+		pendingLoopCreates: make(map[string]bool),
+		reviewFlows:        make(map[string]*reviewFlow),
+		startedAt:          time.Now(),
+		streamPreview:      DefaultStreamPreviewCfg(),
+		eventIdleTimeout:   defaultEventIdleTimeout,
+		firstEventTimeout:  defaultFirstEventTimeout,
+		turnTimeout:        defaultTurnTimeout,
 	}
 
 	if cp, ok := ag.(CommandProvider); ok {
@@ -582,6 +585,16 @@ func (e *Engine) ProjectName() string {
 	return e.name
 }
 
+const loopPausePrimitive = "<loop-control>pause</loop-control>"
+
+func appendLoopPausePrimitive(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return prompt
+	}
+	return prompt + "\n\nIf this loop should pause after this run, append exactly " + loopPausePrimitive + " as the final line of your response. Otherwise do not mention it."
+}
+
 // ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
@@ -637,12 +650,19 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 		return e.executeCronShell(targetPlatform, replyCtx, job)
 	}
 
+	buildPrompt := func() string {
+		if job.IsLoopJob() && job.AutoPausePrimitive {
+			return appendLoopPausePrimitive(job.Prompt)
+		}
+		return job.Prompt
+	}
+
 	msg := &Message{
 		SessionKey: sessionKey,
 		Platform:   platformName,
 		UserID:     "cron",
 		UserName:   "cron",
-		Content:    job.Prompt,
+		Content:    buildPrompt(),
 		ReplyCtx:   replyCtx,
 	}
 
@@ -663,9 +683,11 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", sessionKey)
 		}
+		historyLen := session.HistoryLen()
 		// Intentionally synchronous: the scheduler waits for this turn to
 		// finish, so timeout/cancellation is enforced via ctx and cleanup.
 		e.processInteractiveMessage(targetPlatform, msg, session)
+		e.applyLoopPausePrimitive(sessionKey, job.ID, session.LatestAssistantMessageSince(historyLen), targetPlatform, replyCtx)
 		return ctx.Err()
 	}
 
@@ -673,9 +695,29 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
+	historyLen := session.HistoryLen()
 
 	e.processInteractiveMessage(targetPlatform, msg, session)
+	e.applyLoopPausePrimitive(sessionKey, job.ID, session.LatestAssistantMessageSince(historyLen), targetPlatform, replyCtx)
 	return ctx.Err()
+}
+
+func (e *Engine) applyLoopPausePrimitive(sessionKey, jobID, assistantReply string, p Platform, replyCtx any) {
+	if e.cronScheduler == nil {
+		return
+	}
+	job := e.cronScheduler.Store().Get(jobID)
+	if job == nil || !job.IsLoopJob() || !job.AutoPausePrimitive {
+		return
+	}
+	if !strings.Contains(assistantReply, loopPausePrimitive) {
+		return
+	}
+	if err := e.cronScheduler.DisableJob(jobID); err != nil {
+		slog.Warn("loop: failed to pause after primitive", "job_id", jobID, "session_key", sessionKey, "error", err)
+		return
+	}
+	e.send(p, replyCtx, fmt.Sprintf("⏸ loop `%s` paused by agent primitive.", jobID))
 }
 
 func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error {
@@ -882,6 +924,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	if e.handlePendingLoopCreate(p, msg, content) {
+		return
+	}
+
 	// Resolve aliases: check if the first word (or whole content) matches an alias
 	content = e.resolveAlias(content)
 	msg.Content = content
@@ -1010,6 +1056,24 @@ func (e *Engine) clearPendingCronPromptEditIfMatch(sessionKey, jobID string) {
 	if edit != nil && edit.JobID == jobID {
 		delete(e.pendingCronEdits, sessionKey)
 	}
+}
+
+func (e *Engine) setPendingLoopCreate(sessionKey string) {
+	e.loopCreateMu.Lock()
+	defer e.loopCreateMu.Unlock()
+	e.pendingLoopCreates[sessionKey] = true
+}
+
+func (e *Engine) clearPendingLoopCreate(sessionKey string) {
+	e.loopCreateMu.Lock()
+	defer e.loopCreateMu.Unlock()
+	delete(e.pendingLoopCreates, sessionKey)
+}
+
+func (e *Engine) hasPendingLoopCreate(sessionKey string) bool {
+	e.loopCreateMu.Lock()
+	defer e.loopCreateMu.Unlock()
+	return e.pendingLoopCreates[sessionKey]
 }
 
 func reviewFlowMapKey(project, sessionKey string) string {
@@ -1358,8 +1422,7 @@ func (e *Engine) handlePendingCronPromptEdit(p Platform, msg *Message, content s
 	}
 	if trimmed == "/cancel" {
 		e.clearPendingCronPromptEdit(msg.SessionKey)
-		e.reply(p, msg.ReplyCtx, "Cancelled cron prompt editing.")
-		e.replyCronCardIfSupported(p, msg, "Cancelled cron prompt editing.")
+		e.reply(p, msg.ReplyCtx, "Cancelled scheduled prompt editing.")
 		return true
 	}
 	if strings.HasPrefix(trimmed, "/") {
@@ -1377,16 +1440,60 @@ func (e *Engine) handlePendingCronPromptEdit(p Platform, msg *Message, content s
 	job := e.cronScheduler.Store().Get(edit.JobID)
 	if job == nil || job.SessionKey != msg.SessionKey {
 		e.clearPendingCronPromptEditIfMatch(msg.SessionKey, edit.JobID)
-		e.reply(p, msg.ReplyCtx, "❌ cron job not found for this session")
+		e.reply(p, msg.ReplyCtx, "❌ scheduled job not found for this session")
 		return true
 	}
 	if err := e.cronScheduler.UpdateJob(edit.JobID, "prompt", trimmed); err != nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ update cron prompt failed: %v", err))
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ update prompt failed: %v", err))
 		return true
 	}
 	e.clearPendingCronPromptEditIfMatch(msg.SessionKey, edit.JobID)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Updated cron `%s` prompt.", edit.JobID))
-	e.replyCronCardIfSupported(p, msg, fmt.Sprintf("Updated `%s`.", edit.JobID))
+	kindLabel := "cron"
+	if job.IsLoopJob() {
+		kindLabel = "loop"
+	}
+	notice := fmt.Sprintf("Updated `%s`.", edit.JobID)
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ Updated %s `%s` prompt.", kindLabel, edit.JobID))
+	if job.IsLoopJob() {
+		e.replyLoopCardIfSupported(p, msg, notice)
+	} else {
+		e.replyCronCardIfSupported(p, msg, notice)
+	}
+	return true
+}
+
+func (e *Engine) handlePendingLoopCreate(p Platform, msg *Message, content string) bool {
+	if !e.hasPendingLoopCreate(msg.SessionKey) {
+		return false
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return true
+	}
+	if trimmed == "/cancel" {
+		e.clearPendingLoopCreate(msg.SessionKey)
+		e.reply(p, msg.ReplyCtx, "Cancelled loop creation.")
+		e.replyLoopCardIfSupported(p, msg, "Cancelled loop creation.")
+		return true
+	}
+	if strings.HasPrefix(trimmed, "/loop ") {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "/loop"))
+	} else if strings.HasPrefix(trimmed, "/") {
+		return false
+	}
+	job, err := e.buildLoopJobFromInput(msg.SessionKey, trimmed)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return true
+	}
+	if err := e.cronScheduler.AddJob(job); err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return true
+	}
+	e.clearPendingLoopCreate(msg.SessionKey)
+	notice := fmt.Sprintf("Created loop `%s` (%s).", job.ID, job.LoopInterval)
+	e.reply(p, msg.ReplyCtx, notice)
+	e.replyLoopCardIfSupported(p, msg, notice)
 	return true
 }
 
@@ -2611,6 +2718,7 @@ var builtinCommands = []struct {
 	{[]string{"provider"}, "provider"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
+	{[]string{"loop"}, "loop"},
 	{[]string{"compress", "compact"}, "compress"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
@@ -2728,6 +2836,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdMemory(p, msg, args)
 	case "cron":
 		e.cmdCron(p, msg, args)
+	case "loop":
+		e.cmdLoop(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
 	case "stop":
@@ -4849,6 +4959,20 @@ func (e *Engine) appendMemoryFile(p Platform, msg *Message, filePath, text strin
 // /cron command
 // ──────────────────────────────────────────────────────────────
 
+func (e *Engine) jobsForSessionByKind(sessionKey, kind string) []*CronJob {
+	if e.cronScheduler == nil {
+		return nil
+	}
+	all := e.cronScheduler.Store().ListBySessionKey(sessionKey)
+	out := make([]*CronJob, 0, len(all))
+	for _, j := range all {
+		if NormalizeCronJobKind(j.Kind) == kind {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
 func (e *Engine) handleCardNav(action, sessionKey string) *Card {
 	var prefix, body string
 	if i := strings.Index(action, ":"); i >= 0 {
@@ -4874,6 +4998,8 @@ func (e *Engine) handleCardNav(action, sessionKey string) *Card {
 		return e.renderHelpCard()
 	case "/cron":
 		return e.renderCronCard(sessionKey, notice)
+	case "/loop":
+		return e.renderLoopCard(sessionKey, notice)
 	case "/sessions":
 		return e.renderSessionCard(sessionKey, parseSessionCardPage(args), notice)
 	case "/review":
@@ -4897,7 +5023,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) string {
 		}
 		sub, id := fields[0], fields[1]
 		job := e.cronScheduler.Store().Get(id)
-		if job == nil || job.SessionKey != sessionKey {
+		if job == nil || job.SessionKey != sessionKey || job.IsLoopJob() {
 			return "Cron job not found for this session."
 		}
 		switch sub {
@@ -4932,6 +5058,67 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) string {
 			if strings.TrimSpace(job.Prompt) != "" {
 				if err := e.sendTextToSession(sessionKey, fmt.Sprintf("Current prompt for `%s`:\n\n%s", id, job.Prompt)); err != nil {
 					slog.Warn("cron: failed to send current prompt for edit", "session_key", sessionKey, "job_id", id, "error", err)
+				} else {
+					sentExistingPrompt = true
+				}
+			}
+			if sentExistingPrompt {
+				return fmt.Sprintf("Send your next message to replace the prompt for `%s`. The current prompt was sent above. Send /cancel to abort.", id)
+			}
+			return fmt.Sprintf("Send your next message to replace the prompt for `%s`. Send /cancel to abort.", id)
+		}
+	case "/loop":
+		if e.cronScheduler == nil {
+			return ""
+		}
+		fields := strings.Fields(args)
+		if len(fields) == 0 {
+			return ""
+		}
+		if fields[0] == "new" {
+			e.setPendingLoopCreate(sessionKey)
+			return "Send your next message as `<interval> <prompt>` to create a loop. Example: `5m Summarize urgent GitHub issues`. Send /cancel to abort."
+		}
+		if len(fields) < 2 {
+			return ""
+		}
+		sub, id := fields[0], fields[1]
+		job := e.cronScheduler.Store().Get(id)
+		if job == nil || job.SessionKey != sessionKey || !job.IsLoopJob() {
+			return "Loop job not found for this session."
+		}
+		switch sub {
+		case "enable":
+			if err := e.cronScheduler.EnableJob(id); err != nil {
+				return fmt.Sprintf("Failed to start `%s`: %v", id, err)
+			}
+			return fmt.Sprintf("Started `%s`.", id)
+		case "disable":
+			if err := e.cronScheduler.DisableJob(id); err != nil {
+				return fmt.Sprintf("Failed to pause `%s`: %v", id, err)
+			}
+			return fmt.Sprintf("Paused `%s`.", id)
+		case "delete":
+			if ok := e.cronScheduler.RemoveJob(id); !ok {
+				return fmt.Sprintf("Failed to delete `%s`.", id)
+			}
+			return fmt.Sprintf("Deleted `%s`.", id)
+		case "primitiveon":
+			if err := e.cronScheduler.UpdateJob(id, "auto_pause_primitive", true); err != nil {
+				return fmt.Sprintf("Failed to enable primitive for `%s`: %v", id, err)
+			}
+			return fmt.Sprintf("Primitive enabled for `%s`.", id)
+		case "primitiveoff":
+			if err := e.cronScheduler.UpdateJob(id, "auto_pause_primitive", false); err != nil {
+				return fmt.Sprintf("Failed to disable primitive for `%s`: %v", id, err)
+			}
+			return fmt.Sprintf("Primitive disabled for `%s`.", id)
+		case "editprompt":
+			e.setPendingCronPromptEdit(sessionKey, id)
+			sentExistingPrompt := false
+			if strings.TrimSpace(job.Prompt) != "" {
+				if err := e.sendTextToSession(sessionKey, fmt.Sprintf("Current prompt for `%s`:\n\n%s", id, job.Prompt)); err != nil {
+					slog.Warn("loop: failed to send current prompt for edit", "session_key", sessionKey, "job_id", id, "error", err)
 				} else {
 					sentExistingPrompt = true
 				}
@@ -4991,7 +5178,7 @@ func (e *Engine) renderCronCard(sessionKey string, notice string) *Card {
 	if strings.TrimSpace(sessionKey) == "" {
 		return e.simpleCard("Cron Jobs", "orange", "Invalid session")
 	}
-	jobs := e.cronScheduler.Store().ListBySessionKey(sessionKey)
+	jobs := e.jobsForSessionByKind(sessionKey, "cron")
 	if len(jobs) == 0 {
 		return e.simpleCard("Cron Jobs", "orange", e.i18n.T(MsgCronEmpty))
 	}
@@ -5069,11 +5256,103 @@ func (e *Engine) renderCronCard(sessionKey string, notice string) *Card {
 	return cb.Build()
 }
 
+func (e *Engine) renderLoopCard(sessionKey string, notice string) *Card {
+	if e.cronScheduler == nil {
+		return e.simpleCard("Loop Jobs", "orange", e.i18n.T(MsgCronNotAvailable))
+	}
+	if strings.TrimSpace(sessionKey) == "" {
+		return e.simpleCard("Loop Jobs", "orange", "Invalid session")
+	}
+	jobs := e.jobsForSessionByKind(sessionKey, "loop")
+	cb := NewCard().Title("Loop Jobs", "orange")
+	if len(jobs) == 0 {
+		cb.Markdown("No loop jobs yet.")
+		if strings.TrimSpace(notice) != "" {
+			cb.Markdown(notice)
+		}
+		cb.ButtonsEqual(PrimaryBtn("New", "act:/loop new"), e.cardBackButton())
+		return cb.Build()
+	}
+
+	now := time.Now()
+	cb.Markdownf("Loop Jobs (%d)", len(jobs))
+	if strings.TrimSpace(notice) != "" {
+		cb.Markdown(notice)
+	}
+
+	for _, j := range jobs {
+		status := "✅"
+		if !j.Enabled {
+			status = "⏸"
+		}
+		desc := j.Description
+		if desc == "" {
+			desc = firstNonEmptyLine(j.Prompt)
+		}
+		if j.AutoPausePrimitive {
+			desc += " [primitive]"
+		}
+
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "%s %s\n", status, desc)
+		fmt.Fprintf(&sb, "ID: `%s`\n", j.ID)
+		fmt.Fprintf(&sb, "Schedule: `%s` (%s)\n", LoopIntervalToHuman(j.LoopInterval), j.LoopInterval)
+		nextRun := e.cronScheduler.NextRun(j.ID)
+		if !nextRun.IsZero() {
+			fmtStr := cronTimeFormat(nextRun, now)
+			fmt.Fprintf(&sb, "Next run: %s\n", nextRun.Format(fmtStr))
+		}
+		if !j.LastRun.IsZero() {
+			fmtStr := cronTimeFormat(j.LastRun, now)
+			fmt.Fprintf(&sb, "Last run: %s", j.LastRun.Format(fmtStr))
+			if j.LastError != "" {
+				fmt.Fprintf(&sb, " (failed: %s)", truncateStr(j.LastError, 40))
+			}
+			sb.WriteString("\n")
+		}
+		cb.Markdown(sb.String())
+
+		var btns []CardButton
+		btns = append(btns, DefaultBtn("Edit Prompt", fmt.Sprintf("act:/loop editprompt %s", j.ID)))
+		if j.Enabled {
+			btns = append(btns, DefaultBtn("Pause", fmt.Sprintf("act:/loop disable %s", j.ID)))
+		} else {
+			btns = append(btns, PrimaryBtn("Start", fmt.Sprintf("act:/loop enable %s", j.ID)))
+		}
+		if j.AutoPausePrimitive {
+			btns = append(btns, DefaultBtn("Primitive Off", fmt.Sprintf("act:/loop primitiveoff %s", j.ID)))
+		} else {
+			btns = append(btns, DefaultBtn("Primitive On", fmt.Sprintf("act:/loop primitiveon %s", j.ID)))
+		}
+		btns = append(btns, DangerBtn("Delete", fmt.Sprintf("act:/loop delete %s", j.ID)))
+		for i := 0; i < len(btns); i += 2 {
+			end := i + 2
+			if end > len(btns) {
+				end = len(btns)
+			}
+			cb.ButtonsEqual(btns[i:end]...)
+		}
+	}
+
+	cb.Divider()
+	cb.Note("Tip: turn Primitive On if you want the agent to be able to pause this loop by appending " + loopPausePrimitive + " to its reply.")
+	cb.ButtonsEqual(PrimaryBtn("New", "act:/loop new"), e.cardBackButton())
+	return cb.Build()
+}
+
 func (e *Engine) replyCronCardIfSupported(p Platform, msg *Message, notice string) bool {
 	if p == nil || msg == nil || !supportsCards(p) {
 		return false
 	}
 	e.replyWithCard(p, msg.ReplyCtx, e.renderCronCard(msg.SessionKey, notice))
+	return true
+}
+
+func (e *Engine) replyLoopCardIfSupported(p Platform, msg *Message, notice string) bool {
+	if p == nil || msg == nil || !supportsCards(p) {
+		return false
+	}
+	e.replyWithCard(p, msg.ReplyCtx, e.renderLoopCard(msg.SessionKey, notice))
 	return true
 }
 
@@ -5170,6 +5449,13 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 		return
 	}
 	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
+	filtered := jobs[:0]
+	for _, j := range jobs {
+		if !j.IsLoopJob() {
+			filtered = append(filtered, j)
+		}
+	}
+	jobs = filtered
 	if len(jobs) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronEmpty))
 		return
@@ -5232,6 +5518,11 @@ func (e *Engine) cmdCronDel(p Platform, msg *Message, args []string) {
 		return
 	}
 	id := args[0]
+	job := e.cronScheduler.Store().Get(id)
+	if job == nil || job.IsLoopJob() || job.SessionKey != msg.SessionKey {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
+		return
+	}
 	if e.cronScheduler.RemoveJob(id) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDeleted), id))
 	} else {
@@ -5245,6 +5536,11 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 		return
 	}
 	id := args[0]
+	job := e.cronScheduler.Store().Get(id)
+	if job == nil || job.IsLoopJob() || job.SessionKey != msg.SessionKey {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
+		return
+	}
 	var err error
 	if enable {
 		err = e.cronScheduler.EnableJob(id)
@@ -5275,6 +5571,196 @@ func (e *Engine) cmdCronSetup(p Platform, msg *Message) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 	case setupOK:
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronSetupOK), baseName))
+	}
+}
+
+func (e *Engine) buildLoopJobFromInput(sessionKey, input string) (*CronJob, error) {
+	if e.cronScheduler == nil {
+		return nil, fmt.Errorf("loop scheduler is not available")
+	}
+	fields := strings.Fields(strings.TrimSpace(input))
+	if len(fields) < 2 {
+		return nil, fmt.Errorf("usage: /loop <interval> <prompt> (examples: 5s, 30m, 12h, 5d)")
+	}
+	_, normalized, err := ParseLoopIntervalSpec(fields[0])
+	if err != nil {
+		return nil, err
+	}
+	prompt := strings.TrimSpace(strings.Join(fields[1:], " "))
+	if prompt == "" {
+		return nil, fmt.Errorf("loop prompt is required")
+	}
+	if len(prompt) > maxCronPromptLen {
+		return nil, fmt.Errorf("prompt too long (max %d characters)", maxCronPromptLen)
+	}
+	return &CronJob{
+		ID:           GenerateCronID(),
+		Project:      e.name,
+		SessionKey:   sessionKey,
+		Kind:         "loop",
+		LoopInterval: normalized,
+		Prompt:       prompt,
+		Enabled:      true,
+		CreatedAt:    time.Now(),
+	}, nil
+}
+
+func (e *Engine) cmdLoop(p Platform, msg *Message, args []string) {
+	if e.cronScheduler == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronNotAvailable))
+		return
+	}
+	if len(args) == 0 {
+		e.cmdLoopList(p, msg)
+		return
+	}
+	if _, _, err := ParseLoopIntervalSpec(args[0]); err == nil {
+		job, buildErr := e.buildLoopJobFromInput(msg.SessionKey, strings.Join(args, " "))
+		if buildErr != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", buildErr))
+			return
+		}
+		if err := e.cronScheduler.AddJob(job); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+			return
+		}
+		notice := fmt.Sprintf("✅ Loop created\nID: `%s`\nSchedule: `%s`\nPrompt: `%s`", job.ID, job.LoopInterval, truncateStr(job.Prompt, 60))
+		e.reply(p, msg.ReplyCtx, notice)
+		e.replyLoopCardIfSupported(p, msg, fmt.Sprintf("Created `%s`.", job.ID))
+		return
+	}
+
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"list", "new", "del", "delete", "rm", "remove", "enable", "disable", "primitive"})
+	switch sub {
+	case "list":
+		e.cmdLoopList(p, msg)
+	case "new":
+		e.setPendingLoopCreate(msg.SessionKey)
+		notice := "Send your next message as `<interval> <prompt>` to create a loop. Example: `5m Summarize urgent GitHub issues`. Send /cancel to abort."
+		e.reply(p, msg.ReplyCtx, notice)
+		e.replyLoopCardIfSupported(p, msg, notice)
+	case "del", "delete", "rm", "remove":
+		e.cmdLoopDel(p, msg, args[1:])
+	case "enable":
+		e.cmdLoopToggle(p, msg, args[1:], true)
+	case "disable":
+		e.cmdLoopToggle(p, msg, args[1:], false)
+	case "primitive":
+		e.cmdLoopPrimitive(p, msg, args[1:])
+	default:
+		e.reply(p, msg.ReplyCtx, "Usage:\n/loop <interval> <prompt>\n/loop list\n/loop new\n/loop del <id>\n/loop enable <id>\n/loop disable <id>\n/loop primitive <id> on|off\nIntervals: 5s, 30m, 12h, 5d")
+	}
+}
+
+func (e *Engine) cmdLoopList(p Platform, msg *Message) {
+	if e.replyLoopCardIfSupported(p, msg, "") {
+		return
+	}
+	jobs := e.jobsForSessionByKind(msg.SessionKey, "loop")
+	if len(jobs) == 0 {
+		e.reply(p, msg.ReplyCtx, "No loop jobs yet.")
+		return
+	}
+	now := time.Now()
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Loop Jobs (%d)\n\n", len(jobs))
+	for i, j := range jobs {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		status := "✅"
+		if !j.Enabled {
+			status = "⏸"
+		}
+		desc := firstNonEmptyLine(j.Prompt)
+		if j.AutoPausePrimitive {
+			desc += " [primitive]"
+		}
+		fmt.Fprintf(&sb, "%s %s\n", status, desc)
+		fmt.Fprintf(&sb, "ID: %s\n", j.ID)
+		fmt.Fprintf(&sb, "Schedule: %s (%s)\n", LoopIntervalToHuman(j.LoopInterval), j.LoopInterval)
+		nextRun := e.cronScheduler.NextRun(j.ID)
+		if !nextRun.IsZero() {
+			fmt.Fprintf(&sb, "Next run: %s\n", nextRun.Format(cronTimeFormat(nextRun, now)))
+		}
+	}
+	sb.WriteString("\nUse `/loop <interval> <prompt>` to add a loop.")
+	e.reply(p, msg.ReplyCtx, sb.String())
+}
+
+func (e *Engine) cmdLoopDel(p Platform, msg *Message, args []string) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, "Usage: /loop del <id>")
+		return
+	}
+	id := args[0]
+	job := e.cronScheduler.Store().Get(id)
+	if job == nil || !job.IsLoopJob() || job.SessionKey != msg.SessionKey {
+		e.reply(p, msg.ReplyCtx, "❌ loop job not found")
+		return
+	}
+	if !e.cronScheduler.RemoveJob(id) {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ failed to delete `%s`", id))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("Deleted `%s`.", id))
+}
+
+func (e *Engine) cmdLoopToggle(p Platform, msg *Message, args []string, enable bool) {
+	if len(args) == 0 {
+		e.reply(p, msg.ReplyCtx, "Usage: /loop enable|disable <id>")
+		return
+	}
+	id := args[0]
+	job := e.cronScheduler.Store().Get(id)
+	if job == nil || !job.IsLoopJob() || job.SessionKey != msg.SessionKey {
+		e.reply(p, msg.ReplyCtx, "❌ loop job not found")
+		return
+	}
+	var err error
+	if enable {
+		err = e.cronScheduler.EnableJob(id)
+	} else {
+		err = e.cronScheduler.DisableJob(id)
+	}
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+		return
+	}
+	if enable {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Started `%s`.", id))
+	} else {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Paused `%s`.", id))
+	}
+}
+
+func (e *Engine) cmdLoopPrimitive(p Platform, msg *Message, args []string) {
+	if len(args) < 2 {
+		e.reply(p, msg.ReplyCtx, "Usage: /loop primitive <id> on|off")
+		return
+	}
+	id := args[0]
+	value := strings.ToLower(args[1])
+	job := e.cronScheduler.Store().Get(id)
+	if job == nil || !job.IsLoopJob() || job.SessionKey != msg.SessionKey {
+		e.reply(p, msg.ReplyCtx, "❌ loop job not found")
+		return
+	}
+	switch value {
+	case "on", "true", "enable":
+		if err := e.cronScheduler.UpdateJob(id, "auto_pause_primitive", true); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Primitive enabled for `%s`.", id))
+	case "off", "false", "disable":
+		if err := e.cronScheduler.UpdateJob(id, "auto_pause_primitive", false); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("Primitive disabled for `%s`.", id))
+	default:
+		e.reply(p, msg.ReplyCtx, "Usage: /loop primitive <id> on|off")
 	}
 }
 

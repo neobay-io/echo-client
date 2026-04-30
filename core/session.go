@@ -89,6 +89,37 @@ func (s *Session) LatestAssistantMessage() string {
 	return ""
 }
 
+// LatestAssistantMessageSince returns the latest non-empty assistant message
+// added after the provided history index.
+func (s *Session) LatestAssistantMessageSince(index int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if index < 0 {
+		index = 0
+	}
+	if index > len(s.History) {
+		index = len(s.History)
+	}
+	for i := len(s.History) - 1; i >= index; i-- {
+		entry := s.History[i]
+		if entry.Role != "assistant" {
+			continue
+		}
+		content := strings.TrimSpace(entry.Content)
+		if content != "" {
+			return content
+		}
+	}
+	return ""
+}
+
+func (s *Session) HistoryLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.History)
+}
+
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
 	Sessions      map[string]*Session `json:"sessions"`

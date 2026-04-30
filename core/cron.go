@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,27 +19,63 @@ import (
 
 // CronJob represents a persisted scheduled task.
 type CronJob struct {
-	ID          string    `json:"id"`
-	Project     string    `json:"project"`
-	SessionKey  string    `json:"session_key"`
-	CronExpr    string    `json:"cron_expr"`
-	Prompt      string    `json:"prompt"`
-	Exec        string    `json:"exec,omitempty"`     // shell command; mutually exclusive with Prompt
-	WorkDir     string    `json:"work_dir,omitempty"` // working directory for exec; empty = agent work_dir
-	Description string    `json:"description"`
-	Enabled     bool      `json:"enabled"`
-	Silent      *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
-	Mute        bool      `json:"mute,omitempty"`   // suppress all outbound messages for this job
-	SessionMode string    `json:"session_mode,omitempty"`
-	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil=30m, 0=unlimited, >0=minutes
-	CreatedAt   time.Time `json:"created_at"`
-	LastRun     time.Time `json:"last_run,omitempty"`
-	LastError   string    `json:"last_error,omitempty"`
+	ID                 string    `json:"id"`
+	Project            string    `json:"project"`
+	SessionKey         string    `json:"session_key"`
+	Kind               string    `json:"kind,omitempty"`
+	CronExpr           string    `json:"cron_expr"`
+	LoopInterval       string    `json:"loop_interval,omitempty"`
+	Prompt             string    `json:"prompt"`
+	Exec               string    `json:"exec,omitempty"`     // shell command; mutually exclusive with Prompt
+	WorkDir            string    `json:"work_dir,omitempty"` // working directory for exec; empty = agent work_dir
+	Description        string    `json:"description"`
+	Enabled            bool      `json:"enabled"`
+	Silent             *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
+	Mute               bool      `json:"mute,omitempty"`   // suppress all outbound messages for this job
+	AutoPausePrimitive bool      `json:"auto_pause_primitive,omitempty"`
+	SessionMode        string    `json:"session_mode,omitempty"`
+	TimeoutMins        *int      `json:"timeout_mins,omitempty"` // nil=30m, 0=unlimited, >0=minutes
+	CreatedAt          time.Time `json:"created_at"`
+	LastRun            time.Time `json:"last_run,omitempty"`
+	LastError          string    `json:"last_error,omitempty"`
 }
 
 // IsShellJob returns true if the job executes a shell command directly.
 func (j *CronJob) IsShellJob() bool {
 	return strings.TrimSpace(j.Exec) != ""
+}
+
+func NormalizeCronJobKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "", "cron":
+		return "cron"
+	case "loop":
+		return "loop"
+	default:
+		return strings.ToLower(strings.TrimSpace(kind))
+	}
+}
+
+func (j *CronJob) JobKind() string {
+	if j == nil {
+		return "cron"
+	}
+	return NormalizeCronJobKind(j.Kind)
+}
+
+func (j *CronJob) IsLoopJob() bool {
+	return j.JobKind() == "loop"
+}
+
+func (j *CronJob) ScheduleSpec() (string, error) {
+	if j.IsLoopJob() {
+		d, _, err := ParseLoopIntervalSpec(j.LoopInterval)
+		if err != nil {
+			return "", err
+		}
+		return "@every " + d.String(), nil
+	}
+	return j.CronExpr, nil
 }
 
 const defaultCronJobTimeout = 30 * time.Minute
@@ -70,12 +107,27 @@ func (j *CronJob) UsesNewSessionPerRun() bool {
 }
 
 func validateCronJob(j *CronJob) error {
+	j.Kind = NormalizeCronJobKind(j.Kind)
 	mode := NormalizeCronSessionMode(j.SessionMode)
 	if mode != "" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
 	}
 	if j.TimeoutMins != nil && *j.TimeoutMins < 0 {
 		return fmt.Errorf("timeout_mins must be >= 0")
+	}
+	if j.IsLoopJob() {
+		if strings.TrimSpace(j.Exec) != "" {
+			return fmt.Errorf("loop jobs do not support exec")
+		}
+		if strings.TrimSpace(j.Prompt) == "" {
+			return fmt.Errorf("loop prompt is required")
+		}
+		if _, normalized, err := ParseLoopIntervalSpec(j.LoopInterval); err != nil {
+			return err
+		} else {
+			j.LoopInterval = normalized
+		}
+		return nil
 	}
 	return nil
 }
@@ -256,6 +308,11 @@ func updateCronJobField(job *CronJob, field string, value any) error {
 			job.CronExpr = v
 			return nil
 		}
+	case "loop_interval":
+		if v, ok := value.(string); ok {
+			job.LoopInterval = v
+			return nil
+		}
 	case "prompt":
 		if v, ok := value.(string); ok {
 			job.Prompt = v
@@ -289,6 +346,11 @@ func updateCronJobField(job *CronJob, field string, value any) error {
 	case "mute":
 		if v, ok := value.(bool); ok {
 			job.Mute = v
+			return nil
+		}
+	case "auto_pause_primitive":
+		if v, ok := value.(bool); ok {
+			job.AutoPausePrimitive = v
 			return nil
 		}
 	case "session_mode":
@@ -370,9 +432,12 @@ func (cs *CronScheduler) AddJob(job *CronJob) error {
 	if err := validateCronJob(job); err != nil {
 		return err
 	}
+	job.Kind = NormalizeCronJobKind(job.Kind)
 	job.SessionMode = NormalizeCronSessionMode(job.SessionMode)
-	if _, err := cron.ParseStandard(job.CronExpr); err != nil {
-		return fmt.Errorf("invalid cron expression %q: %w", job.CronExpr, err)
+	if !job.IsLoopJob() {
+		if _, err := cron.ParseStandard(job.CronExpr); err != nil {
+			return fmt.Errorf("invalid cron expression %q: %w", job.CronExpr, err)
+		}
 	}
 	if err := cs.store.Add(job); err != nil {
 		return err
@@ -423,13 +488,22 @@ func (cs *CronScheduler) UpdateJob(id, field string, value any) error {
 		return fmt.Errorf("job %q not found", id)
 	}
 	proposed := cloneCronJob(job)
-	if field == "cron_expr" {
+	if field == "cron_expr" && !proposed.IsLoopJob() {
 		expr, ok := value.(string)
 		if !ok {
 			return fmt.Errorf("cron_expr must be a string")
 		}
 		if _, err := cron.ParseStandard(expr); err != nil {
 			return fmt.Errorf("invalid cron expression %q: %w", expr, err)
+		}
+	}
+	if field == "loop_interval" {
+		spec, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("loop_interval must be a string")
+		}
+		if _, _, err := ParseLoopIntervalSpec(spec); err != nil {
+			return err
 		}
 	}
 	if err := updateCronJobField(proposed, field, value); err != nil {
@@ -439,7 +513,7 @@ func (cs *CronScheduler) UpdateJob(id, field string, value any) error {
 		return err
 	}
 
-	needsReschedule := field == "cron_expr" || field == "enabled"
+	needsReschedule := field == "cron_expr" || field == "loop_interval" || field == "enabled"
 	if needsReschedule {
 		cs.mu.Lock()
 		if entryID, ok := cs.entries[id]; ok {
@@ -507,8 +581,12 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 		cs.cron.Remove(old)
 	}
 
+	spec, err := job.ScheduleSpec()
+	if err != nil {
+		return err
+	}
 	jobID := job.ID
-	entryID, err := cs.cron.AddFunc(job.CronExpr, func() {
+	entryID, err := cs.cron.AddFunc(spec, func() {
 		cs.executeJob(jobID)
 	})
 	if err != nil {
@@ -576,6 +654,57 @@ func truncateStr(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func ParseLoopIntervalSpec(spec string) (time.Duration, string, error) {
+	spec = strings.ToLower(strings.TrimSpace(spec))
+	if spec == "" {
+		return 0, "", fmt.Errorf("loop interval is required")
+	}
+	if len(spec) < 2 {
+		return 0, "", fmt.Errorf("invalid loop interval %q", spec)
+	}
+	unit := spec[len(spec)-1]
+	valueText := spec[:len(spec)-1]
+	value, err := strconv.Atoi(valueText)
+	if err != nil || value <= 0 {
+		return 0, "", fmt.Errorf("invalid loop interval %q", spec)
+	}
+	var d time.Duration
+	switch unit {
+	case 's':
+		d = time.Duration(value) * time.Second
+	case 'm':
+		d = time.Duration(value) * time.Minute
+	case 'h':
+		d = time.Duration(value) * time.Hour
+	case 'd':
+		d = time.Duration(value) * 24 * time.Hour
+	default:
+		return 0, "", fmt.Errorf("invalid loop interval unit %q (use s, m, h, or d)", string(unit))
+	}
+	return d, fmt.Sprintf("%d%c", value, unit), nil
+}
+
+func LoopIntervalToHuman(spec string) string {
+	_, normalized, err := ParseLoopIntervalSpec(spec)
+	if err != nil {
+		return spec
+	}
+	unit := normalized[len(normalized)-1]
+	value := normalized[:len(normalized)-1]
+	switch unit {
+	case 's':
+		return "every " + value + "s"
+	case 'm':
+		return "every " + value + "m"
+	case 'h':
+		return "every " + value + "h"
+	case 'd':
+		return "every " + value + "d"
+	default:
+		return normalized
+	}
 }
 
 var cronWeekdays = map[Language][7]string{

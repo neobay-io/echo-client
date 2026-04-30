@@ -276,3 +276,104 @@ func TestCronSchedulerUpdateJobDoesNotPersistInvalidSessionMode(t *testing.T) {
 		t.Fatalf("SessionMode = %q, want unchanged empty string", got.SessionMode)
 	}
 }
+
+func TestParseLoopIntervalSpec(t *testing.T) {
+	tests := []struct {
+		in       string
+		wantNorm string
+		wantDur  time.Duration
+		wantErr  bool
+	}{
+		{in: "5s", wantNorm: "5s", wantDur: 5 * time.Second},
+		{in: "30m", wantNorm: "30m", wantDur: 30 * time.Minute},
+		{in: "12h", wantNorm: "12h", wantDur: 12 * time.Hour},
+		{in: "5d", wantNorm: "5d", wantDur: 5 * 24 * time.Hour},
+		{in: "0s", wantErr: true},
+		{in: "5x", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			gotDur, gotNorm, err := ParseLoopIntervalSpec(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ParseLoopIntervalSpec(%q) error = nil, want error", tc.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseLoopIntervalSpec(%q) error = %v", tc.in, err)
+			}
+			if gotNorm != tc.wantNorm || gotDur != tc.wantDur {
+				t.Fatalf("ParseLoopIntervalSpec(%q) = (%v, %q), want (%v, %q)", tc.in, gotDur, gotNorm, tc.wantDur, tc.wantNorm)
+			}
+		})
+	}
+}
+
+func TestCronSchedulerAddLoopJobNormalizesInterval(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	job := &CronJob{
+		ID:           "loop-1",
+		Project:      "test",
+		SessionKey:   "test:session",
+		Kind:         "loop",
+		LoopInterval: "5d",
+		Prompt:       "Ping me",
+		Enabled:      true,
+		CreatedAt:    time.Now(),
+	}
+	if err := scheduler.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	got := store.Get(job.ID)
+	if got == nil || !got.IsLoopJob() || got.LoopInterval != "5d" {
+		t.Fatalf("stored loop job = %#v", got)
+	}
+}
+
+func TestEngineExecuteLoopJobAutoPausesOnPrimitive(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	agent := &scriptedRecordingAgent{responses: []string{"done\n" + loopPausePrimitive}}
+	p := &cronReplyPlatform{stubPlatformEngine{n: "test"}}
+	engine := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	engine.SetCronScheduler(scheduler)
+
+	job := &CronJob{
+		ID:                 "loop-1",
+		Project:            "test",
+		SessionKey:         "test:session",
+		Kind:               "loop",
+		LoopInterval:       "5m",
+		Prompt:             "Check status",
+		AutoPausePrimitive: true,
+		Enabled:            true,
+		CreatedAt:          time.Now(),
+	}
+	if err := scheduler.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if err := engine.ExecuteCronJob(context.Background(), job); err != nil {
+		t.Fatalf("ExecuteCronJob: %v", err)
+	}
+
+	got := store.Get(job.ID)
+	if got == nil || got.Enabled {
+		t.Fatalf("loop job = %#v, want disabled after primitive pause", got)
+	}
+	sends := agent.session.Sends()
+	if len(sends) == 0 || !strings.Contains(sends[0].prompt, loopPausePrimitive) {
+		t.Fatalf("prompt = %#v, want loop primitive instruction appended", sends)
+	}
+	if len(p.sent) == 0 || !strings.Contains(strings.Join(p.sent, "\n"), "paused by agent primitive") {
+		t.Fatalf("sent = %#v, want pause notification", p.sent)
+	}
+}

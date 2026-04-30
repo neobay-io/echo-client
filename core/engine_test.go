@@ -494,6 +494,42 @@ func TestCmdCronList_FeishuUsesCardButtons(t *testing.T) {
 	}
 }
 
+func TestCmdLoopList_FeishuUsesCardButtons(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetCronScheduler(scheduler)
+	p := &stubButtonPlatform{n: "feishu"}
+
+	job := &CronJob{
+		ID:           "loop-1",
+		Project:      "test",
+		SessionKey:   "feishu:chat:user",
+		Kind:         "loop",
+		LoopInterval: "5m",
+		Prompt:       "Collect daily updates",
+		Enabled:      true,
+		CreatedAt:    time.Now(),
+	}
+	if err := scheduler.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	e.cmdLoop(p, &Message{SessionKey: job.SessionKey, ReplyCtx: "ctx"}, nil)
+
+	buttons := p.buttonDataSnapshot()
+	if !slices.Contains(buttons, "act:/loop primitiveon loop-1") {
+		t.Fatalf("button data = %#v, want primitive toggle action", buttons)
+	}
+	sent := p.sentSnapshot()
+	if len(sent) == 0 || !strings.Contains(sent[0], "loop-1") {
+		t.Fatalf("sent = %#v, want loop card content with job id", sent)
+	}
+}
+
 func TestCmdList_FeishuUsesSessionCardButtons(t *testing.T) {
 	agent := &listDeleteAgent{sessions: []AgentSessionInfo{
 		{ID: "sess-1", Summary: "First session", MessageCount: 3, ModifiedAt: time.Now()},
@@ -1095,6 +1131,128 @@ func TestHandlePendingCronPromptEditUpdatesPrompt(t *testing.T) {
 	}
 	if !slices.Contains(p.buttonDataSnapshot(), "act:/cron editprompt job-1") {
 		t.Fatalf("expected refreshed cron card buttons, got %#v", p.buttonDataSnapshot())
+	}
+}
+
+func TestHandlePendingLoopCreateAddsLoopJob(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetCronScheduler(scheduler)
+	p := &stubButtonPlatform{n: "feishu"}
+
+	sessionKey := "feishu:chat:user"
+	e.setPendingLoopCreate(sessionKey)
+	e.handleMessage(p, &Message{
+		SessionKey: sessionKey,
+		Platform:   "feishu",
+		UserID:     "user",
+		Content:    "5m Summarize urgent PRs",
+		ReplyCtx:   "ctx",
+	})
+
+	jobs := e.jobsForSessionByKind(sessionKey, "loop")
+	if len(jobs) != 1 {
+		t.Fatalf("loop jobs = %d, want 1", len(jobs))
+	}
+	if jobs[0].LoopInterval != "5m" || jobs[0].Prompt != "Summarize urgent PRs" {
+		t.Fatalf("loop job = %#v", jobs[0])
+	}
+	if e.hasPendingLoopCreate(sessionKey) {
+		t.Fatal("expected pending loop create to be cleared")
+	}
+}
+
+func TestHandlePendingCronPromptEditForLoopRefreshesLoopCard(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetCronScheduler(scheduler)
+	p := &stubButtonPlatform{n: "feishu"}
+
+	job := &CronJob{
+		ID:           "loop-1",
+		Project:      "test",
+		SessionKey:   "feishu:chat:user",
+		Kind:         "loop",
+		LoopInterval: "5m",
+		Prompt:       "Old prompt",
+		Enabled:      true,
+		CreatedAt:    time.Now(),
+	}
+	if err := scheduler.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	card := e.handleCardNav("act:/loop editprompt loop-1", job.SessionKey)
+	if card == nil || !strings.Contains(card.RenderText(), "replace the prompt") {
+		t.Fatalf("card = %#v, want edit prompt notice", card)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: job.SessionKey,
+		Platform:   "feishu",
+		UserID:     "user",
+		Content:    "New loop prompt",
+		ReplyCtx:   "ctx",
+	})
+
+	got := store.Get(job.ID)
+	if got == nil || got.Prompt != "New loop prompt" {
+		t.Fatalf("prompt = %#v, want updated prompt", got)
+	}
+	if !slices.Contains(p.buttonDataSnapshot(), "act:/loop editprompt loop-1") {
+		t.Fatalf("expected refreshed loop card buttons, got %#v", p.buttonDataSnapshot())
+	}
+}
+
+func TestRenderCronCardExcludesLoopJobs(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetCronScheduler(scheduler)
+	sessionKey := "feishu:chat:user"
+
+	if err := scheduler.AddJob(&CronJob{
+		ID:         "cron-1",
+		Project:    "test",
+		SessionKey: sessionKey,
+		CronExpr:   "* * * * *",
+		Prompt:     "Cron prompt",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("AddJob cron: %v", err)
+	}
+	if err := scheduler.AddJob(&CronJob{
+		ID:           "loop-1",
+		Project:      "test",
+		SessionKey:   sessionKey,
+		Kind:         "loop",
+		LoopInterval: "5m",
+		Prompt:       "Loop prompt",
+		Enabled:      true,
+		CreatedAt:    time.Now(),
+	}); err != nil {
+		t.Fatalf("AddJob loop: %v", err)
+	}
+
+	cronCard := e.renderCronCard(sessionKey, "")
+	if strings.Contains(cronCard.RenderText(), "Loop prompt") {
+		t.Fatalf("cron card should exclude loop jobs: %q", cronCard.RenderText())
+	}
+	loopCard := e.renderLoopCard(sessionKey, "")
+	if strings.Contains(loopCard.RenderText(), "Cron prompt") {
+		t.Fatalf("loop card should exclude cron jobs: %q", loopCard.RenderText())
 	}
 }
 
