@@ -17,11 +17,11 @@ func init() {
 	core.RegisterAgent("qoder", New)
 }
 
-// Agent drives Qoder CLI using `qodercli -p <prompt> -f stream-json`.
+// Agent drives Qoder CLI using `qodercli --print --output-format stream-json`.
 type Agent struct {
 	workDir    string
 	model      string
-	mode       string // "default" | "yolo"
+	mode       string // "default" | "acceptEdits" | "plan" | "dontAsk" | "yolo"
 	sessionEnv []string
 	mu         sync.Mutex
 }
@@ -54,7 +54,15 @@ func New(opts map[string]any) (core.Agent, error) {
 
 func normalizeMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "acceptedits", "accept-edits", "accept_edits", "edit":
+		return "acceptEdits"
+	case "plan":
+		return "plan"
+	case "dontask", "dont-ask", "dont_ask":
+		return "dontAsk"
 	case "yolo", "bypass", "dangerously-skip-permissions":
+		return "yolo"
+	case "bypasspermissions", "bypass-permissions", "bypass_permissions":
 		return "yolo"
 	default:
 		return "default"
@@ -154,6 +162,9 @@ func (a *Agent) GetMode() string {
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
 		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Standard permissions", DescZh: "标准权限模式"},
+		{Key: "acceptEdits", Name: "Accept Edits", NameZh: "接受编辑", Desc: "Auto-approve edit tools", DescZh: "自动允许编辑工具"},
+		{Key: "plan", Name: "Plan", NameZh: "规划模式", Desc: "Read-only planning mode", DescZh: "只读规划模式"},
+		{Key: "dontAsk", Name: "Don't Ask", NameZh: "不询问", Desc: "Skip prompts when possible", DescZh: "尽量跳过确认"},
 		{Key: "yolo", Name: "YOLO", NameZh: "全自动", Desc: "Skip all permission checks", DescZh: "跳过所有权限检查"},
 	}
 }

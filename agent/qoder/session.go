@@ -22,8 +22,8 @@ import (
 )
 
 // qoderSession manages a multi-turn Qoder conversation.
-// Each Send() spawns `qodercli -p <prompt> -f stream-json -q`.
-// Subsequent turns use `-r <sessionID>` to resume the conversation.
+// Each Send() spawns `qodercli --print --output-format stream-json <prompt>`.
+// Subsequent turns use `--resume <sessionID>` to resume the conversation.
 type qoderSession struct {
 	workDir   string
 	extraDirs []string
@@ -70,7 +70,7 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 		return fmt.Errorf("session is closed")
 	}
 
-	args := []string{"-p", prompt, "-f", "stream-json", "-q"}
+	args := []string{"--print", "--output-format", "stream-json"}
 	workDirKey := normalizedQoderWorkspacePath(qs.workDir)
 	seenDirs := make(map[string]struct{})
 	for _, dir := range qs.extraDirs {
@@ -91,16 +91,24 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 
 	sid := qs.CurrentSessionID()
 	if sid != "" {
-		args = append(args, "-r", sid)
+		args = append(args, "--resume", sid)
 	}
 
-	if qs.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+	switch qs.mode {
+	case "acceptEdits":
+		args = append(args, "--permission-mode", "accept_edits")
+	case "plan":
+		args = append(args, "--permission-mode", "plan")
+	case "dontAsk":
+		args = append(args, "--permission-mode", "dont_ask")
+	case "yolo":
+		args = append(args, "--permission-mode", "bypass_permissions")
 	}
 
 	if qs.model != "" {
 		args = append(args, "--model", qs.model)
 	}
+	args = append(args, prompt)
 
 	slog.Debug("qoderSession: launching", "resume", sid != "", "args_len", len(args))
 

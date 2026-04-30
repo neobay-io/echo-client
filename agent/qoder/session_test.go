@@ -85,8 +85,11 @@ done:
 			t.Fatalf("attachment path = %q, want saved path in work dir", attachment)
 		}
 	}
-	if got := args[1]; got != "Please analyze the attached file(s)." {
-		t.Fatalf("prompt = %q, want fallback attachment prompt", got)
+	if len(args) == 0 || args[len(args)-1] != "Please analyze the attached file(s)." {
+		t.Fatalf("args = %#v, want fallback prompt as final positional argument", args)
+	}
+	if len(args) < 3 || args[0] != "--print" || args[1] != "--output-format" || args[2] != "stream-json" {
+		t.Fatalf("args = %#v, want documented print/output-format prefix", args)
 	}
 }
 
@@ -290,5 +293,68 @@ done:
 	}
 	if modelIdx < 0 || modelIdx+1 >= len(args) || args[modelIdx+1] != "ultimate" {
 		t.Fatalf("args = %#v, want --model ultimate", args)
+	}
+}
+
+func TestSend_UsesDocumentedResumeAndPermissionModeSyntax(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	argsFile := filepath.Join(workDir, "args.txt")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$QODER_ARGS_FILE"
+echo '{"type":"result","session_id":"qoder-session-plan","done":true,"message":{"content":[{"type":"text","text":"ok"}]}}'
+`
+	scriptPath := filepath.Join(binDir, "qodercli")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake qodercli: %v", err)
+	}
+
+	t.Setenv("QODER_ARGS_FILE", argsFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	qs, err := newQoderSession(context.Background(), workDir, nil, "", "plan", "resume-1", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	if err := qs.Send("hello", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case evt := <-qs.Events():
+			if evt.Type == core.EventError {
+				t.Fatalf("unexpected error event: %v", evt.Error)
+			}
+			if evt.Type == core.EventResult && evt.Done {
+				goto done
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for result")
+		}
+	}
+
+done:
+	argsBytes, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile args: %v", err)
+	}
+	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
+	joined := strings.Join(args, "\n")
+	if !strings.Contains(joined, "--resume\nresume-1") {
+		t.Fatalf("args = %#v, want --resume resume-1", args)
+	}
+	if !strings.Contains(joined, "--permission-mode\nplan") {
+		t.Fatalf("args = %#v, want --permission-mode plan", args)
+	}
+	if args[len(args)-1] != "hello" {
+		t.Fatalf("args = %#v, want prompt as final positional argument", args)
 	}
 }
