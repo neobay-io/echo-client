@@ -230,13 +230,13 @@ type streamMessage struct {
 }
 
 type contentItem struct {
-	Type     string `json:"type"`
-	Text     string `json:"text"`
-	Name     string `json:"name"`
-	Input    string `json:"input"`
-	Reason   string `json:"reason"`
-	Content  string `json:"content"`
-	Finished bool   `json:"finished"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	Name     string          `json:"name"`
+	Input    json.RawMessage `json:"input"`
+	Reason   string          `json:"reason"`
+	Content  string          `json:"content"`
+	Finished bool            `json:"finished"`
 }
 
 // ── event handling ───────────────────────────────────────────
@@ -263,11 +263,6 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 		return
 	}
 
-	// Only process "finished" status to avoid duplicates from "tool_calling" status
-	if ev.Message.Status != "finished" {
-		return
-	}
-
 	var items []contentItem
 	if err := json.Unmarshal(ev.Message.Content, &items); err != nil {
 		return
@@ -276,6 +271,10 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 	for _, item := range items {
 		switch item.Type {
 		case "text":
+			// Only emit finalized text chunks to avoid duplicate partial assistant content.
+			if ev.Message.Status != "finished" {
+				continue
+			}
 			if item.Text != "" {
 				evt := core.Event{Type: core.EventText, Content: item.Text}
 				select {
@@ -285,7 +284,7 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 				}
 			}
 
-		case "function":
+		case "function", "tool_use":
 			inputPreview := extractToolPreview(item.Input)
 			evt := core.Event{Type: core.EventToolUse, ToolName: item.Name, ToolInput: inputPreview}
 			select {
@@ -360,24 +359,59 @@ func (qs *qoderSession) closeEvents() {
 // ── helpers ──────────────────────────────────────────────────
 
 // extractToolPreview parses the JSON input of a tool call and returns a short preview string.
-func extractToolPreview(inputJSON string) string {
+func extractToolPreview(inputJSON json.RawMessage) string {
+	inputJSON = bytes.TrimSpace(inputJSON)
+	if len(inputJSON) == 0 {
+		return ""
+	}
 	var m map[string]any
-	if err := json.Unmarshal([]byte(inputJSON), &m); err != nil {
-		return inputJSON
+	if err := json.Unmarshal(inputJSON, &m); err == nil {
+		if cmd, ok := m["command"].(string); ok {
+			return cmd
+		}
+		if file, ok := m["file_path"].(string); ok {
+			return file
+		}
+		if file, ok := m["filePath"].(string); ok {
+			return file
+		}
+		if pattern, ok := m["pattern"].(string); ok {
+			return pattern
+		}
+		if query, ok := m["query"].(string); ok {
+			return query
+		}
+		return string(inputJSON)
 	}
-	if cmd, ok := m["command"].(string); ok {
-		return cmd
+
+	var raw string
+	if err := json.Unmarshal(inputJSON, &raw); err == nil {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return ""
+		}
+
+		var inner map[string]any
+		if err := json.Unmarshal([]byte(raw), &inner); err == nil {
+			if cmd, ok := inner["command"].(string); ok {
+				return cmd
+			}
+			if file, ok := inner["file_path"].(string); ok {
+				return file
+			}
+			if file, ok := inner["filePath"].(string); ok {
+				return file
+			}
+			if pattern, ok := inner["pattern"].(string); ok {
+				return pattern
+			}
+			if query, ok := inner["query"].(string); ok {
+				return query
+			}
+		}
+		return raw
 	}
-	if file, ok := m["file_path"].(string); ok {
-		return file
-	}
-	if pattern, ok := m["pattern"].(string); ok {
-		return pattern
-	}
-	if query, ok := m["query"].(string); ok {
-		return query
-	}
-	return inputJSON
+	return string(inputJSON)
 }
 
 func collectQoderTextContent(items []contentItem) string {

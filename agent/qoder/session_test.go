@@ -499,3 +499,49 @@ func TestHandleResult_FallsBackWhenMessageHasNoTextItems(t *testing.T) {
 		t.Fatal("timed out waiting for result event")
 	}
 }
+
+func TestHandleAssistant_EmitsToolUseForToolUseItemsWithoutFinishedStatus(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	content, err := json.Marshal([]map[string]any{
+		{
+			"type":  "tool_use",
+			"name":  "Read",
+			"input": map[string]any{"file_path": "/tmp/demo/README.md"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	qs.handleEvent(&streamEvent{
+		Type:    "assistant",
+		Message: &streamMessage{Content: content},
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventToolUse {
+			t.Fatalf("event type = %v, want tool_use", evt.Type)
+		}
+		if evt.ToolName != "Read" {
+			t.Fatalf("tool name = %q, want %q", evt.ToolName, "Read")
+		}
+		if evt.ToolInput != "/tmp/demo/README.md" {
+			t.Fatalf("tool input = %q, want file path preview", evt.ToolInput)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tool_use event")
+	}
+}
+
+func TestExtractToolPreview_SupportsLegacyStringifiedJSON(t *testing.T) {
+	got := extractToolPreview(json.RawMessage(`"{\"command\":\"git status\"}"`))
+	if got != "git status" {
+		t.Fatalf("extractToolPreview = %q, want %q", got, "git status")
+	}
+}
