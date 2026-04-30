@@ -302,15 +302,11 @@ func (qs *qoderSession) handleResult(ev *streamEvent) {
 	if ev.Message != nil {
 		var items []contentItem
 		if err := json.Unmarshal(ev.Message.Content, &items); err == nil {
-			for _, item := range items {
-				if item.Type == "text" && item.Text != "" {
-					finalText = item.Text
-				}
-			}
+			finalText = collectQoderTextContent(items)
 		}
 	}
-	if finalText == "" {
-		finalText = strings.TrimSpace(ev.Result)
+	if strings.TrimSpace(finalText) == "" && strings.TrimSpace(ev.Result) != "" {
+		finalText = ev.Result
 	}
 
 	evt := core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}
@@ -382,6 +378,17 @@ func extractToolPreview(inputJSON string) string {
 		return query
 	}
 	return inputJSON
+}
+
+func collectQoderTextContent(items []contentItem) string {
+	var parts []string
+	for _, item := range items {
+		if item.Type != "text" || strings.TrimSpace(item.Text) == "" {
+			continue
+		}
+		parts = append(parts, item.Text)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func truncStr(s string, maxRunes int) string {

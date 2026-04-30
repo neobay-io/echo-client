@@ -431,3 +431,71 @@ func TestHandleResult_PrefersMessageContentOverTopLevelResult(t *testing.T) {
 		t.Fatal("timed out waiting for result event")
 	}
 }
+
+func TestHandleResult_ConcatenatesMultipleTextItems(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	content, err := json.Marshal([]contentItem{
+		{Type: "text", Text: "first block"},
+		{Type: "function", Name: "Read"},
+		{Type: "text", Text: "second block"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	qs.handleEvent(&streamEvent{
+		Type:      "result",
+		SessionID: "qoder-session-result",
+		Result:    "top-level result",
+		Message:   &streamMessage{Content: content},
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "first block\n\nsecond block" {
+			t.Fatalf("event content = %q, want concatenated text blocks", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result event")
+	}
+}
+
+func TestHandleResult_FallsBackWhenMessageHasNoTextItems(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	content, err := json.Marshal([]contentItem{{Type: "function", Name: "Read"}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	qs.handleEvent(&streamEvent{
+		Type:      "result",
+		SessionID: "qoder-session-result",
+		Result:    "fallback result text",
+		Message:   &streamMessage{Content: content},
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "fallback result text" {
+			t.Fatalf("event content = %q, want fallback top-level result", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result event")
+	}
+}
