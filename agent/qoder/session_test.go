@@ -2,6 +2,7 @@ package qoder
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -367,5 +368,66 @@ done:
 	}
 	if args[len(args)-1] != "hello" {
 		t.Fatalf("args = %#v, want prompt as final positional argument", args)
+	}
+}
+
+func TestHandleResult_UsesTopLevelResultFallback(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	qs.handleEvent(&streamEvent{
+		Type:      "result",
+		SessionID: "qoder-session-result",
+		Result:    "review output from result field",
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "review output from result field" {
+			t.Fatalf("event content = %q, want top-level result text", evt.Content)
+		}
+		if evt.SessionID != "qoder-session-result" {
+			t.Fatalf("event sessionID = %q, want %q", evt.SessionID, "qoder-session-result")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result event")
+	}
+}
+
+func TestHandleResult_PrefersMessageContentOverTopLevelResult(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	content, err := json.Marshal([]contentItem{{Type: "text", Text: "message content wins"}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	qs.handleEvent(&streamEvent{
+		Type:      "result",
+		SessionID: "qoder-session-result",
+		Result:    "top-level result",
+		Message:   &streamMessage{Content: content},
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "message content wins" {
+			t.Fatalf("event content = %q, want message content", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result event")
 	}
 }

@@ -218,6 +218,7 @@ type streamEvent struct {
 	Subtype   string         `json:"subtype"`
 	SessionID string         `json:"session_id"`
 	Done      bool           `json:"done"`
+	Result    string         `json:"result"`
 	Message   *streamMessage `json:"message"`
 }
 
@@ -307,6 +308,9 @@ func (qs *qoderSession) handleResult(ev *streamEvent) {
 				}
 			}
 		}
+	}
+	if finalText == "" {
+		finalText = strings.TrimSpace(ev.Result)
 	}
 
 	evt := core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}
