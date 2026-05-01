@@ -1104,7 +1104,7 @@ func (e *Engine) reviewerProjects() []string {
 	all := make([]string, 0, len(e.relayManager.engines))
 	reviewers := make([]string, 0, len(e.relayManager.engines))
 	for name, engine := range e.relayManager.engines {
-		if name == "" || name == e.name || engine == nil {
+		if name == "" || engine == nil {
 			continue
 		}
 		all = append(all, name)

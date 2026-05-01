@@ -1431,7 +1431,7 @@ func TestResultActionCardContainsReviewButton(t *testing.T) {
 	}
 }
 
-func TestReviewerSelectorCardExcludesCurrentProject(t *testing.T) {
+func TestReviewerSelectorCardIncludesCurrentProjectWhenNoReviewerRole(t *testing.T) {
 	rm := NewRelayManager("")
 	e := NewEngine("codex", &stubAgent{}, nil, "", LangEnglish)
 	other1 := NewEngine("qoder", &stubAgent{}, nil, "", LangEnglish)
@@ -1443,10 +1443,7 @@ func TestReviewerSelectorCardExcludesCurrentProject(t *testing.T) {
 
 	card := e.reviewerSelectorCard()
 	text := card.RenderText()
-	if strings.Contains(text, "codex") {
-		t.Fatalf("selector should exclude current project, got %q", text)
-	}
-	if !strings.Contains(text, "qoder") || !strings.Contains(text, "gemini") {
+	if !strings.Contains(text, "codex") || !strings.Contains(text, "qoder") || !strings.Contains(text, "gemini") {
 		t.Fatalf("selector missing reviewer projects: %q", text)
 	}
 }
@@ -1483,7 +1480,25 @@ func TestReviewerProjectsFallbackToAllOtherProjectsWhenNoReviewerRole(t *testing
 	origin.SetRelayManager(rm)
 
 	got := origin.reviewerProjects()
-	want := []string{"gemini", "qoder"}
+	want := []string{"codex", "gemini", "qoder"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reviewerProjects = %#v, want %#v", got, want)
+	}
+}
+
+func TestReviewerProjectsPreferReviewerRoleEvenWhenOriginProjectExists(t *testing.T) {
+	rm := NewRelayManager("")
+	origin := NewEngine("codex", &stubAgent{}, nil, "", LangEnglish)
+	plain := NewEngine("gemini", &stubAgent{}, nil, "", LangEnglish)
+	reviewer := NewEngine("qoder-reviewer", &stubAgent{}, nil, "", LangEnglish)
+	reviewer.SetRole("reviewer")
+	rm.RegisterEngine(origin.name, origin)
+	rm.RegisterEngine(plain.name, plain)
+	rm.RegisterEngine(reviewer.name, reviewer)
+	origin.SetRelayManager(rm)
+
+	got := origin.reviewerProjects()
+	want := []string{"qoder-reviewer"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("reviewerProjects = %#v, want %#v", got, want)
 	}
@@ -1583,6 +1598,38 @@ func TestStartReviewCycleRunsReviewerAndOriginRevision(t *testing.T) {
 	}
 	if flow.Running {
 		t.Fatal("expected flow to be marked not running after completion")
+	}
+}
+
+func TestStartReviewCycleAllowsCurrentProjectAsReviewerWhenNoReviewerRole(t *testing.T) {
+	rm := NewRelayManager("")
+	agent := &scriptedRecordingAgent{responses: []string{
+		"<review_packet><recommended_review_target>summary_only</recommended_review_target></review_packet>",
+		"self reviewer summary",
+		"self revised summary",
+	}}
+	platform := &stubCardPlatform{n: "feishu"}
+	origin := NewEngine("codex", agent, []Platform{platform}, "", LangEnglish)
+	rm.RegisterEngine(origin.name, origin)
+	origin.SetRelayManager(rm)
+
+	sessionKey := "feishu:chat:user"
+	originSession := origin.sessions.GetOrCreateActive(sessionKey)
+	originSession.AddHistory("assistant", "Original summary from codex.")
+
+	if err := origin.startReviewCycle(sessionKey, "codex"); err != nil {
+		t.Fatalf("startReviewCycle self-review: %v", err)
+	}
+
+	sends := agent.session.Sends()
+	if len(sends) != 3 {
+		t.Fatalf("send count = %d, want 3 (packet + review + revision)", len(sends))
+	}
+	if !strings.Contains(sends[1].prompt, "Reviewer: codex") || !strings.Contains(sends[1].prompt, "<review_packet>") {
+		t.Fatalf("review prompt = %q, want self review prompt", sends[1].prompt)
+	}
+	if !strings.Contains(sends[2].prompt, "Reviewer feedback from codex:") {
+		t.Fatalf("revision prompt = %q, want self reviewer label", sends[2].prompt)
 	}
 }
 
