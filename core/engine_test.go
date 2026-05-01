@@ -1442,9 +1442,25 @@ func TestReviewerSelectorCardIncludesCurrentProjectWhenNoReviewerRole(t *testing
 	e.SetRelayManager(rm)
 
 	card := e.reviewerSelectorCard()
-	text := card.RenderText()
-	if !strings.Contains(text, "codex") || !strings.Contains(text, "qoder") || !strings.Contains(text, "gemini") {
-		t.Fatalf("selector missing reviewer projects: %q", text)
+	if card == nil {
+		t.Fatal("expected selector card")
+	}
+
+	var labels []string
+	for _, el := range card.Elements {
+		actions, ok := el.(CardActions)
+		if !ok {
+			continue
+		}
+		for _, btn := range actions.Buttons {
+			labels = append(labels, btn.Text)
+		}
+	}
+
+	want := []string{"codex", "gemini", "qoder"}
+	slices.Sort(labels)
+	if !slices.Equal(labels, want) {
+		t.Fatalf("selector labels = %#v, want %#v", labels, want)
 	}
 }
 
@@ -1499,6 +1515,25 @@ func TestReviewerProjectsPreferReviewerRoleEvenWhenOriginProjectExists(t *testin
 
 	got := origin.reviewerProjects()
 	want := []string{"qoder-reviewer"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reviewerProjects = %#v, want %#v", got, want)
+	}
+}
+
+func TestReviewerProjectsIncludeOriginWhenOriginHasReviewerRole(t *testing.T) {
+	rm := NewRelayManager("")
+	origin := NewEngine("codex", &stubAgent{}, nil, "", LangEnglish)
+	origin.SetRole("reviewer")
+	otherReviewer := NewEngine("qoder-reviewer", &stubAgent{}, nil, "", LangEnglish)
+	otherReviewer.SetRole("reviewer")
+	plain := NewEngine("gemini", &stubAgent{}, nil, "", LangEnglish)
+	rm.RegisterEngine(origin.name, origin)
+	rm.RegisterEngine(otherReviewer.name, otherReviewer)
+	rm.RegisterEngine(plain.name, plain)
+	origin.SetRelayManager(rm)
+
+	got := origin.reviewerProjects()
+	want := []string{"codex", "qoder-reviewer"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("reviewerProjects = %#v, want %#v", got, want)
 	}
