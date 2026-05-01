@@ -5335,7 +5335,7 @@ func (e *Engine) renderLoopCard(sessionKey string, notice string) *Card {
 	}
 
 	cb.Divider()
-	cb.Note("Tip: turn Primitive On if you want the agent to be able to pause this loop by appending " + loopPausePrimitive + " to its reply.")
+	cb.Note("Primitive is on by default. The agent can pause this loop by appending " + loopPausePrimitive + " to its reply. Turn it off if you want only manual pause/delete.")
 	cb.ButtonsEqual(PrimaryBtn("New", "act:/loop new"), e.cardBackButton())
 	return cb.Build()
 }
@@ -5594,14 +5594,15 @@ func (e *Engine) buildLoopJobFromInput(sessionKey, input string) (*CronJob, erro
 		return nil, fmt.Errorf("prompt too long (max %d characters)", maxCronPromptLen)
 	}
 	return &CronJob{
-		ID:           GenerateCronID(),
-		Project:      e.name,
-		SessionKey:   sessionKey,
-		Kind:         "loop",
-		LoopInterval: normalized,
-		Prompt:       prompt,
-		Enabled:      true,
-		CreatedAt:    time.Now(),
+		ID:                 GenerateCronID(),
+		Project:            e.name,
+		SessionKey:         sessionKey,
+		Kind:               "loop",
+		LoopInterval:       normalized,
+		Prompt:             prompt,
+		Enabled:            true,
+		AutoPausePrimitive: true,
+		CreatedAt:          time.Now(),
 	}, nil
 }
 
@@ -5624,7 +5625,7 @@ func (e *Engine) cmdLoop(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 			return
 		}
-		notice := fmt.Sprintf("✅ Loop created\nID: `%s`\nSchedule: `%s`\nPrompt: `%s`", job.ID, job.LoopInterval, truncateStr(job.Prompt, 60))
+		notice := fmt.Sprintf("✅ Loop created\nID: `%s`\nSchedule: `%s`\nPrompt: `%s`\nPrimitive: on", job.ID, job.LoopInterval, truncateStr(job.Prompt, 60))
 		e.reply(p, msg.ReplyCtx, notice)
 		e.replyLoopCardIfSupported(p, msg, fmt.Sprintf("Created `%s`.", job.ID))
 		return

@@ -1161,6 +1161,9 @@ func TestHandlePendingLoopCreateAddsLoopJob(t *testing.T) {
 	if jobs[0].LoopInterval != "5m" || jobs[0].Prompt != "Summarize urgent PRs" {
 		t.Fatalf("loop job = %#v", jobs[0])
 	}
+	if !jobs[0].AutoPausePrimitive {
+		t.Fatalf("loop job = %#v, want AutoPausePrimitive enabled by default", jobs[0])
+	}
 	if e.hasPendingLoopCreate(sessionKey) {
 		t.Fatal("expected pending loop create to be cleared")
 	}
