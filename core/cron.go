@@ -108,6 +108,11 @@ func (j *CronJob) UsesNewSessionPerRun() bool {
 
 func validateCronJob(j *CronJob) error {
 	j.Kind = NormalizeCronJobKind(j.Kind)
+	switch j.Kind {
+	case "cron", "loop":
+	default:
+		return fmt.Errorf("invalid job kind %q", j.Kind)
+	}
 	mode := NormalizeCronSessionMode(j.SessionMode)
 	if mode != "" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
@@ -127,7 +132,6 @@ func validateCronJob(j *CronJob) error {
 		} else {
 			j.LoopInterval = normalized
 		}
-		return nil
 	}
 	return nil
 }
@@ -656,6 +660,8 @@ func truncateStr(s string, n int) string {
 	return s[:n] + "..."
 }
 
+const minLoopInterval = 5 * time.Second
+
 func ParseLoopIntervalSpec(spec string) (time.Duration, string, error) {
 	spec = strings.ToLower(strings.TrimSpace(spec))
 	if spec == "" {
@@ -682,6 +688,9 @@ func ParseLoopIntervalSpec(spec string) (time.Duration, string, error) {
 		d = time.Duration(value) * 24 * time.Hour
 	default:
 		return 0, "", fmt.Errorf("invalid loop interval unit %q (use s, m, h, or d)", string(unit))
+	}
+	if d < minLoopInterval {
+		return 0, "", fmt.Errorf("loop interval %q is too short (minimum %s)", spec, minLoopInterval)
 	}
 	return d, fmt.Sprintf("%d%c", value, unit), nil
 }
