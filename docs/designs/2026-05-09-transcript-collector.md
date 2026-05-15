@@ -605,4 +605,4 @@ This module closes that gap. Combined with the WebAgentSummary skill-push mechan
 ---
 
 *Created 2026-05-12. Owner: Edward + cc-connect maintainers. Implementation: Codex CLI.*
-*Companion: `neobay-io/echo/ECHO-V2-EXTENSION-DESIGN.md` §4.12 AgentSessionSummary.*
+*Companion: `neobay-io/echo/docs/designs/2026-05-09-echo-v2-extension.md` §4.12 AgentSessionSummary.*
