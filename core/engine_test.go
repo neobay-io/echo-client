@@ -138,6 +138,93 @@ func (s *failingSendSession) CurrentSessionID() string                          
 func (s *failingSendSession) Alive() bool                                          { return true }
 func (s *failingSendSession) Close() error                                         { return nil }
 
+type restartThenFailAgent struct {
+	mu     sync.Mutex
+	starts int
+}
+
+func (a *restartThenFailAgent) Name() string { return "restart-then-fail" }
+func (a *restartThenFailAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.starts++
+	if a.starts == 1 {
+		return &restartThenFailSession{err: fmt.Errorf("first send failed"), alive: false}, nil
+	}
+	return &restartThenFailSession{err: fmt.Errorf("retry send failed"), alive: true}, nil
+}
+func (a *restartThenFailAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *restartThenFailAgent) Stop() error { return nil }
+
+type restartThenFailSession struct {
+	err   error
+	alive bool
+}
+
+func (s *restartThenFailSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	return s.err
+}
+func (s *restartThenFailSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *restartThenFailSession) Events() <-chan Event                                 { return make(chan Event) }
+func (s *restartThenFailSession) CurrentSessionID() string                             { return "restart-then-fail" }
+func (s *restartThenFailSession) Alive() bool                                          { return s.alive }
+func (s *restartThenFailSession) Close() error                                         { return nil }
+
+type slowRecordingSendAgent struct {
+	delay   time.Duration
+	session *slowRecordingSendSession
+}
+
+func (a *slowRecordingSendAgent) Name() string { return "slow-recording-send" }
+func (a *slowRecordingSendAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.session == nil {
+		a.session = &slowRecordingSendSession{
+			delay:  a.delay,
+			events: make(chan Event, 8),
+		}
+	}
+	return a.session, nil
+}
+func (a *slowRecordingSendAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *slowRecordingSendAgent) Stop() error { return nil }
+
+type slowRecordingSendSession struct {
+	delay  time.Duration
+	mu     sync.Mutex
+	sends  []recordedSend
+	events chan Event
+}
+
+func (s *slowRecordingSendSession) Send(prompt string, images []ImageAttachment, files []FileAttachment) error {
+	time.Sleep(s.delay)
+	s.mu.Lock()
+	s.sends = append(s.sends, recordedSend{
+		prompt: prompt,
+		images: cloneImages(images),
+		files:  append([]FileAttachment(nil), files...),
+	})
+	s.mu.Unlock()
+	s.events <- Event{Type: EventText, Content: "ok"}
+	s.events <- Event{Type: EventResult, Done: true}
+	return nil
+}
+func (s *slowRecordingSendSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *slowRecordingSendSession) Events() <-chan Event                                 { return s.events }
+func (s *slowRecordingSendSession) CurrentSessionID() string                             { return "slow-recording-send" }
+func (s *slowRecordingSendSession) Alive() bool                                          { return true }
+func (s *slowRecordingSendSession) Close() error                                         { close(s.events); return nil }
+func (s *slowRecordingSendSession) Sends() []recordedSend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]recordedSend, len(s.sends))
+	copy(out, s.sends)
+	return out
+}
+
 type eventfulStubAgentSession struct {
 	events chan Event
 }
@@ -302,6 +389,18 @@ func waitForRecordedSends(t *testing.T, agent *recordingSendAgent, want int) []r
 	sends := agent.session.Sends()
 	t.Fatalf("send count = %d, want at least %d", len(sends), want)
 	return nil
+}
+
+func waitForCondition(t *testing.T, fn func() bool, desc string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", desc)
 }
 
 type scriptedRecordingSession struct {
@@ -2554,8 +2653,8 @@ func TestHandleMessage_CollectDeferredSendKeepsAwaitingInstructionWhenSessionBus
 	if !e.isPendingCollectionAwaitingInstruction("test:user1") {
 		t.Fatal("expected final instruction to remain pending after busy flush")
 	}
-	if agent.session != nil && len(agent.session.Sends()) != 0 {
-		t.Fatalf("expected no agent send while session is busy")
+	if agent.session != nil {
+		t.Fatalf("expected no agent session to start while session is busy, got %#v", agent.session.Sends())
 	}
 
 	session.Unlock()
@@ -2733,13 +2832,141 @@ func TestHandleMessage_CollectSendFailureKeepsBatch(t *testing.T) {
 	if batch := e.getPendingCollection("test:user1"); batch == nil || len(batch.Items) != 1 {
 		t.Fatalf("expected batch to survive send failure, got %#v", batch)
 	}
+	waitForCondition(t, func() bool {
+		for _, sent := range p.sent {
+			if strings.Contains(sent, "send failed") {
+				return true
+			}
+		}
+		return false
+	}, "collection send failure reply")
 	session := e.sessions.GetOrCreateActive("test:user1")
 	if session.HistoryLen() != 0 {
 		t.Fatalf("expected failed send not to append user history, got len=%d", session.HistoryLen())
 	}
-	if got := p.sent[len(p.sent)-1]; !strings.Contains(got, "send failed") {
-		t.Fatalf("expected send failure reply, got %q", got)
+}
+
+func TestHandleMessage_SendFailureStillPreservesHistoryOutsideCollection(t *testing.T) {
+	agent := &failingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "normal message",
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool { return len(p.sent) > 0 }, "normal send failure reply")
+	session := e.sessions.GetOrCreateActive("test:user1")
+	if session.HistoryLen() != 1 {
+		t.Fatalf("expected failed normal send to remain in history, got len=%d", session.HistoryLen())
 	}
+	if got := session.GetHistory(1)[0].Content; got != "normal message" {
+		t.Fatalf("history content = %q, want original message", got)
+	}
+}
+
+func TestHandleMessage_CollectSendDoesNotBlockCallerOnSlowSend(t *testing.T) {
+	agent := &slowRecordingSendAgent{delay: 200 * time.Millisecond}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+
+	start := time.Now()
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/collect send summarize this",
+		ReplyCtx:   "ctx",
+	})
+	if elapsed := time.Since(start); elapsed >= 100*time.Millisecond {
+		t.Fatalf("expected async flush to return quickly, took %v", elapsed)
+	}
+
+	waitForCondition(t, func() bool {
+		return agent.session != nil && len(agent.session.Sends()) == 1
+	}, "slow collection flush send")
+	if e.getPendingCollection("test:user1") != nil {
+		waitForCondition(t, func() bool { return e.getPendingCollection("test:user1") == nil }, "collection clear after slow send")
+	}
+}
+
+func TestHandleMessage_CollectRestartThenFailKeepsBatch(t *testing.T) {
+	agent := &restartThenFailAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/collect send summarize this",
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool {
+		for _, sent := range p.sent {
+			if strings.Contains(sent, "retry send failed") {
+				return true
+			}
+		}
+		return false
+	}, "restart-then-fail error reply")
+
+	batch := e.getPendingCollection("test:user1")
+	if batch == nil || len(batch.Items) != 1 {
+		t.Fatalf("expected batch to survive restart-then-fail path, got %#v", batch)
+	}
+	if batch.Flushing {
+		t.Fatalf("expected flushing flag to be cleared after retry failure, got %#v", batch)
+	}
+	session := e.sessions.GetOrCreateActive("test:user1")
+	if !session.TryLock() {
+		t.Fatal("expected session lock to be released after retry failure")
+	}
+	session.Unlock()
 }
 
 func TestBuildCollectedPrompt_IncludesAttachmentReferencesPerItem(t *testing.T) {
@@ -2760,7 +2987,7 @@ func TestBuildCollectedPrompt_IncludesAttachmentReferencesPerItem(t *testing.T) 
 		},
 	}
 
-	got := buildCollectedPrompt(batch, "summarize these")
+	got := buildCollectedPrompt(batch, "summarize these", nil, nil)
 	if !strings.Contains(got, "Image refs: image #1 (shot.png)") {
 		t.Fatalf("prompt missing first image ref: %q", got)
 	}
@@ -2772,6 +2999,34 @@ func TestBuildCollectedPrompt_IncludesAttachmentReferencesPerItem(t *testing.T) 
 	}
 	if !strings.Contains(got, "Message:\n[no text content]") {
 		t.Fatalf("prompt should preserve attachment-only item: %q", got)
+	}
+}
+
+func TestBuildCollectedPrompt_LabelsFinalInstructionAttachments(t *testing.T) {
+	batch := &pendingCollectedBatch{
+		Items: []collectedItem{
+			{
+				Message:    collectedMessageSnapshot{Content: "first item"},
+				ImageRefs:  []collectedAttachmentRef{{FileName: "buffered.png"}},
+				ImageCount: 1,
+			},
+		},
+	}
+
+	got := buildCollectedPrompt(
+		batch,
+		"summarize these",
+		[]collectedAttachmentRef{{FileName: "flush-image.png"}},
+		[]collectedAttachmentRef{{FileName: "flush-note.txt"}},
+	)
+	if !strings.Contains(got, "Final instruction attachments") {
+		t.Fatalf("prompt missing final instruction attachment section: %q", got)
+	}
+	if !strings.Contains(got, "Image refs: image #2 (flush-image.png)") {
+		t.Fatalf("prompt missing flush image ref mapping: %q", got)
+	}
+	if !strings.Contains(got, "File refs: file #1 (flush-note.txt)") {
+		t.Fatalf("prompt missing flush file ref mapping: %q", got)
 	}
 }
 

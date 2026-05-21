@@ -21,6 +21,8 @@ type pendingCollectedBatch struct {
 	Images              []ImageAttachment
 	Files               []FileAttachment
 	AwaitingInstruction bool
+	PendingInstruction  string
+	Flushing            bool
 }
 
 type collectedAttachmentRef struct {
@@ -116,6 +118,8 @@ func clonePendingCollection(batch *pendingCollectedBatch) *pendingCollectedBatch
 		Images:              cloneImages(batch.Images),
 		Files:               cloneFiles(batch.Files),
 		AwaitingInstruction: batch.AwaitingInstruction,
+		PendingInstruction:  batch.PendingInstruction,
+		Flushing:            batch.Flushing,
 	}
 }
 
@@ -178,6 +182,9 @@ func (e *Engine) setPendingCollectionAwaitingInstruction(sessionKey string, awai
 		return false
 	}
 	batch.AwaitingInstruction = awaiting
+	if awaiting {
+		batch.PendingInstruction = ""
+	}
 	batch.UpdatedAt = time.Now()
 	return true
 }
@@ -187,6 +194,13 @@ func (e *Engine) isPendingCollectionAwaitingInstruction(sessionKey string) bool 
 	defer e.collectMu.Unlock()
 	batch := e.pendingCollect[sessionKey]
 	return batch != nil && batch.AwaitingInstruction
+}
+
+func (e *Engine) isPendingCollectionFlushing(sessionKey string) bool {
+	e.collectMu.Lock()
+	defer e.collectMu.Unlock()
+	batch := e.pendingCollect[sessionKey]
+	return batch != nil && batch.Flushing
 }
 
 func (e *Engine) collectedItemCount(sessionKey string) int {
@@ -224,6 +238,7 @@ func (e *Engine) absorbPendingAttachmentsIntoCollection(sessionKey string) {
 	}
 	batch.Images = append(batch.Images, cloneImages(pending.Images)...)
 	batch.Files = append(batch.Files, cloneFiles(pending.Files)...)
+	batch.PendingInstruction = ""
 	batch.UpdatedAt = now
 }
 
@@ -267,7 +282,33 @@ func (e *Engine) bufferPendingCollection(msg *Message) (int, bool) {
 	batch.Files = append(batch.Files, cloneFiles(msg.Files)...)
 	batch.UpdatedAt = now
 	batch.AwaitingInstruction = false
+	batch.PendingInstruction = ""
 	return len(batch.Items), false
+}
+
+func (e *Engine) beginPendingCollectionFlush(sessionKey, instruction string) (*pendingCollectedBatch, bool) {
+	e.collectMu.Lock()
+	defer e.collectMu.Unlock()
+	batch := e.pendingCollect[sessionKey]
+	if batch == nil || batch.Flushing {
+		return nil, false
+	}
+	batch.Flushing = true
+	batch.AwaitingInstruction = false
+	batch.PendingInstruction = instruction
+	batch.UpdatedAt = time.Now()
+	return clonePendingCollection(batch), true
+}
+
+func (e *Engine) failPendingCollectionFlush(sessionKey string) {
+	e.collectMu.Lock()
+	defer e.collectMu.Unlock()
+	batch := e.pendingCollect[sessionKey]
+	if batch == nil {
+		return
+	}
+	batch.Flushing = false
+	batch.UpdatedAt = time.Now()
 }
 
 func (e *Engine) maybeAcknowledgeCollectedItem(p Platform, replyCtx any, count int) {
@@ -305,6 +346,7 @@ func (e *Engine) buildPendingCollectionStatus(batch *pendingCollectedBatch) stri
 		batch.CreatedAt.Format(time.RFC3339),
 		batch.ExpiresAt.Format(time.RFC3339),
 		boolWord(batch.AwaitingInstruction),
+		boolWord(batch.Flushing),
 	)
 }
 
@@ -315,14 +357,14 @@ func boolWord(v bool) string {
 	return "no"
 }
 
-func buildCollectedPrompt(batch *pendingCollectedBatch, instruction string) string {
+func buildCollectedPrompt(batch *pendingCollectedBatch, instruction string, finalImageRefs, finalFileRefs []collectedAttachmentRef) string {
 	var b strings.Builder
 	imageOrdinal := 1
 	fileOrdinal := 1
 
 	instruction = strings.TrimSpace(instruction)
 	fmt.Fprintf(&b, "The user buffered the following messages before asking for help. Treat each item as separate source material, not as one continuous chat transcript.\n\nFinal instruction:\n%s\n\nCollected items: %d", instruction, len(batch.Items))
-	if totalAttachments := len(batch.Images) + len(batch.Files); totalAttachments > 0 {
+	if totalAttachments := len(batch.Images) + len(batch.Files) + len(finalImageRefs) + len(finalFileRefs); totalAttachments > 0 {
 		fmt.Fprintf(&b, "\nAttached files included with this turn: %d", totalAttachments)
 	}
 
@@ -379,6 +421,16 @@ func buildCollectedPrompt(batch *pendingCollectedBatch, instruction string) stri
 			b.WriteString("Message:\n[no text content]\n")
 		} else {
 			fmt.Fprintf(&b, "Message:\n%s\n", content)
+		}
+	}
+
+	if len(finalImageRefs) > 0 || len(finalFileRefs) > 0 {
+		b.WriteString("\nFinal instruction attachments\n")
+		if len(finalImageRefs) > 0 {
+			fmt.Fprintf(&b, "Image refs: %s\n", renderCollectedAttachmentRefs("image", imageOrdinal, finalImageRefs))
+		}
+		if len(finalFileRefs) > 0 {
+			fmt.Fprintf(&b, "File refs: %s\n", renderCollectedAttachmentRefs("file", fileOrdinal, finalFileRefs))
 		}
 	}
 
@@ -455,22 +507,32 @@ func (e *Engine) flushPendingCollection(p Platform, msg *Message, instruction st
 		return true
 	}
 
+	batch, ok := e.beginPendingCollectionFlush(msg.SessionKey, instruction)
+	if !ok {
+		session.Unlock()
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectFlushing))
+		return true
+	}
+
 	synthesized := &Message{
 		SessionKey: msg.SessionKey,
 		Platform:   msg.Platform,
 		MessageID:  msg.MessageID,
 		UserID:     msg.UserID,
 		UserName:   msg.UserName,
-		Content:    buildCollectedPrompt(batch, instruction),
+		Content:    buildCollectedPrompt(batch, instruction, collectedImageRefs(msg.Images), collectedFileRefs(msg.Files)),
 		Images:     append(cloneImages(batch.Images), cloneImages(msg.Images)...),
 		Files:      append(cloneFiles(batch.Files), cloneFiles(msg.Files)...),
 		ReplyCtx:   msg.ReplyCtx,
 	}
 
-	if err := e.processInteractiveMessageAsync(p, synthesized, session); err != nil {
-		return true
-	}
-	e.clearPendingCollection(msg.SessionKey)
+	e.processInteractiveMessageAsync(p, synthesized, session, func(err error) {
+		if err != nil {
+			e.failPendingCollectionFlush(msg.SessionKey)
+			return
+		}
+		e.clearPendingCollection(msg.SessionKey)
+	})
 	return true
 }
 
@@ -484,6 +546,10 @@ func (e *Engine) cmdCollect(p Platform, msg *Message, args []string) {
 	switch sub {
 	case "start":
 		if batch := e.getPendingCollection(msg.SessionKey); batch != nil {
+			if batch.Flushing {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectFlushing))
+				return
+			}
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCollectAlreadyActive, len(batch.Items)))
 			return
 		}
@@ -493,17 +559,29 @@ func (e *Engine) cmdCollect(p Platform, msg *Message, args []string) {
 	case "status":
 		e.reply(p, msg.ReplyCtx, e.buildPendingCollectionStatus(e.getPendingCollection(msg.SessionKey)))
 	case "cancel":
+		if e.isPendingCollectionFlushing(msg.SessionKey) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectFlushing))
+			return
+		}
 		if !e.clearPendingCollection(msg.SessionKey) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectInactive))
 			return
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectCanceled))
 	case "send":
+		if e.isPendingCollectionFlushing(msg.SessionKey) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectFlushing))
+			return
+		}
 		if e.collectedItemCount(msg.SessionKey) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectEmpty))
 			return
 		}
 		if len(args) == 1 {
+			if batch := e.getPendingCollection(msg.SessionKey); batch != nil && strings.TrimSpace(batch.PendingInstruction) != "" && !batch.AwaitingInstruction {
+				e.flushPendingCollection(p, msg, batch.PendingInstruction)
+				return
+			}
 			e.setPendingCollectionAwaitingInstruction(msg.SessionKey, true)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectInstructionPrompt))
 			return
