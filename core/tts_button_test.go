@@ -68,6 +68,44 @@ func TestFinalReplyOffersReadAloudButton(t *testing.T) {
 	}
 }
 
+func TestFinalReplyAttachesActionButtonsToLatestMessageWhenSupported(t *testing.T) {
+	p := &stubAttachButtonsPlatform{stubButtonPlatform: stubButtonPlatform{n: "test"}}
+	session := newVoiceTestSession()
+	e := NewEngine("test", &voiceTestAgent{session: session}, []Platform{p}, "", LangEnglish)
+	e.SetTTSConfig(&TTSCfg{
+		Enabled:         true,
+		TTS:             &stubTTS{audio: []byte("audio"), format: "mp3"},
+		OfferReadButton: true,
+	})
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		ReplyCtx:   "ctx",
+		Content:    "summarize this",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(p.attachedButtonDataSnapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if sent := p.sentSnapshot(); len(sent) != 1 || sent[0] != "done" {
+		t.Fatalf("expected only final reply message, got %#v", sent)
+	}
+	buttonData := p.attachedButtonDataSnapshot()
+	if len(buttonData) != 2 || buttonData[0] != "tts:read_last" || buttonData[1] != "act:/review open" {
+		t.Fatalf("expected attached read/review buttons, got %#v", buttonData)
+	}
+	buttonTexts := p.attachedButtonTextsSnapshot()
+	if len(buttonTexts) != 2 || buttonTexts[0] != "Read Aloud" || buttonTexts[1] != "Review" {
+		t.Fatalf("expected attached read/review labels, got %#v", buttonTexts)
+	}
+	if len(p.buttonDataSnapshot()) != 0 {
+		t.Fatalf("expected no standalone action-card send, got %#v", p.buttonDataSnapshot())
+	}
+}
+
 func TestReadAloudRequestSynthesizesLatestAssistantReply(t *testing.T) {
 	p := &stubButtonPlatform{n: "test"}
 	tts := &stubTTS{audio: []byte("audio"), format: "mp3"}

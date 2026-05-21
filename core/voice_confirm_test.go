@@ -107,6 +107,36 @@ func (p *stubButtonPlatform) audioFormatSnapshot() []string {
 	return append([]string(nil), p.audioFormat...)
 }
 
+type stubAttachButtonsPlatform struct {
+	stubButtonPlatform
+	attachedButtonTexts []string
+	attachedButtonData  []string
+}
+
+func (p *stubAttachButtonsPlatform) AttachButtonsToLatest(_ context.Context, _ any, buttons [][]ButtonOption) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, row := range buttons {
+		for _, btn := range row {
+			p.attachedButtonTexts = append(p.attachedButtonTexts, btn.Text)
+			p.attachedButtonData = append(p.attachedButtonData, btn.Data)
+		}
+	}
+	return nil
+}
+
+func (p *stubAttachButtonsPlatform) attachedButtonDataSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.attachedButtonData...)
+}
+
+func (p *stubAttachButtonsPlatform) attachedButtonTextsSnapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.attachedButtonTexts...)
+}
+
 type voiceTestAgent struct {
 	session *voiceTestSession
 }

@@ -2562,6 +2562,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(displayResponse))
 			}
 
+			attachedResultActions := false
+			if displayResponse != "" {
+				attachedResultActions = e.attachResultActionButtons(p, replyCtx)
+			}
+
 			if prompt != nil {
 				followUp := prompt.Description
 				if strings.TrimSpace(followUp) == "" {
@@ -2570,7 +2575,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.replyWithInteraction(sessionKey, p, replyCtx, followUp, prompt.Choices, false)
 			}
 
-			if displayResponse != "" {
+			if displayResponse != "" && !attachedResultActions {
 				e.offerResultActionCard(p, replyCtx, displayResponse)
 			}
 
@@ -6944,6 +6949,13 @@ func (e *Engine) resultActionCard() *Card {
 		Build()
 }
 
+func (e *Engine) resultActionButtons() [][]ButtonOption {
+	return [][]ButtonOption{{
+		{Text: e.i18n.T(MsgTTSReadButton), Data: "tts:read_last"},
+		{Text: e.i18n.T(MsgReviewButton), Data: "act:/review open"},
+	}}
+}
+
 func (e *Engine) reviewerSelectorCard() *Card {
 	reviewers := e.reviewerProjects()
 	cb := NewCard().
@@ -6964,6 +6976,21 @@ func (e *Engine) reviewerSelectorCard() *Card {
 		cb.ButtonsEqual(buttons[i:end]...)
 	}
 	return cb.Build()
+}
+
+func (e *Engine) attachResultActionButtons(p Platform, replyCtx any) bool {
+	if p == nil {
+		return false
+	}
+	attacher, ok := p.(LatestMessageButtonAttacher)
+	if !ok {
+		return false
+	}
+	if err := attacher.AttachButtonsToLatest(e.ctx, replyCtx, e.resultActionButtons()); err != nil {
+		slog.Warn("attach result action buttons failed", "platform", p.Name(), "error", err)
+		return false
+	}
+	return true
 }
 
 func (e *Engine) offerResultActionCard(p Platform, replyCtx any, text string) {

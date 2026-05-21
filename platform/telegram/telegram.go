@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -41,6 +42,8 @@ type Platform struct {
 	httpClient            *http.Client
 	handler               core.MessageHandler
 	cancel                context.CancelFunc
+	lastSentMu            sync.Mutex
+	lastSentMessageIDs    map[int64]int
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -72,6 +75,28 @@ func New(opts map[string]any) (core.Platform, error) {
 }
 
 func (p *Platform) Name() string { return "telegram" }
+
+func (p *Platform) rememberSentMessage(chatID int64, messageID int) {
+	if messageID == 0 {
+		return
+	}
+	p.lastSentMu.Lock()
+	defer p.lastSentMu.Unlock()
+	if p.lastSentMessageIDs == nil {
+		p.lastSentMessageIDs = make(map[int64]int)
+	}
+	p.lastSentMessageIDs[chatID] = messageID
+}
+
+func (p *Platform) latestSentMessage(chatID int64) (int, bool) {
+	p.lastSentMu.Lock()
+	defer p.lastSentMu.Unlock()
+	if p.lastSentMessageIDs == nil {
+		return 0, false
+	}
+	messageID, ok := p.lastSentMessageIDs[chatID]
+	return messageID, ok
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
@@ -628,16 +653,18 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	reply.ReplyToMessageID = rc.messageID
 	reply.ParseMode = tgbotapi.ModeHTML
 
-	if _, err := p.bot.Send(reply); err != nil {
+	sent, err := p.bot.Send(reply)
+	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
 			reply.Text = content
 			reply.ParseMode = ""
-			_, err = p.bot.Send(reply)
+			sent, err = p.bot.Send(reply)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
 		}
 	}
+	p.rememberSentMessage(rc.chatID, sent.MessageID)
 	return nil
 }
 
@@ -652,16 +679,18 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	msg := tgbotapi.NewMessage(rc.chatID, html)
 	msg.ParseMode = tgbotapi.ModeHTML
 
-	if _, err := p.bot.Send(msg); err != nil {
+	sent, err := p.bot.Send(msg)
+	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
 			msg.Text = content
 			msg.ParseMode = ""
-			_, err = p.bot.Send(msg)
+			sent, err = p.bot.Send(msg)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
 		}
 	}
+	p.rememberSentMessage(rc.chatID, sent.MessageID)
 	return nil
 }
 
@@ -686,16 +715,52 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
 
-	if _, err := p.bot.Send(msg); err != nil {
+	sent, err := p.bot.Send(msg)
+	if err != nil {
 		if strings.Contains(err.Error(), "can't parse") {
 			msg.Text = content
 			msg.ParseMode = ""
-			_, err = p.bot.Send(msg)
+			sent, err = p.bot.Send(msg)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: sendWithButtons: %w", err)
 		}
 	}
+	p.rememberSentMessage(rc.chatID, sent.MessageID)
+	return nil
+}
+
+func (p *Platform) AttachButtonsToLatest(ctx context.Context, rctx any, buttons [][]core.ButtonOption) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
+	}
+
+	messageID, ok := p.latestSentMessage(rc.chatID)
+	if !ok {
+		return fmt.Errorf("telegram: no recent outbound message for chat %d", rc.chatID)
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, row := range buttons {
+		if len(row) == 0 {
+			continue
+		}
+		btns := make([]tgbotapi.InlineKeyboardButton, 0, len(row))
+		for _, b := range row {
+			btns = append(btns, tgbotapi.NewInlineKeyboardButtonData(b.Text, b.Data))
+		}
+		rows = append(rows, btns)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	edit := tgbotapi.NewEditMessageReplyMarkup(rc.chatID, messageID, tgbotapi.NewInlineKeyboardMarkup(rows...))
+	if _, err := p.bot.Request(edit); err != nil {
+		return fmt.Errorf("telegram: attach buttons to latest: %w", err)
+	}
+	p.rememberSentMessage(rc.chatID, messageID)
 	return nil
 }
 
@@ -794,6 +859,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if err != nil {
 		return nil, fmt.Errorf("telegram: send preview: %w", err)
 	}
+	p.rememberSentMessage(rc.chatID, sent.MessageID)
 	return &telegramPreviewHandle{chatID: rc.chatID, messageID: sent.MessageID}, nil
 }
 
@@ -829,10 +895,12 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 				}
 				return fmt.Errorf("telegram: edit message: %w", err2)
 			}
+			p.rememberSentMessage(h.chatID, h.messageID)
 			return nil
 		}
 		return fmt.Errorf("telegram: edit message: %w", err)
 	}
+	p.rememberSentMessage(h.chatID, h.messageID)
 	slog.Debug("telegram: UpdateMessage HTML success")
 	return nil
 }

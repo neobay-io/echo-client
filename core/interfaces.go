@@ -176,6 +176,13 @@ type InlineButtonSender interface {
 	SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]ButtonOption) error
 }
 
+// LatestMessageButtonAttacher is an optional interface for platforms that can
+// attach clickable buttons onto the most recent outbound bot message instead
+// of sending a separate prompt/card message.
+type LatestMessageButtonAttacher interface {
+	AttachButtonsToLatest(ctx context.Context, replyCtx any, buttons [][]ButtonOption) error
+}
+
 // CardSender is an optional interface for platforms that support sending
 // structured rich cards. Platforms that do not implement this interface will
 // receive a plain-text or inline-button fallback via Card.RenderText.
