@@ -23,6 +23,7 @@ type pendingCollectedBatch struct {
 	AwaitingInstruction bool
 	PendingInstruction  string
 	Flushing            bool
+	RetryAsPlainText    bool
 }
 
 type collectedAttachmentRef struct {
@@ -120,13 +121,14 @@ func clonePendingCollection(batch *pendingCollectedBatch) *pendingCollectedBatch
 		AwaitingInstruction: batch.AwaitingInstruction,
 		PendingInstruction:  batch.PendingInstruction,
 		Flushing:            batch.Flushing,
+		RetryAsPlainText:    batch.RetryAsPlainText,
 	}
 }
 
 func (e *Engine) expirePendingCollectionIfNeeded(p Platform, msg *Message, now time.Time) {
 	e.collectMu.Lock()
 	batch := e.pendingCollect[msg.SessionKey]
-	if batch == nil || (!batch.ExpiresAt.IsZero() && batch.ExpiresAt.After(now)) {
+	if batch == nil || batch.Flushing || (!batch.ExpiresAt.IsZero() && batch.ExpiresAt.After(now)) {
 		e.collectMu.Unlock()
 		return
 	}
@@ -184,6 +186,7 @@ func (e *Engine) setPendingCollectionAwaitingInstruction(sessionKey string, awai
 	batch.AwaitingInstruction = awaiting
 	if awaiting {
 		batch.PendingInstruction = ""
+		batch.RetryAsPlainText = false
 	}
 	batch.UpdatedAt = time.Now()
 	return true
@@ -240,6 +243,7 @@ func (e *Engine) absorbPendingAttachmentsIntoCollection(sessionKey string) {
 	batch.Files = append(batch.Files, cloneFiles(pending.Files)...)
 	batch.PendingInstruction = ""
 	batch.UpdatedAt = now
+	batch.RetryAsPlainText = false
 }
 
 func (e *Engine) bufferPendingCollection(msg *Message) (int, bool) {
@@ -283,6 +287,7 @@ func (e *Engine) bufferPendingCollection(msg *Message) (int, bool) {
 	batch.UpdatedAt = now
 	batch.AwaitingInstruction = false
 	batch.PendingInstruction = ""
+	batch.RetryAsPlainText = false
 	return len(batch.Items), false
 }
 
@@ -294,6 +299,7 @@ func (e *Engine) beginPendingCollectionFlush(sessionKey, instruction string) (*p
 		return nil, false
 	}
 	batch.Flushing = true
+	batch.RetryAsPlainText = batch.AwaitingInstruction
 	batch.AwaitingInstruction = false
 	batch.PendingInstruction = instruction
 	batch.UpdatedAt = time.Now()
@@ -308,6 +314,8 @@ func (e *Engine) failPendingCollectionFlush(sessionKey string) {
 		return
 	}
 	batch.Flushing = false
+	batch.AwaitingInstruction = batch.RetryAsPlainText && strings.TrimSpace(batch.PendingInstruction) != ""
+	batch.RetryAsPlainText = false
 	batch.UpdatedAt = time.Now()
 }
 
@@ -578,7 +586,8 @@ func (e *Engine) cmdCollect(p Platform, msg *Message, args []string) {
 			return
 		}
 		if len(args) == 1 {
-			if batch := e.getPendingCollection(msg.SessionKey); batch != nil && strings.TrimSpace(batch.PendingInstruction) != "" && !batch.AwaitingInstruction {
+			if batch := e.getPendingCollection(msg.SessionKey); batch != nil && strings.TrimSpace(batch.PendingInstruction) != "" {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectRetrying))
 				e.flushPendingCollection(p, msg, batch.PendingInstruction)
 				return
 			}

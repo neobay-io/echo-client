@@ -138,6 +138,62 @@ func (s *failingSendSession) CurrentSessionID() string                          
 func (s *failingSendSession) Alive() bool                                          { return true }
 func (s *failingSendSession) Close() error                                         { return nil }
 
+type failOnceRecordingAgent struct {
+	session *failOnceRecordingSession
+}
+
+func (a *failOnceRecordingAgent) Name() string { return "fail-once-recording" }
+func (a *failOnceRecordingAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.session == nil {
+		a.session = &failOnceRecordingSession{
+			events: make(chan Event, 16),
+			err:    fmt.Errorf("temporary send failure"),
+		}
+	}
+	return a.session, nil
+}
+func (a *failOnceRecordingAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *failOnceRecordingAgent) Stop() error { return nil }
+
+type failOnceRecordingSession struct {
+	mu        sync.Mutex
+	failCount int
+	err       error
+	sends     []recordedSend
+	events    chan Event
+}
+
+func (s *failOnceRecordingSession) Send(prompt string, images []ImageAttachment, files []FileAttachment) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failCount == 0 {
+		s.failCount++
+		return s.err
+	}
+	s.sends = append(s.sends, recordedSend{
+		prompt: prompt,
+		images: cloneImages(images),
+		files:  append([]FileAttachment(nil), files...),
+	})
+	s.events <- Event{Type: EventText, Content: "ok"}
+	s.events <- Event{Type: EventResult, Done: true}
+	return nil
+}
+func (s *failOnceRecordingSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *failOnceRecordingSession) Events() <-chan Event                                 { return s.events }
+func (s *failOnceRecordingSession) CurrentSessionID() string                             { return "fail-once-recording" }
+func (s *failOnceRecordingSession) Alive() bool                                          { return true }
+func (s *failOnceRecordingSession) Close() error                                         { close(s.events); return nil }
+func (s *failOnceRecordingSession) Sends() []recordedSend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]recordedSend, len(s.sends))
+	copy(out, s.sends)
+	return out
+}
+
 type restartThenFailAgent struct {
 	mu     sync.Mutex
 	starts int
@@ -2967,6 +3023,173 @@ func TestHandleMessage_CollectRestartThenFailKeepsBatch(t *testing.T) {
 		t.Fatal("expected session lock to be released after retry failure")
 	}
 	session.Unlock()
+}
+
+func TestHandleMessage_CollectDeferredPlainTextRetryAfterFailure(t *testing.T) {
+	agent := &failOnceRecordingAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		Content:    "/collect send",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "draft a short reply",
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool {
+		for _, sent := range p.sent {
+			if strings.Contains(sent, "temporary send failure") {
+				return true
+			}
+		}
+		return false
+	}, "deferred send failure reply")
+
+	batch := e.getPendingCollection("test:user1")
+	if batch == nil || !batch.AwaitingInstruction || strings.TrimSpace(batch.PendingInstruction) != "draft a short reply" {
+		t.Fatalf("expected failed deferred flush to keep awaiting state, got %#v", batch)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-3",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "draft a short reply",
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool {
+		return agent.session != nil && len(agent.session.Sends()) == 1
+	}, "deferred plain-text retry send")
+	sends := agent.session.Sends()
+	if !strings.Contains(sends[0].prompt, "Final instruction:\ndraft a short reply") {
+		t.Fatalf("prompt missing retried instruction: %q", sends[0].prompt)
+	}
+}
+
+func TestHandleMessage_CollectCommandRetryAnnouncesReuse(t *testing.T) {
+	agent := &failOnceRecordingAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/collect send summarize this",
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool {
+		for _, sent := range p.sent {
+			if strings.Contains(sent, "temporary send failure") {
+				return true
+			}
+		}
+		return false
+	}, "inline send failure reply")
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-3",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/collect send",
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool {
+		for _, sent := range p.sent {
+			if strings.Contains(sent, "Retrying the previous final instruction.") {
+				return true
+			}
+		}
+		return false
+	}, "retrying guidance")
+	waitForCondition(t, func() bool {
+		return agent.session != nil && len(agent.session.Sends()) == 1
+	}, "command retry send")
+}
+
+func TestHandleMessage_CollectDoesNotExpireWhileFlushing(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+
+	e.collectMu.Lock()
+	e.pendingCollect["test:user1"].Flushing = true
+	e.pendingCollect["test:user1"].ExpiresAt = time.Now().Add(-time.Minute)
+	e.collectMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	})
+
+	if batch := e.getPendingCollection("test:user1"); batch == nil || !batch.Flushing {
+		t.Fatalf("expected expired flushing batch to remain, got %#v", batch)
+	}
+	if got := p.sent[len(p.sent)-1]; !strings.Contains(got, "already in progress") {
+		t.Fatalf("expected flushing reply, got %q", got)
+	}
 }
 
 func TestBuildCollectedPrompt_IncludesAttachmentReferencesPerItem(t *testing.T) {

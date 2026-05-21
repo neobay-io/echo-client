@@ -2212,13 +2212,13 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 	go func() {
 		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session)
 		if err != nil {
+			if done != nil {
+				done(err)
+			}
 			if stopTyping != nil {
 				stopTyping()
 			}
 			session.Unlock()
-			if done != nil {
-				done(err)
-			}
 			return
 		}
 		session.AddHistory("user", prompt)

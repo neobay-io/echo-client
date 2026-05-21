@@ -202,6 +202,7 @@ const (
 	MsgCollectBufferFull          MsgKey = "collect_buffer_full"
 	MsgCollectEmpty               MsgKey = "collect_empty"
 	MsgCollectFlushing            MsgKey = "collect_flushing"
+	MsgCollectRetrying            MsgKey = "collect_retrying"
 	MsgCollectInstructionPrompt   MsgKey = "collect_instruction_prompt"
 	MsgCollectInstructionRequired MsgKey = "collect_instruction_required"
 	MsgCollectStatusActive        MsgKey = "collect_status_active"
@@ -1175,6 +1176,10 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Collection send is already in progress. Wait for it to finish before sending more messages.",
 		LangChinese: "当前正在发送这批收集内容。请等待完成后再发送更多消息。",
 	},
+	MsgCollectRetrying: {
+		LangEnglish: "Retrying the previous final instruction.",
+		LangChinese: "正在使用上一条最终指令重试发送。",
+	},
 	MsgCollectInstructionPrompt: {
 		LangEnglish: "Send the final instruction as your next message.\nExample: Summarize these messages and draft a reply.",
 		LangChinese: "请把最终处理指令作为下一条消息发给我。\n例如：总结这些消息并起草一段回复。",
@@ -1185,7 +1190,7 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgCollectStatusActive: {
 		LangEnglish: "Collection mode is active.\nBuffered items: %d\nBuffered images: %d\nBuffered files: %d\nApprox text size: %d chars\nForwarded items: %d\nStarted: %s\nExpires: %s\nAwaiting final instruction: %s\nFlush in progress: %s",
-		LangChinese: "收集模式已开启。\n缓冲条目：%d\n缓冲图片：%d\n缓冲文件：%d\n文本大小约：%d 字符\n转发条目：%d\n开始时间：%s\n过期时间：%s\n等待最终指令：%s\n正在发送：%s",
+		LangChinese: "收集模式已开启。\n缓冲条目：%d\n缓冲图片：%d\n缓冲文件：%d\n文本大小约：%d 字符\n转发条目：%d\n开始时间：%s\n过期时间：%s\n等待最终指令：%s\n批量发送中：%s",
 	},
 	MsgCollectExpired: {
 		LangEnglish: "Your buffered collection expired after 24 hours and was discarded.",
