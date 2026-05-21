@@ -109,6 +109,35 @@ func (s *stubAgentSession) CurrentSessionID() string                            
 func (s *stubAgentSession) Alive() bool                                          { return true }
 func (s *stubAgentSession) Close() error                                         { return nil }
 
+type failingSendAgent struct {
+	session *failingSendSession
+}
+
+func (a *failingSendAgent) Name() string { return "failing-send" }
+func (a *failingSendAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.session == nil {
+		a.session = &failingSendSession{err: fmt.Errorf("send failed")}
+	}
+	return a.session, nil
+}
+func (a *failingSendAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *failingSendAgent) Stop() error { return nil }
+
+type failingSendSession struct {
+	err error
+}
+
+func (s *failingSendSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	return s.err
+}
+func (s *failingSendSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *failingSendSession) Events() <-chan Event                                 { return make(chan Event) }
+func (s *failingSendSession) CurrentSessionID() string                             { return "failing-send" }
+func (s *failingSendSession) Alive() bool                                          { return true }
+func (s *failingSendSession) Close() error                                         { return nil }
+
 type eventfulStubAgentSession struct {
 	events chan Event
 }
@@ -2478,6 +2507,78 @@ func TestHandleMessage_CollectSendUsesNextMessageAsInstruction(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_CollectDeferredSendKeepsAwaitingInstructionWhenSessionBusy(t *testing.T) {
+	agent := &recordingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		Content:    "/collect send",
+		ReplyCtx:   "ctx",
+	})
+
+	session := e.sessions.GetOrCreateActive("test:user1")
+	if !session.TryLock() {
+		t.Fatal("expected to be able to lock session for busy simulation")
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "draft a short reply",
+		ReplyCtx:   "ctx",
+	})
+
+	if !e.isPendingCollectionAwaitingInstruction("test:user1") {
+		t.Fatal("expected final instruction to remain pending after busy flush")
+	}
+	if agent.session != nil && len(agent.session.Sends()) != 0 {
+		t.Fatalf("expected no agent send while session is busy")
+	}
+
+	session.Unlock()
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-3",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "draft a short reply",
+		ReplyCtx:   "ctx",
+	})
+
+	sends := waitForRecordedSends(t, agent, 1)
+	if !strings.Contains(sends[0].prompt, "Final instruction:\ndraft a short reply") {
+		t.Fatalf("prompt missing deferred instruction after retry: %q", sends[0].prompt)
+	}
+	if strings.Contains(sends[0].prompt, "Item 2") {
+		t.Fatalf("expected retry instruction not to be buffered as a new collected item: %q", sends[0].prompt)
+	}
+}
+
 func TestHandleMessage_CollectStatusAndCancel(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -2595,6 +2696,82 @@ func TestHandleMessage_CollectSupersedesPendingAttachments(t *testing.T) {
 	sends := waitForRecordedSends(t, agent, 1)
 	if len(sends[0].images) != 1 || string(sends[0].images[0].Data) != "img1" {
 		t.Fatalf("expected collected image to be attached on flush, got %#v", sends[0].images)
+	}
+}
+
+func TestHandleMessage_CollectSendFailureKeepsBatch(t *testing.T) {
+	agent := &failingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/collect send summarize this",
+		ReplyCtx:   "ctx",
+	})
+
+	if batch := e.getPendingCollection("test:user1"); batch == nil || len(batch.Items) != 1 {
+		t.Fatalf("expected batch to survive send failure, got %#v", batch)
+	}
+	session := e.sessions.GetOrCreateActive("test:user1")
+	if session.HistoryLen() != 0 {
+		t.Fatalf("expected failed send not to append user history, got len=%d", session.HistoryLen())
+	}
+	if got := p.sent[len(p.sent)-1]; !strings.Contains(got, "send failed") {
+		t.Fatalf("expected send failure reply, got %q", got)
+	}
+}
+
+func TestBuildCollectedPrompt_IncludesAttachmentReferencesPerItem(t *testing.T) {
+	batch := &pendingCollectedBatch{
+		Items: []collectedItem{
+			{
+				Message:    collectedMessageSnapshot{Content: "first item"},
+				ImageRefs:  []collectedAttachmentRef{{FileName: "shot.png"}},
+				FileRefs:   []collectedAttachmentRef{{FileName: "note.txt"}},
+				ImageCount: 1,
+				FileCount:  1,
+			},
+			{
+				Message:   collectedMessageSnapshot{},
+				FileRefs:  []collectedAttachmentRef{{FileName: "report.pdf"}},
+				FileCount: 1,
+			},
+		},
+	}
+
+	got := buildCollectedPrompt(batch, "summarize these")
+	if !strings.Contains(got, "Image refs: image #1 (shot.png)") {
+		t.Fatalf("prompt missing first image ref: %q", got)
+	}
+	if !strings.Contains(got, "File refs: file #1 (note.txt)") {
+		t.Fatalf("prompt missing first file ref: %q", got)
+	}
+	if !strings.Contains(got, "File refs: file #2 (report.pdf)") {
+		t.Fatalf("prompt missing second file ref mapping: %q", got)
+	}
+	if !strings.Contains(got, "Message:\n[no text content]") {
+		t.Fatalf("prompt should preserve attachment-only item: %q", got)
 	}
 }
 

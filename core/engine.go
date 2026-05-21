@@ -983,7 +983,6 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectInstructionRequired))
 			return
 		}
-		e.setPendingCollectionAwaitingInstruction(msg.SessionKey, false)
 		if e.flushPendingCollection(p, msg, content) {
 			return
 		}
@@ -2122,15 +2121,46 @@ func isDenyResponse(s string) bool {
 func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Session) {
 	defer session.Unlock()
 
-	if e.ctx.Err() != nil {
+	state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session)
+	if stopTyping != nil {
+		defer stopTyping()
+	}
+	if err != nil {
 		return
+	}
+	session.AddHistory("user", prompt)
+	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
+}
+
+func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, session *Session) error {
+	state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session)
+	if err != nil {
+		if stopTyping != nil {
+			stopTyping()
+		}
+		session.Unlock()
+		return err
+	}
+	session.AddHistory("user", prompt)
+	go func() {
+		defer session.Unlock()
+		if stopTyping != nil {
+			defer stopTyping()
+		}
+		e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
+	}()
+	return nil
+}
+
+func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session) (*interactiveState, string, time.Time, func(), error) {
+	if e.ctx.Err() != nil {
+		return nil, "", time.Time{}, nil, e.ctx.Err()
 	}
 
 	turnStart := time.Now()
 	prompt := e.buildAgentPrompt(session, msg)
 
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", prompt)
 
 	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 
@@ -2142,23 +2172,14 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to start agent session"))
-		return
+		return nil, "", time.Time{}, nil, fmt.Errorf("failed to start agent session")
 	}
 
-	// Start typing indicator if platform supports it
 	var stopTyping func()
 	if ti, ok := p.(TypingIndicator); ok {
 		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
 	}
-	defer func() {
-		if stopTyping != nil {
-			stopTyping()
-		}
-	}()
 
-	// Drain any stale events left in the channel from a previous turn.
-	// This prevents the next processInteractiveEvents from reading an old
-	// EventResult that was pushed after the previous turn already returned.
 	drainEvents(state.agentSession.Events())
 
 	sendStart := time.Now()
@@ -2175,16 +2196,16 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 			if state.agentSession == nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
-				return
+				return nil, "", time.Time{}, stopTyping, fmt.Errorf("failed to restart agent session")
 			}
 			sendStart = time.Now()
 			if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-				return
+				return nil, "", time.Time{}, stopTyping, err
 			}
 		} else {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			return
+			return nil, "", time.Time{}, stopTyping, err
 		}
 	}
 	if session.NeedsReplay {
@@ -2197,7 +2218,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
+	return state, prompt, turnStart, stopTyping, nil
 }
 
 func (e *Engine) agentUpgradeBlocksNewTurns() bool {

@@ -23,6 +23,11 @@ type pendingCollectedBatch struct {
 	AwaitingInstruction bool
 }
 
+type collectedAttachmentRef struct {
+	FileName string
+	MimeType string
+}
+
 type collectedMessageSnapshot struct {
 	MessageID       string
 	UserID          string
@@ -45,6 +50,8 @@ type collectedItem struct {
 	ForwardDate   time.Time
 	ImageCount    int
 	FileCount     int
+	ImageRefs     []collectedAttachmentRef
+	FileRefs      []collectedAttachmentRef
 }
 
 func cloneCollectedItems(items []collectedItem) []collectedItem {
@@ -53,7 +60,48 @@ func cloneCollectedItems(items []collectedItem) []collectedItem {
 	}
 	out := make([]collectedItem, len(items))
 	copy(out, items)
+	for i := range out {
+		out[i].ImageRefs = cloneCollectedAttachmentRefs(out[i].ImageRefs)
+		out[i].FileRefs = cloneCollectedAttachmentRefs(out[i].FileRefs)
+	}
 	return out
+}
+
+func cloneCollectedAttachmentRefs(refs []collectedAttachmentRef) []collectedAttachmentRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]collectedAttachmentRef, len(refs))
+	copy(out, refs)
+	return out
+}
+
+func collectedImageRefs(images []ImageAttachment) []collectedAttachmentRef {
+	if len(images) == 0 {
+		return nil
+	}
+	refs := make([]collectedAttachmentRef, 0, len(images))
+	for _, img := range images {
+		refs = append(refs, collectedAttachmentRef{
+			FileName: strings.TrimSpace(img.FileName),
+			MimeType: strings.TrimSpace(img.MimeType),
+		})
+	}
+	return refs
+}
+
+func collectedFileRefs(files []FileAttachment) []collectedAttachmentRef {
+	if len(files) == 0 {
+		return nil
+	}
+	refs := make([]collectedAttachmentRef, 0, len(files))
+	for _, f := range files {
+		refs = append(refs, collectedAttachmentRef{
+			FileName: strings.TrimSpace(f.FileName),
+			MimeType: strings.TrimSpace(f.MimeType),
+		})
+	}
+	return refs
 }
 
 func clonePendingCollection(batch *pendingCollectedBatch) *pendingCollectedBatch {
@@ -170,6 +218,8 @@ func (e *Engine) absorbPendingAttachmentsIntoCollection(sessionKey string) {
 			CollectedAt: now,
 			ImageCount:  len(pending.Images),
 			FileCount:   len(pending.Files),
+			ImageRefs:   collectedImageRefs(pending.Images),
+			FileRefs:    collectedFileRefs(pending.Files),
 		})
 	}
 	batch.Images = append(batch.Images, cloneImages(pending.Images)...)
@@ -210,6 +260,8 @@ func (e *Engine) bufferPendingCollection(msg *Message) (int, bool) {
 		ForwardDate:   msg.ForwardDate,
 		ImageCount:    len(msg.Images),
 		FileCount:     len(msg.Files),
+		ImageRefs:     collectedImageRefs(msg.Images),
+		FileRefs:      collectedFileRefs(msg.Files),
 	})
 	batch.Images = append(batch.Images, cloneImages(msg.Images)...)
 	batch.Files = append(batch.Files, cloneFiles(msg.Files)...)
@@ -265,6 +317,8 @@ func boolWord(v bool) string {
 
 func buildCollectedPrompt(batch *pendingCollectedBatch, instruction string) string {
 	var b strings.Builder
+	imageOrdinal := 1
+	fileOrdinal := 1
 
 	instruction = strings.TrimSpace(instruction)
 	fmt.Fprintf(&b, "The user buffered the following messages before asking for help. Treat each item as separate source material, not as one continuous chat transcript.\n\nFinal instruction:\n%s\n\nCollected items: %d", instruction, len(batch.Items))
@@ -301,6 +355,14 @@ func buildCollectedPrompt(batch *pendingCollectedBatch, instruction string) stri
 		}
 		if item.ImageCount > 0 || item.FileCount > 0 {
 			fmt.Fprintf(&b, "Attachments: %s\n", attachmentSummary(item.ImageCount, item.FileCount))
+			if len(item.ImageRefs) > 0 {
+				fmt.Fprintf(&b, "Image refs: %s\n", renderCollectedAttachmentRefs("image", imageOrdinal, item.ImageRefs))
+				imageOrdinal += len(item.ImageRefs)
+			}
+			if len(item.FileRefs) > 0 {
+				fmt.Fprintf(&b, "File refs: %s\n", renderCollectedAttachmentRefs("file", fileOrdinal, item.FileRefs))
+				fileOrdinal += len(item.FileRefs)
+			}
 		}
 
 		quoted := strings.TrimSpace(item.Message.QuotedContent)
@@ -345,6 +407,25 @@ func attachmentSummary(images, files int) string {
 	return strings.Join(parts, ", ")
 }
 
+func renderCollectedAttachmentRefs(kind string, start int, refs []collectedAttachmentRef) string {
+	if len(refs) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(refs))
+	for i, ref := range refs {
+		label := fmt.Sprintf("%s #%d", kind, start+i)
+		detail := strings.TrimSpace(ref.FileName)
+		if detail == "" {
+			detail = strings.TrimSpace(ref.MimeType)
+		}
+		if detail != "" {
+			label = fmt.Sprintf("%s (%s)", label, detail)
+		}
+		parts = append(parts, label)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (e *Engine) flushPendingCollection(p Platform, msg *Message, instruction string) bool {
 	instruction = strings.TrimSpace(instruction)
 	if instruction == "" {
@@ -374,8 +455,6 @@ func (e *Engine) flushPendingCollection(p Platform, msg *Message, instruction st
 		return true
 	}
 
-	e.clearPendingCollection(msg.SessionKey)
-
 	synthesized := &Message{
 		SessionKey: msg.SessionKey,
 		Platform:   msg.Platform,
@@ -388,7 +467,10 @@ func (e *Engine) flushPendingCollection(p Platform, msg *Message, instruction st
 		ReplyCtx:   msg.ReplyCtx,
 	}
 
-	go e.processInteractiveMessage(p, synthesized, session)
+	if err := e.processInteractiveMessageAsync(p, synthesized, session); err != nil {
+		return true
+	}
+	e.clearPendingCollection(msg.SessionKey)
 	return true
 }
 
