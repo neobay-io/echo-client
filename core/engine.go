@@ -177,6 +177,8 @@ type Engine struct {
 	prompts            map[string]*pendingInteractionPrompt
 	voiceConfirmMu     sync.Mutex
 	voiceConfirms      map[string]*pendingVoiceConfirmation
+	collectMu          sync.Mutex
+	pendingCollect     map[string]*pendingCollectedBatch
 	pendingAttachMu    sync.Mutex
 	pendingAttach      map[string]*pendingAttachments
 	cronEditMu         sync.Mutex
@@ -296,6 +298,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		interactiveStates:  make(map[string]*interactiveState),
 		prompts:            make(map[string]*pendingInteractionPrompt),
 		voiceConfirms:      make(map[string]*pendingVoiceConfirmation),
+		pendingCollect:     make(map[string]*pendingCollectedBatch),
 		pendingAttach:      make(map[string]*pendingAttachments),
 		pendingCronEdits:   make(map[string]*pendingCronPromptEdit),
 		pendingLoopCreates: make(map[string]bool),
@@ -900,7 +903,22 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
 		return
 	}
+	e.expirePendingCollectionIfNeeded(p, msg, time.Now())
+
 	if content == "" && (len(msg.Images) > 0 || len(msg.Files) > 0) {
+		if e.isPendingCollectionAwaitingInstruction(msg.SessionKey) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectInstructionRequired))
+			return
+		}
+		if e.hasPendingCollection(msg.SessionKey) {
+			count, full := e.bufferPendingCollection(msg)
+			if full {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectBufferFull))
+				return
+			}
+			e.maybeAcknowledgeCollectedItem(p, msg.ReplyCtx, count)
+			return
+		}
 		e.storePendingAttachments(msg.SessionKey, msg.Images, msg.Files)
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachmentsBuffered, len(msg.Images)+len(msg.Files)))
 		return
@@ -957,6 +975,27 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Permission responses bypass the session lock
 	if e.handlePendingPermission(p, msg, content) {
+		return
+	}
+
+	if e.isPendingCollectionAwaitingInstruction(msg.SessionKey) && !strings.HasPrefix(content, "/") {
+		if strings.TrimSpace(content) == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectInstructionRequired))
+			return
+		}
+		e.setPendingCollectionAwaitingInstruction(msg.SessionKey, false)
+		if e.flushPendingCollection(p, msg, content) {
+			return
+		}
+	}
+
+	if e.hasPendingCollection(msg.SessionKey) {
+		count, full := e.bufferPendingCollection(msg)
+		if full {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCollectBufferFull))
+			return
+		}
+		e.maybeAcknowledgeCollectedItem(p, msg.ReplyCtx, count)
 		return
 	}
 
@@ -2725,6 +2764,7 @@ var builtinCommands = []struct {
 	{[]string{"cron"}, "cron"},
 	{[]string{"loop"}, "loop"},
 	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"collect"}, "collect"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -2845,6 +2885,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdLoop(p, msg, args)
 	case "compress":
 		e.cmdCompress(p, msg)
+	case "collect":
+		e.cmdCollect(p, msg, args)
 	case "stop":
 		e.cmdStop(p, msg)
 	case "help":

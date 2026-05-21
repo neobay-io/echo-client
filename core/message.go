@@ -197,6 +197,10 @@ type Message struct {
 	UserID          string
 	UserName        string
 	Content         string
+	Forwarded       bool
+	ForwardSource   string
+	ForwardChat     string
+	ForwardDate     time.Time
 	QuotedMessageID string
 	QuotedUserID    string
 	QuotedUserName  string

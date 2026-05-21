@@ -180,19 +180,31 @@ const (
 	MsgProviderRemoved      MsgKey = "provider_removed"
 	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
 
-	MsgVoiceNotEnabled       MsgKey = "voice_not_enabled"
-	MsgVoiceNoFFmpeg         MsgKey = "voice_no_ffmpeg"
-	MsgVoiceTranscribing     MsgKey = "voice_transcribing"
-	MsgVoiceTranscribed      MsgKey = "voice_transcribed"
-	MsgVoiceTranscribeFailed MsgKey = "voice_transcribe_failed"
-	MsgVoiceEmpty            MsgKey = "voice_empty"
-	MsgVoiceConfirmPrompt    MsgKey = "voice_confirm_prompt"
-	MsgVoiceEditPrompt       MsgKey = "voice_edit_prompt"
-	MsgVoiceConfirmHint      MsgKey = "voice_confirm_hint"
-	MsgVoiceCanceled         MsgKey = "voice_canceled"
-	MsgVoiceBtnConfirm       MsgKey = "voice_btn_confirm"
-	MsgVoiceBtnModify        MsgKey = "voice_btn_modify"
-	MsgAttachmentsBuffered   MsgKey = "attachments_buffered"
+	MsgVoiceNotEnabled            MsgKey = "voice_not_enabled"
+	MsgVoiceNoFFmpeg              MsgKey = "voice_no_ffmpeg"
+	MsgVoiceTranscribing          MsgKey = "voice_transcribing"
+	MsgVoiceTranscribed           MsgKey = "voice_transcribed"
+	MsgVoiceTranscribeFailed      MsgKey = "voice_transcribe_failed"
+	MsgVoiceEmpty                 MsgKey = "voice_empty"
+	MsgVoiceConfirmPrompt         MsgKey = "voice_confirm_prompt"
+	MsgVoiceEditPrompt            MsgKey = "voice_edit_prompt"
+	MsgVoiceConfirmHint           MsgKey = "voice_confirm_hint"
+	MsgVoiceCanceled              MsgKey = "voice_canceled"
+	MsgVoiceBtnConfirm            MsgKey = "voice_btn_confirm"
+	MsgVoiceBtnModify             MsgKey = "voice_btn_modify"
+	MsgAttachmentsBuffered        MsgKey = "attachments_buffered"
+	MsgCollectUsage               MsgKey = "collect_usage"
+	MsgCollectStarted             MsgKey = "collect_started"
+	MsgCollectAlreadyActive       MsgKey = "collect_already_active"
+	MsgCollectInactive            MsgKey = "collect_inactive"
+	MsgCollectCanceled            MsgKey = "collect_canceled"
+	MsgCollectBuffered            MsgKey = "collect_buffered"
+	MsgCollectBufferFull          MsgKey = "collect_buffer_full"
+	MsgCollectEmpty               MsgKey = "collect_empty"
+	MsgCollectInstructionPrompt   MsgKey = "collect_instruction_prompt"
+	MsgCollectInstructionRequired MsgKey = "collect_instruction_required"
+	MsgCollectStatusActive        MsgKey = "collect_status_active"
+	MsgCollectExpired             MsgKey = "collect_expired"
 
 	MsgTTSNotEnabled             MsgKey = "tts_not_enabled"
 	MsgTTSStatus                 MsgKey = "tts_status"
@@ -384,6 +396,7 @@ const (
 	MsgBuiltinCmdLang         MsgKey = "lang"
 	MsgBuiltinCmdQuiet        MsgKey = "quiet"
 	MsgBuiltinCmdCompress     MsgKey = "compress"
+	MsgBuiltinCmdCollect      MsgKey = "collect"
 	MsgBuiltinCmdStop         MsgKey = "stop"
 	MsgBuiltinCmdCron         MsgKey = "cron"
 	MsgBuiltinCmdCommands     MsgKey = "commands"
@@ -663,6 +676,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/quiet [global]\n  Toggle thinking/tool progress (global = all sessions)\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
+			"/collect [start|status|send|cancel]\n  Buffer messages and process them later\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
 			"/stop\n  Stop current execution\n\n" +
@@ -702,6 +716,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/quiet [global]\n  开关思考和工具进度消息（global = 全部会话）\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
+			"/collect [start|status|send|cancel]\n  先缓冲消息，最后统一处理\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
 			"/stop\n  停止当前执行\n\n" +
@@ -741,6 +756,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/quiet [global]\n  開關思考和工具進度訊息（global = 全部會話）\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
+			"/collect [start|status|send|cancel]\n  先暫存訊息，最後統一處理\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
 			"/stop\n  停止當前執行\n\n" +
@@ -779,6 +795,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/quiet [global]\n  思考/ツール進捗メッセージの表示切替（global = 全セッション）\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
+			"/collect [start|status|send|cancel]\n  メッセージを一時保存して後でまとめて処理\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
@@ -817,6 +834,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/quiet [global]\n  Alternar mensajes de progreso (global = todas las sesiones)\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
+			"/collect [start|status|send|cancel]\n  Acumular mensajes y procesarlos después\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
@@ -1119,6 +1137,54 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📎 已收到 %d 個附件。請再發一條文字說明你希望我處理什麼，我會把這些附件一起帶給 agent。",
 		LangJapanese:           "📎 添付を %d 件受け取りました。何をしてほしいかを文字で送ってください。そのリクエストに添えて agent に渡します。",
 		LangSpanish:            "📎 Recibí %d archivo(s) adjuntos. Envíe un mensaje de texto con lo que desea que haga y adjuntaré esos archivos a esa solicitud.",
+	},
+	MsgCollectUsage: {
+		LangEnglish: "Usage:\n/collect start\n/collect status\n/collect send <instruction>\n/collect cancel",
+		LangChinese: "用法：\n/collect start\n/collect status\n/collect send <指令>\n/collect cancel",
+	},
+	MsgCollectStarted: {
+		LangEnglish: "Collection mode enabled.\nForward or send messages now. When ready, use:\n/collect send <instruction>\n\nThe buffer is temporary and will be lost on restart.",
+		LangChinese: "已开启收集模式。\n现在可以继续转发或发送消息，完成后使用：\n/collect send <指令>\n\n当前缓冲仅保存在内存里，重启后会丢失。",
+	},
+	MsgCollectAlreadyActive: {
+		LangEnglish: "Collection mode is already active.\nBuffered items: %d",
+		LangChinese: "收集模式已经开启。\n当前已缓冲条目：%d",
+	},
+	MsgCollectInactive: {
+		LangEnglish: "Collection mode is not active.",
+		LangChinese: "当前未开启收集模式。",
+	},
+	MsgCollectCanceled: {
+		LangEnglish: "Buffered collection discarded.",
+		LangChinese: "已丢弃当前收集缓冲。",
+	},
+	MsgCollectBuffered: {
+		LangEnglish: "Buffered %d item(s) so far.",
+		LangChinese: "目前已缓冲 %d 条内容。",
+	},
+	MsgCollectBufferFull: {
+		LangEnglish: "Collection buffer is full. Use /collect send <instruction> or /collect cancel.",
+		LangChinese: "收集缓冲已满。请使用 /collect send <指令> 或 /collect cancel。",
+	},
+	MsgCollectEmpty: {
+		LangEnglish: "No buffered messages to process.",
+		LangChinese: "当前没有可处理的缓冲消息。",
+	},
+	MsgCollectInstructionPrompt: {
+		LangEnglish: "Send the final instruction as your next message.\nExample: Summarize these messages and draft a reply.",
+		LangChinese: "请把最终处理指令作为下一条消息发给我。\n例如：总结这些消息并起草一段回复。",
+	},
+	MsgCollectInstructionRequired: {
+		LangEnglish: "Final instruction must be a non-empty text message.",
+		LangChinese: "最终指令必须是一条非空的文字消息。",
+	},
+	MsgCollectStatusActive: {
+		LangEnglish: "Collection mode is active.\nBuffered items: %d\nBuffered images: %d\nBuffered files: %d\nApprox text size: %d chars\nForwarded items: %d\nStarted: %s\nExpires: %s\nAwaiting final instruction: %s",
+		LangChinese: "收集模式已开启。\n缓冲条目：%d\n缓冲图片：%d\n缓冲文件：%d\n文本大小约：%d 字符\n转发条目：%d\n开始时间：%s\n过期时间：%s\n等待最终指令：%s",
+	},
+	MsgCollectExpired: {
+		LangEnglish: "Your buffered collection expired after 24 hours and was discarded.",
+		LangChinese: "你的收集缓冲已超过 24 小时，现已自动丢弃。",
 	},
 	MsgTTSNotEnabled: {
 		LangEnglish:            "TTS is not enabled. Please configure `[tts]` in config.toml.",
@@ -2330,6 +2396,10 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "壓縮會話上下文",
 		LangJapanese:           "会話コンテキストを圧縮",
 		LangSpanish:            "Comprimir contexto de conversación",
+	},
+	MsgBuiltinCmdCollect: {
+		LangEnglish: "Buffer messages and process them later, arg: [start|status|send|cancel]",
+		LangChinese: "先缓冲消息再统一处理，参数: [start|status|send|cancel]",
 	},
 	MsgBuiltinCmdStop: {
 		LangEnglish:            "Stop current execution",

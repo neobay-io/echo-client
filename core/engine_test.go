@@ -255,6 +255,26 @@ func (s *recordingSendSession) Sends() []recordedSend {
 	return out
 }
 
+func waitForRecordedSends(t *testing.T, agent *recordingSendAgent, want int) []recordedSend {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if agent.session != nil {
+			sends := agent.session.Sends()
+			if len(sends) >= want {
+				return sends
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if agent.session == nil {
+		t.Fatalf("expected agent session to start")
+	}
+	sends := agent.session.Sends()
+	t.Fatalf("send count = %d, want at least %d", len(sends), want)
+	return nil
+}
+
 type scriptedRecordingSession struct {
 	mu        sync.Mutex
 	sends     []recordedSend
@@ -2313,6 +2333,268 @@ func TestHandleMessage_BuffersFileOnlyUntilTextArrives(t *testing.T) {
 	}
 	if len(sends[0].files) != 1 || sends[0].files[0].FileName != "clip.mp4" {
 		t.Fatalf("files = %#v, want buffered file", sends[0].files)
+	}
+}
+
+func TestHandleMessage_BuffersTextWhileCollectActive(t *testing.T) {
+	agent := &recordingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "forwarded snippet 1",
+		ReplyCtx:   "ctx",
+	})
+
+	if agent.session != nil && len(agent.session.Sends()) != 0 {
+		t.Fatalf("expected no agent send while collection is active")
+	}
+	batch := e.getPendingCollection("test:user1")
+	if batch == nil || len(batch.Items) != 1 {
+		t.Fatalf("unexpected batch: %#v", batch)
+	}
+	if got := batch.Items[0].Message.Content; got != "forwarded snippet 1" {
+		t.Fatalf("buffered content = %q", got)
+	}
+}
+
+func TestHandleMessage_CollectSendInlineInstructionFlushesBatch(t *testing.T) {
+	agent := &recordingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey:      "test:user1",
+		Platform:        "test",
+		MessageID:       "txt-1",
+		UserID:          "user1",
+		UserName:        "Alice",
+		Content:         "please keep this thread",
+		QuotedUserName:  "Bob",
+		QuotedContent:   "quoted context",
+		QuotedMessageID: "q-1",
+		Forwarded:       true,
+		ForwardSource:   "Carol",
+		ReplyCtx:        "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/collect send summarize and draft a reply",
+		ReplyCtx:   "ctx",
+	})
+
+	sends := waitForRecordedSends(t, agent, 1)
+	got := sends[0].prompt
+	if !strings.Contains(got, "Final instruction:\nsummarize and draft a reply") {
+		t.Fatalf("prompt missing final instruction: %q", got)
+	}
+	if !strings.Contains(got, "Reply context from Bob:\nquoted context") {
+		t.Fatalf("prompt missing quoted context: %q", got)
+	}
+	if !strings.Contains(got, "Forwarded: yes, from Carol") {
+		t.Fatalf("prompt missing forward metadata: %q", got)
+	}
+	if e.getPendingCollection("test:user1") != nil {
+		t.Fatalf("expected collection to be cleared after flush")
+	}
+}
+
+func TestHandleMessage_CollectSendUsesNextMessageAsInstruction(t *testing.T) {
+	agent := &recordingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		Content:    "/collect send",
+		ReplyCtx:   "ctx",
+	})
+
+	if !e.isPendingCollectionAwaitingInstruction("test:user1") {
+		t.Fatal("expected collection to wait for a final instruction")
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "draft a short reply",
+		ReplyCtx:   "ctx",
+	})
+
+	sends := waitForRecordedSends(t, agent, 1)
+	got := sends[0].prompt
+	if !strings.Contains(got, "Final instruction:\ndraft a short reply") {
+		t.Fatalf("prompt missing deferred instruction: %q", got)
+	}
+	if !strings.Contains(got, "Collected items: 1") {
+		t.Fatalf("prompt should keep a single collected item: %q", got)
+	}
+	if e.getPendingCollection("test:user1") != nil {
+		t.Fatalf("expected collection to be cleared after deferred flush")
+	}
+}
+
+func TestHandleMessage_CollectStatusAndCancel(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "txt-1",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "source message",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		Content:    "/collect status",
+		ReplyCtx:   "ctx",
+	})
+
+	if got := p.sent[len(p.sent)-1]; !strings.Contains(got, "Buffered items: 1") {
+		t.Fatalf("status reply = %q, want buffered count", got)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-3",
+		Content:    "/collect cancel",
+		ReplyCtx:   "ctx",
+	})
+
+	if e.getPendingCollection("test:user1") != nil {
+		t.Fatalf("expected collection to be cleared on cancel")
+	}
+	if got := p.sent[len(p.sent)-1]; !strings.Contains(got, "discarded") {
+		t.Fatalf("cancel reply = %q", got)
+	}
+}
+
+func TestHandleMessage_CollectExpiresOnNextInteraction(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+
+	e.collectMu.Lock()
+	e.pendingCollect["test:user1"].ExpiresAt = time.Now().Add(-time.Minute)
+	e.collectMu.Unlock()
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		Content:    "/collect status",
+		ReplyCtx:   "ctx",
+	})
+
+	if got := p.sent[len(p.sent)-2]; !strings.Contains(got, "expired after 24 hours") {
+		t.Fatalf("expected expiry notice, got %#v", p.sent)
+	}
+	if got := p.sent[len(p.sent)-1]; !strings.Contains(got, "not active") {
+		t.Fatalf("expected inactive status after expiry, got %q", got)
+	}
+}
+
+func TestHandleMessage_CollectSupersedesPendingAttachments(t *testing.T) {
+	agent := &recordingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-1",
+		Content:    "/collect start",
+		ReplyCtx:   "ctx",
+	})
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "img-1",
+		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("img1")}},
+		ReplyCtx:   "ctx",
+	})
+
+	if pending := e.getPendingAttachments("test:user1"); pending != nil {
+		t.Fatalf("expected attachments to stay in collection buffer, got pending attachments %#v", pending)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		MessageID:  "cmd-2",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/collect send summarize this image",
+		ReplyCtx:   "ctx",
+	})
+
+	sends := waitForRecordedSends(t, agent, 1)
+	if len(sends[0].images) != 1 || string(sends[0].images[0].Data) != "img1" {
+		t.Fatalf("expected collected image to be attached on flush, got %#v", sends[0].images)
 	}
 }
 

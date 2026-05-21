@@ -2,7 +2,9 @@ package telegram
 
 import (
 	"testing"
+	"time"
 
+	"github.com/chenhg5/cc-connect/core"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -53,5 +55,35 @@ func TestExtractQuotedMessage_EmptyContent(t *testing.T) {
 	msg := &tgbotapi.Message{MessageID: 9}
 	if quoted := extractQuotedMessage(msg); quoted != nil {
 		t.Fatalf("expected nil quoted message, got %#v", quoted)
+	}
+}
+
+func TestApplyForwardMetadata(t *testing.T) {
+	msg := &tgbotapi.Message{
+		ForwardDate: 1710000000,
+		ForwardFrom: &tgbotapi.User{
+			ID:        321,
+			FirstName: "Carol",
+			LastName:  "Jones",
+		},
+		ForwardFromChat: &tgbotapi.Chat{
+			Title: "Team Chat",
+		},
+	}
+
+	dst := &core.Message{}
+	applyForwardMetadata(dst, msg)
+
+	if !dst.Forwarded {
+		t.Fatal("expected forwarded flag")
+	}
+	if dst.ForwardSource != "Carol Jones" {
+		t.Fatalf("ForwardSource = %q, want Carol Jones", dst.ForwardSource)
+	}
+	if dst.ForwardChat != "Team Chat" {
+		t.Fatalf("ForwardChat = %q, want Team Chat", dst.ForwardChat)
+	}
+	if got, want := dst.ForwardDate, time.Unix(1710000000, 0); !got.Equal(want) {
+		t.Fatalf("ForwardDate = %v, want %v", got, want)
 	}
 }

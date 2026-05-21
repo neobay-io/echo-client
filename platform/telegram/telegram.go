@@ -200,6 +200,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 						ReplyCtx:  rctx,
 					}
 					applyQuotedMessage(coreMsg, quoted)
+					applyForwardMetadata(coreMsg, msg)
 					p.handler(p, coreMsg)
 					continue
 				}
@@ -225,6 +226,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 						ReplyCtx: rctx,
 					}
 					applyQuotedMessage(coreMsg, quoted)
+					applyForwardMetadata(coreMsg, msg)
 					p.handler(p, coreMsg)
 					continue
 				}
@@ -257,6 +259,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 						ReplyCtx: rctx,
 					}
 					applyQuotedMessage(coreMsg, quoted)
+					applyForwardMetadata(coreMsg, msg)
 					p.handler(p, coreMsg)
 					continue
 				}
@@ -286,6 +289,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 						ReplyCtx: rctx,
 					}
 					applyQuotedMessage(coreMsg, quoted)
+					applyForwardMetadata(coreMsg, msg)
 					p.handler(p, coreMsg)
 					continue
 				}
@@ -323,6 +327,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 						ReplyCtx: rctx,
 					}
 					applyQuotedMessage(coreMsg, quoted)
+					applyForwardMetadata(coreMsg, msg)
 					p.handler(p, coreMsg)
 					continue
 				}
@@ -345,6 +350,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					ReplyCtx:  rctx,
 				}
 				applyQuotedMessage(coreMsg, quoted)
+				applyForwardMetadata(coreMsg, msg)
 
 				slog.Debug("telegram: message received", "user", userName, "chat", msg.Chat.ID)
 				p.handler(p, coreMsg)
@@ -389,6 +395,31 @@ func applyQuotedMessage(dst *core.Message, quoted *quotedMessage) {
 	dst.QuotedUserID = quoted.userID
 	dst.QuotedUserName = quoted.userName
 	dst.QuotedContent = quoted.content
+}
+
+func applyForwardMetadata(dst *core.Message, msg *tgbotapi.Message) {
+	if dst == nil || msg == nil || msg.ForwardDate == 0 {
+		return
+	}
+	dst.Forwarded = true
+	dst.ForwardDate = time.Unix(int64(msg.ForwardDate), 0)
+
+	if msg.ForwardFrom != nil {
+		dst.ForwardSource = msg.ForwardFrom.UserName
+		if dst.ForwardSource == "" {
+			dst.ForwardSource = strings.TrimSpace(msg.ForwardFrom.FirstName + " " + msg.ForwardFrom.LastName)
+		}
+	}
+	if dst.ForwardSource == "" {
+		dst.ForwardSource = strings.TrimSpace(msg.ForwardSenderName)
+	}
+
+	if msg.ForwardFromChat != nil {
+		dst.ForwardChat = strings.TrimSpace(msg.ForwardFromChat.Title)
+		if dst.ForwardChat == "" {
+			dst.ForwardChat = strings.TrimSpace(msg.ForwardFromChat.UserName)
+		}
+	}
 }
 
 func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
