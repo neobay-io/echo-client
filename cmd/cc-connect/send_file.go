@@ -73,7 +73,7 @@ func runSendFile(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
 	}
 
@@ -109,10 +109,10 @@ func runSendFile(args []string) {
 }
 
 func printSendFileUsage() {
-	fmt.Println(`Usage: cc-connect send-file [options] --path <absolute-path>
-       cc-connect send-file [options] <absolute-path>
+	fmt.Printf(`Usage: %s send-file [options] --path <absolute-path>
+       %s send-file [options] <absolute-path>
 
-Send a local file to an active cc-connect session.
+Send a local file to an active %s session.
 
 Options:
       --path <path>        Absolute local file path to send
@@ -123,6 +123,6 @@ Options:
   -h, --help               Show this help
 
 Examples:
-  cc-connect send-file --path /tmp/report.pdf
-  cc-connect send-file --path /tmp/screenshot.png --caption "Latest screenshot"`)
+  %s send-file --path /tmp/report.pdf
+  %s send-file --path /tmp/screenshot.png --caption "Latest screenshot"`, appName, appName, appName, appName, appName)
 }

@@ -38,7 +38,7 @@ func runProviderCommand(args []string) {
 }
 
 func printProviderUsage() {
-	fmt.Println(`Usage: cc-connect provider <command> [options]
+	fmt.Printf(`Usage: %s provider <command> [options]
 
 Commands:
   add      Add a new API provider to a project
@@ -47,11 +47,11 @@ Commands:
   import   Import providers from cc-switch
 
 Examples:
-  cc-connect provider add --project my-backend --name relay --api-key sk-xxx
-  cc-connect provider add --project my-backend --name bedrock --env CLAUDE_CODE_USE_BEDROCK=1,AWS_PROFILE=bedrock
-  cc-connect provider list --project my-backend
-  cc-connect provider remove --project my-backend --name relay
-  cc-connect provider import --project my-backend`)
+  %s provider add --project my-backend --name relay --api-key sk-xxx
+  %s provider add --project my-backend --name bedrock --env CLAUDE_CODE_USE_BEDROCK=1,AWS_PROFILE=bedrock
+  %s provider list --project my-backend
+  %s provider remove --project my-backend --name relay
+  %s provider import --project my-backend`, appName, appName, appName, appName, appName, appName)
 }
 
 // initConfigPath resolves the config path and sets config.ConfigPath.

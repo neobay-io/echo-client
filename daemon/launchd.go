@@ -12,7 +12,8 @@ import (
 )
 
 const (
-	launchdLabel = "com.cc-connect.service"
+	launchdLabel       = "io.neobay.echo-client.service"
+	legacyLaunchdLabel = "com.cc-connect.service"
 )
 
 type launchdManager struct{}
@@ -38,6 +39,10 @@ func (m *launchdManager) Install(cfg Config) error {
 		// Ignore bootout failures here; the service may simply not be loaded yet.
 		_ = err
 	}
+	if err := exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), legacyLaunchdLabel)).Run(); err != nil {
+		_ = err
+	}
+	_ = os.Remove(legacyLaunchdPlistPath())
 
 	plist := buildPlist(cfg)
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
@@ -66,6 +71,7 @@ func (m *launchdManager) Uninstall() error {
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove plist: %w", err)
 	}
+	_ = os.Remove(legacyLaunchdPlistPath())
 	return nil
 }
 
@@ -142,6 +148,11 @@ func (*launchdManager) Status() (*Status, error) {
 func launchdPlistPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
+}
+
+func legacyLaunchdPlistPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", legacyLaunchdLabel+".plist")
 }
 
 func buildPlist(cfg Config) string {

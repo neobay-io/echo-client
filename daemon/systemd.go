@@ -13,6 +13,7 @@ import (
 
 const (
 	systemdServiceName = ServiceName + ".service"
+	legacySystemdName  = LegacyServiceName + ".service"
 )
 
 type systemdManager struct {
@@ -57,6 +58,12 @@ func (m *systemdManager) Install(cfg Config) error {
 		return fmt.Errorf("create log dir: %w", err)
 	}
 
+	legacyUnitPath := m.unitPathFor(legacySystemdName)
+	if legacyUnitPath != unitPath {
+		runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
+		_ = os.Remove(legacyUnitPath)
+	}
+
 	unit := m.buildUnit(cfg)
 	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
@@ -77,10 +84,15 @@ func (m *systemdManager) Install(cfg Config) error {
 
 func (m *systemdManager) Uninstall() error {
 	runSystemctl(m.sysArgs("disable", "--now", systemdServiceName)...)
+	runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
 
 	unitPath := m.unitPath()
 	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove unit: %w", err)
+	}
+	legacyUnitPath := m.unitPathFor(legacySystemdName)
+	if legacyUnitPath != unitPath {
+		_ = os.Remove(legacyUnitPath)
 	}
 
 	runSystemctl(m.sysArgs("daemon-reload")...)
@@ -147,17 +159,21 @@ func (m *systemdManager) sysArgs(args ...string) []string {
 }
 
 func (m *systemdManager) unitPath() string {
+	return m.unitPathFor(systemdServiceName)
+}
+
+func (m *systemdManager) unitPathFor(serviceName string) string {
 	if m.system {
-		return filepath.Join("/etc/systemd/system", systemdServiceName)
+		return filepath.Join("/etc/systemd/system", serviceName)
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "systemd", "user", systemdServiceName)
+	return filepath.Join(home, ".config", "systemd", "user", serviceName)
 }
 
 func (m *systemdManager) buildUnit(cfg Config) string {
 	var sb strings.Builder
 	sb.WriteString("[Unit]\n")
-	sb.WriteString("Description=cc-connect - AI Agent Chat Bridge\n")
+	sb.WriteString("Description=echo-client - AI Agent Chat Bridge\n")
 	sb.WriteString("After=network-online.target\n")
 	sb.WriteString("Wants=network-online.target\n\n")
 
@@ -214,16 +230,16 @@ func checkSystemdRunning(system bool) error {
 				"  Add the following to /etc/wsl.conf and restart WSL (wsl --shutdown):\n" +
 				"    [boot]\n" +
 				"    systemd=true\n" +
-				"  Or use: nohup cc-connect > cc-connect.log 2>&1 &")
+				"  Or use: nohup echo-client > echo-client.log 2>&1 &")
 		}
 		if state == "offline" || strings.Contains(state, "not been booted") {
 			return fmt.Errorf("systemd is not active (state: %s).\n"+
 				"  If running in a container, systemd is typically not available.\n"+
 				"  Use nohup, tmux, or screen instead:\n"+
-				"    nohup cc-connect > cc-connect.log 2>&1 &", state)
+				"    nohup echo-client > echo-client.log 2>&1 &", state)
 		}
 		return fmt.Errorf("systemd check failed (state: %s).\n"+
-			"  Use nohup as alternative: nohup cc-connect > cc-connect.log 2>&1 &", state)
+			"  Use nohup as alternative: nohup echo-client > echo-client.log 2>&1 &", state)
 	}
 
 	// User-level failures
@@ -232,16 +248,16 @@ func checkSystemdRunning(system bool) error {
 			"  Add the following to /etc/wsl.conf and restart WSL (wsl --shutdown):\n" +
 			"    [boot]\n" +
 			"    systemd=true\n" +
-			"  Or use: nohup cc-connect > cc-connect.log 2>&1 &")
+			"  Or use: nohup echo-client > echo-client.log 2>&1 &")
 	}
 
 	user := os.Getenv("USER")
 	return fmt.Errorf("systemd user session not available.\n"+
 		"  This often happens when connecting via SSH without a systemd login session.\n"+
 		"  Try one of:\n"+
-		"    1. Run as root: sudo cc-connect daemon install (uses system-level systemd)\n"+
+		"    1. Run as root: sudo echo-client daemon install (uses system-level systemd)\n"+
 		"    2. loginctl enable-linger %s && export XDG_RUNTIME_DIR=/run/user/$(id -u)\n"+
-		"    3. Use nohup/tmux instead: nohup cc-connect > cc-connect.log 2>&1 &", user)
+		"    3. Use nohup/tmux instead: nohup echo-client > echo-client.log 2>&1 &", user)
 }
 
 func isWSL2() bool {

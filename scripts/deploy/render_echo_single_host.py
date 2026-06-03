@@ -87,8 +87,8 @@ def _build_values(
     log_dir = deploy_base_dir / "log"
     cc_connect_config_path = config_dir / "config.toml"
     deploy_env_path = config_dir / "deploy.env"
-    run_cc_connect_script = bin_dir / "run-cc-connect.sh"
-    cc_connect_binary = bin_dir / "cc-connect"
+    run_cc_connect_script = bin_dir / "run-echo-client.sh"
+    cc_connect_binary = bin_dir / "echo-client"
 
     values = {
         "ECHO_REPO_DIR": str(echo_repo_dir),
@@ -135,7 +135,7 @@ def _validate_worker_gateway_config(
             else ""
         )
         raise ValueError(
-            "cc-connect worker token is missing or still set to replace-me."
+            "echo-client worker token is missing or still set to replace-me."
             f"{hint}"
         )
 
@@ -188,7 +188,7 @@ def render(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Render single-host Echo worker deployment assets for cc-connect.",
+        description="Render single-host Echo worker deployment assets for echo-client.",
     )
     parser.add_argument(
         "--env-file",
@@ -207,10 +207,10 @@ def main() -> int:
     )
     args = parser.parse_args()
     values = render(args.env_file, args.runtime_env_file)
-    print(f"Rendered cc-connect deployment assets to {values['RENDERED_DIR']}")
-    print(f"cc-connect deploy env: {values['DEPLOY_ENV_PATH']}")
-    print(f"cc-connect config: {values['CC_CONNECT_CONFIG_PATH']}")
-    print(f"cc-connect run script: {values['RUN_CC_CONNECT_SCRIPT']}")
+    print(f"Rendered echo-client deployment assets to {values['RENDERED_DIR']}")
+    print(f"echo-client deploy env: {values['DEPLOY_ENV_PATH']}")
+    print(f"echo-client config: {values['CC_CONNECT_CONFIG_PATH']}")
+    print(f"echo-client run script: {values['RUN_CC_CONNECT_SCRIPT']}")
     return 0
 
 

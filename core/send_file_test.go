@@ -148,7 +148,7 @@ func TestAPIServerHandleSendFileRejectsEmptyPath(t *testing.T) {
 
 func TestAgentSystemPromptMentionsSendFile(t *testing.T) {
 	prompt := AgentSystemPrompt()
-	if !strings.Contains(prompt, "cc-connect send-file") || !strings.Contains(prompt, "--path <absolute_file_path>") {
+	if !strings.Contains(prompt, "echo-client send-file") || !strings.Contains(prompt, "--path <absolute_file_path>") {
 		t.Fatalf("AgentSystemPrompt missing send-file instructions: %q", prompt)
 	}
 }

@@ -89,7 +89,7 @@ func daemonInstall(args []string) {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
 	}
 
-	fmt.Println("cc-connect daemon installed and started.")
+	fmt.Printf("%s daemon installed and started.\n", appName)
 	fmt.Println()
 	fmt.Printf("  Platform:  %s\n", mgr.Platform())
 	fmt.Printf("  Binary:    %s\n", cfg.BinaryPath)
@@ -98,11 +98,11 @@ func daemonInstall(args []string) {
 	fmt.Printf("  LogMax:    %d MB\n", cfg.LogMaxSize/1024/1024)
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  cc-connect daemon status    - Check status")
-	fmt.Println("  cc-connect daemon logs -f   - Follow logs")
-	fmt.Println("  cc-connect daemon restart   - Restart")
-	fmt.Println("  cc-connect daemon stop      - Stop")
-	fmt.Println("  cc-connect daemon uninstall - Remove")
+	fmt.Printf("  %s daemon status    - Check status\n", appName)
+	fmt.Printf("  %s daemon logs -f   - Follow logs\n", appName)
+	fmt.Printf("  %s daemon restart   - Restart\n", appName)
+	fmt.Printf("  %s daemon stop      - Stop\n", appName)
+	fmt.Printf("  %s daemon uninstall - Remove\n", appName)
 }
 
 func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
@@ -198,7 +198,7 @@ func daemonUninstall() {
 	}
 
 	daemon.RemoveMeta()
-	fmt.Println("cc-connect daemon uninstalled.")
+	fmt.Printf("%s daemon uninstalled.\n", appName)
 }
 
 // ── start / stop / restart ──────────────────────────────────
@@ -210,7 +210,7 @@ func daemonStart() {
 		fmt.Fprintf(os.Stderr, "Start failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon started.")
+	fmt.Printf("%s daemon started.\n", appName)
 }
 
 func daemonStop() {
@@ -220,7 +220,7 @@ func daemonStop() {
 		fmt.Fprintf(os.Stderr, "Stop failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon stopped.")
+	fmt.Printf("%s daemon stopped.\n", appName)
 }
 
 func daemonRestart() {
@@ -230,14 +230,14 @@ func daemonRestart() {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("cc-connect daemon restarted.")
+	fmt.Printf("%s daemon restarted.\n", appName)
 }
 
 func requireInstalled(mgr daemon.Manager) {
 	st, _ := mgr.Status()
 	if st == nil || !st.Installed {
 		fmt.Fprintln(os.Stderr, "Service is not installed. Run first:")
-		fmt.Fprintln(os.Stderr, "  cc-connect daemon install --work-dir /path/to/config-dir")
+		fmt.Fprintf(os.Stderr, "  %s daemon install --work-dir /path/to/config-dir\n", appName)
 		os.Exit(1)
 	}
 }
@@ -252,14 +252,14 @@ func daemonStatus() {
 		os.Exit(1)
 	}
 
-	fmt.Println("cc-connect daemon status")
+	fmt.Printf("%s daemon status\n", appName)
 	fmt.Println()
 
 	if !st.Installed {
 		fmt.Println("  Status:    Not installed")
 		fmt.Printf("  Platform:  %s\n", st.Platform)
 		fmt.Println()
-		fmt.Println("  Run: cc-connect daemon install")
+		fmt.Printf("  Run: %s daemon install\n", appName)
 		return
 	}
 
@@ -390,7 +390,7 @@ func mustManager() daemon.Manager {
 }
 
 func printDaemonUsage() {
-	fmt.Println(`Usage: cc-connect daemon <command> [flags]
+	fmt.Printf(`Usage: %s daemon <command> [flags]
 
 Commands:
   install     Install and start as system service
@@ -403,7 +403,7 @@ Commands:
 
 Install flags:
   --config PATH         Path to config.toml (uses its parent as work dir)
-  --log-file PATH       Log file path (default: ~/.cc-connect/logs/cc-connect.log)
+  --log-file PATH       Log file path (default: ~/.cc-connect/logs/echo-client.log)
   --log-max-size N      Max log file size in MB (default: 10)
   --work-dir DIR        Directory containing config.toml (default: current dir)
   --force               Overwrite existing installation
@@ -416,5 +416,5 @@ Logs flags:
 Supported platforms:
   Linux (root)     - systemd system service (/etc/systemd/system/)
   Linux (non-root) - systemd user service (~/.config/systemd/user/)
-  macOS            - launchd LaunchAgent`)
+  macOS            - launchd LaunchAgent`, appName)
 }

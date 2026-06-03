@@ -691,9 +691,9 @@ var messages = map[MsgKey]map[Language]string{
 			"/doctor\n  Run system diagnostics\n\n" +
 			"/upgrade\n  Check for updates and self-update\n\n" +
 			"/agent-upgrade [status|check|run] [target|all]\n  Check or run managed agent CLI upgrades\n\n" +
-			"/restart\n  Restart cc-connect service\n\n" +
+			"/restart\n  Restart echo-client service\n\n" +
 			"/status\n  Show system status\n\n" +
-			"/version\n  Show cc-connect version\n\n" +
+			"/version\n  Show echo-client version\n\n" +
 			"/help\n  Show this help\n\n" +
 			"Tip: Commands support prefix matching, e.g. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Custom commands: define via `/commands add` or `[[commands]]` in config.toml.\n\n" +
@@ -731,9 +731,9 @@ var messages = map[MsgKey]map[Language]string{
 			"/doctor\n  运行系统诊断\n\n" +
 			"/upgrade\n  检查更新并自动升级\n\n" +
 			"/agent-upgrade [status|check|run] [目标|all]\n  查看或执行托管 Agent CLI 升级\n\n" +
-			"/restart\n  重启 cc-connect 服务\n\n" +
+			"/restart\n  重启 echo-client 服务\n\n" +
 			"/status\n  查看系统状态\n\n" +
-			"/version\n  查看 cc-connect 版本\n\n" +
+			"/version\n  查看 echo-client 版本\n\n" +
 			"/help\n  显示此帮助\n\n" +
 			"提示：命令支持前缀匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自定义命令：通过 `/commands add` 添加，或在 config.toml 中配置 `[[commands]]`。\n\n" +
@@ -771,9 +771,9 @@ var messages = map[MsgKey]map[Language]string{
 			"/doctor\n  執行系統診斷\n\n" +
 			"/upgrade\n  檢查更新並自動升級\n\n" +
 			"/agent-upgrade [status|check|run] [目標|all]\n  查看或執行受管 Agent CLI 升級\n\n" +
-			"/restart\n  重啟 cc-connect 服務\n\n" +
+			"/restart\n  重啟 echo-client 服務\n\n" +
 			"/status\n  查看系統狀態\n\n" +
-			"/version\n  查看 cc-connect 版本\n\n" +
+			"/version\n  查看 echo-client 版本\n\n" +
 			"/help\n  顯示此說明\n\n" +
 			"提示：命令支持前綴匹配，如 `/pro l` = `/provider list`，`/sw 2` = `/switch 2`。\n\n" +
 			"自訂命令：透過 `/commands add` 新增，或在 config.toml 中配置 `[[commands]]`。\n\n" +
@@ -810,9 +810,9 @@ var messages = map[MsgKey]map[Language]string{
 			"/doctor\n  システム診断を実行\n\n" +
 			"/upgrade\n  アップデートを確認して自動更新\n\n" +
 			"/agent-upgrade [status|check|run] [target|all]\n  管理対象エージェント CLI の更新確認/実行\n\n" +
-			"/restart\n  cc-connect サービスを再起動\n\n" +
+			"/restart\n  echo-client サービスを再起動\n\n" +
 			"/status\n  システム状態を表示\n\n" +
-			"/version\n  cc-connect のバージョンを表示\n\n" +
+			"/version\n  echo-client のバージョンを表示\n\n" +
 			"/help\n  このヘルプを表示\n\n" +
 			"ヒント：コマンドはプレフィックスマッチに対応しています。例: `/pro l` = `/provider list`、`/sw 2` = `/switch 2`。\n\n" +
 			"カスタムコマンド: `/commands add` または config.toml の `[[commands]]` で定義。\n\n" +
@@ -849,9 +849,9 @@ var messages = map[MsgKey]map[Language]string{
 			"/doctor\n  Ejecutar diagnósticos del sistema\n\n" +
 			"/upgrade\n  Buscar actualizaciones y auto-actualizar\n\n" +
 			"/agent-upgrade [status|check|run] [objetivo|all]\n  Ver o ejecutar actualizaciones de los CLI de agentes gestionados\n\n" +
-			"/restart\n  Reiniciar el servicio cc-connect\n\n" +
+			"/restart\n  Reiniciar el servicio echo-client\n\n" +
 			"/status\n  Mostrar estado del sistema\n\n" +
-			"/version\n  Mostrar versión de cc-connect\n\n" +
+			"/version\n  Mostrar versión de echo-client\n\n" +
 			"/help\n  Mostrar esta ayuda\n\n" +
 			"Consejo: Los comandos admiten coincidencia por prefijo, ej. `/pro l` = `/provider list`, `/sw 2` = `/switch 2`.\n\n" +
 			"Comandos personalizados: use `/commands add` o defina `[[commands]]` en config.toml.\n\n" +
@@ -944,11 +944,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Este agente no soporta el cambio de proveedor.",
 	},
 	MsgProviderNone: {
-		LangEnglish:            "No provider configured. Using agent's default environment.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
-		LangChinese:            "未配置 Provider，使用 Agent 默认环境。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
-		LangTraditionalChinese: "未配置 Provider，使用 Agent 預設環境。\n\n可在 `config.toml` 中新增或使用 `cc-connect provider add` 命令。",
-		LangJapanese:           "プロバイダが設定されていません。エージェントのデフォルト環境を使用します。\n\n`config.toml` または `cc-connect provider add` でプロバイダを追加してください。",
-		LangSpanish:            "No hay proveedor configurado. Usando el entorno predeterminado del agente.\n\nAgregue proveedores en `config.toml` o mediante `cc-connect provider add`.",
+		LangEnglish:            "No provider configured. Using agent's default environment.\n\nAdd providers in `config.toml` or via `echo-client provider add`.",
+		LangChinese:            "未配置 Provider，使用 Agent 默认环境。\n\n可在 `config.toml` 中添加或使用 `echo-client provider add` 命令。",
+		LangTraditionalChinese: "未配置 Provider，使用 Agent 預設環境。\n\n可在 `config.toml` 中新增或使用 `echo-client provider add` 命令。",
+		LangJapanese:           "プロバイダが設定されていません。エージェントのデフォルト環境を使用します。\n\n`config.toml` または `echo-client provider add` でプロバイダを追加してください。",
+		LangSpanish:            "No hay proveedor configurado. Usando el entorno predeterminado del agente.\n\nAgregue proveedores en `config.toml` o mediante `echo-client provider add`.",
 	},
 	MsgProviderCurrent: {
 		LangEnglish:            "📡 Active provider: **%s**\n\nUse `/provider list` to see all, `/provider switch <name>` to switch.",
@@ -965,11 +965,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "📡 Proveedores\n\n",
 	},
 	MsgProviderListEmpty: {
-		LangEnglish:            "No providers configured.\n\nAdd providers in `config.toml` or via `cc-connect provider add`.",
-		LangChinese:            "未配置 Provider。\n\n可在 `config.toml` 中添加或使用 `cc-connect provider add` 命令。",
-		LangTraditionalChinese: "未配置 Provider。\n\n可在 `config.toml` 中新增或使用 `cc-connect provider add` 命令。",
-		LangJapanese:           "プロバイダが設定されていません。\n\n`config.toml` または `cc-connect provider add` で追加してください。",
-		LangSpanish:            "No hay proveedores configurados.\n\nAgregue proveedores en `config.toml` o mediante `cc-connect provider add`.",
+		LangEnglish:            "No providers configured.\n\nAdd providers in `config.toml` or via `echo-client provider add`.",
+		LangChinese:            "未配置 Provider。\n\n可在 `config.toml` 中添加或使用 `echo-client provider add` 命令。",
+		LangTraditionalChinese: "未配置 Provider。\n\n可在 `config.toml` 中新增或使用 `echo-client provider add` 命令。",
+		LangJapanese:           "プロバイダが設定されていません。\n\n`config.toml` または `echo-client provider add` で追加してください。",
+		LangSpanish:            "No hay proveedores configurados.\n\nAgregue proveedores en `config.toml` o mediante `echo-client provider add`.",
 	},
 	MsgProviderSwitchHint: {
 		LangEnglish:            "`/provider switch <name>` to switch | `/provider clear` to reset",
@@ -1449,35 +1449,35 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⏸ Tarea programada `%s` deshabilitada.",
 	},
 	MsgStatusTitle: {
-		LangEnglish: "cc-connect Status\n\n" +
+		LangEnglish: "echo-client Status\n\n" +
 			"Project: %s\n" +
 			"Agent: %s\n" +
 			"Platforms: %s\n" +
 			"Uptime: %s\n" +
 			"Language: %s\n" +
 			"%s" + "%s" + "%s",
-		LangChinese: "cc-connect 状态\n\n" +
+		LangChinese: "echo-client 状态\n\n" +
 			"项目: %s\n" +
 			"Agent: %s\n" +
 			"平台: %s\n" +
 			"运行时间: %s\n" +
 			"语言: %s\n" +
 			"%s" + "%s" + "%s",
-		LangTraditionalChinese: "cc-connect 狀態\n\n" +
+		LangTraditionalChinese: "echo-client 狀態\n\n" +
 			"項目: %s\n" +
 			"Agent: %s\n" +
 			"平台: %s\n" +
 			"運行時間: %s\n" +
 			"語言: %s\n" +
 			"%s" + "%s" + "%s",
-		LangJapanese: "cc-connect ステータス\n\n" +
+		LangJapanese: "echo-client ステータス\n\n" +
 			"プロジェクト: %s\n" +
 			"エージェント: %s\n" +
 			"プラットフォーム: %s\n" +
 			"稼働時間: %s\n" +
 			"言語: %s\n" +
 			"%s" + "%s" + "%s",
-		LangSpanish: "Estado de cc-connect\n\n" +
+		LangSpanish: "Estado de echo-client\n\n" +
 			"Proyecto: %s\n" +
 			"Agente: %s\n" +
 			"Plataformas: %s\n" +
@@ -1963,18 +1963,18 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "\n✅ %d aprobados  ⚠️ %d advertencias  ❌ %d fallidos",
 	},
 	MsgRestarting: {
-		LangEnglish:            "🔄 Restarting cc-connect...",
-		LangChinese:            "🔄 正在重启 cc-connect...",
-		LangTraditionalChinese: "🔄 正在重啟 cc-connect...",
-		LangJapanese:           "🔄 cc-connect を再起動中...",
-		LangSpanish:            "🔄 Reiniciando cc-connect...",
+		LangEnglish:            "🔄 Restarting echo-client...",
+		LangChinese:            "🔄 正在重启 echo-client...",
+		LangTraditionalChinese: "🔄 正在重啟 echo-client...",
+		LangJapanese:           "🔄 echo-client を再起動中...",
+		LangSpanish:            "🔄 Reiniciando echo-client...",
 	},
 	MsgRestartSuccess: {
-		LangEnglish:            "✅ cc-connect restarted successfully.",
-		LangChinese:            "✅ cc-connect 重启成功。",
-		LangTraditionalChinese: "✅ cc-connect 重啟成功。",
-		LangJapanese:           "✅ cc-connect の再起動が完了しました。",
-		LangSpanish:            "✅ cc-connect se reinició correctamente.",
+		LangEnglish:            "✅ echo-client restarted successfully.",
+		LangChinese:            "✅ echo-client 重启成功。",
+		LangTraditionalChinese: "✅ echo-client 重啟成功。",
+		LangJapanese:           "✅ echo-client の再起動が完了しました。",
+		LangSpanish:            "✅ echo-client se reinició correctamente.",
 	},
 	MsgUpgradeChecking: {
 		LangEnglish:            "🔍 Checking for updates...",
@@ -2475,11 +2475,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Ver o ejecutar actualizaciones de los CLI de agentes gestionados",
 	},
 	MsgBuiltinCmdRestart: {
-		LangEnglish:            "Restart cc-connect service",
-		LangChinese:            "重启 cc-connect 服务",
-		LangTraditionalChinese: "重啟 cc-connect 服務",
-		LangJapanese:           "cc-connect サービスを再起動",
-		LangSpanish:            "Reiniciar el servicio cc-connect",
+		LangEnglish:            "Restart echo-client service",
+		LangChinese:            "重启 echo-client 服务",
+		LangTraditionalChinese: "重啟 echo-client 服務",
+		LangJapanese:           "echo-client サービスを再起動",
+		LangSpanish:            "Reiniciar el servicio echo-client",
 	},
 	MsgBuiltinCmdStatus: {
 		LangEnglish:            "Show system status",
@@ -2489,11 +2489,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Mostrar estado del sistema",
 	},
 	MsgBuiltinCmdVersion: {
-		LangEnglish:            "Show cc-connect version",
-		LangChinese:            "查看 cc-connect 版本",
-		LangTraditionalChinese: "查看 cc-connect 版本",
-		LangJapanese:           "cc-connect のバージョンを表示",
-		LangSpanish:            "Mostrar versión de cc-connect",
+		LangEnglish:            "Show echo-client version",
+		LangChinese:            "查看 echo-client 版本",
+		LangTraditionalChinese: "查看 echo-client 版本",
+		LangJapanese:           "echo-client のバージョンを表示",
+		LangSpanish:            "Mostrar versión de echo-client",
 	},
 	MsgBuiltinCmdHelp: {
 		LangEnglish:            "Show this help",

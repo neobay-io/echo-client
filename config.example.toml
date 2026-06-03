@@ -1,13 +1,13 @@
-# cc-connect configuration
-# cc-connect 配置文件
+# echo-client configuration
+# echo-client 配置文件
 #
 # Copy this file to config.toml and fill in your credentials.
 # 复制此文件为 config.toml，填入你的凭证信息。
 #
 # Each [[projects]] entry binds one code directory to its own agent + platforms.
-# A single cc-connect process can manage multiple projects simultaneously.
+# A single echo-client process can manage multiple projects simultaneously.
 # 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
-# 单个 cc-connect 进程可以同时管理多个项目。
+# 单个 echo-client 进程可以同时管理多个项目。
 
 # =============================================================================
 # Global Settings / 全局设置
@@ -38,9 +38,9 @@ level = "info" # debug, info, warn, error
 # Optional outbound WebSocket connection back to Echo Server.
 # 可选的到 Echo Server 的出站 WebSocket 长连接。
 #
-# When configured, cc-connect can register this host and its agent lanes with
+# When configured, echo-client can register this host and its agent lanes with
 # Echo over the worker gateway WebSocket.
-# 配置后，cc-connect 可以通过 worker gateway WebSocket 主动向 Echo 注册当前
+# 配置后，echo-client 可以通过 worker gateway WebSocket 主动向 Echo 注册当前
 # host 和 agent lane。
 #
 # Headless projects are allowed when echo.server_url is set.
@@ -123,12 +123,12 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Managed Agent CLI Upgrades / 托管 Agent CLI 升级
 # =============================================================================
-# Host-level upgrade orchestration for agent CLIs used by cc-connect.
+# Host-level upgrade orchestration for agent CLIs used by echo-client.
 # This is global: one upgrade affects every project that uses the same agent type.
-# cc-connect only triggers the configured upgrade command; it does not guess your
+# echo-client only triggers the configured upgrade command; it does not guess your
 # installer beyond the built-in defaults.
 # 主机级 Agent CLI 升级编排。它是全局的：同一类 agent 升级一次，会影响所有使用该
-# agent 的 project。cc-connect 只会触发配置好的升级命令，不会额外猜测你的安装器。
+# agent 的 project。echo-client 只会触发配置好的升级命令，不会额外猜测你的安装器。
 #
 # Phase 1 currently supports:
 # - `/agent-upgrade status`
@@ -280,10 +280,10 @@ level = "info" # debug, info, warn, error
 # =============================================================================
 # Daemon Mode / 守护进程模式
 # =============================================================================
-# Run cc-connect as a background service (systemd user / launchd LaunchAgent).
-# 将 cc-connect 作为后台服务运行（systemd 用户服务 / launchd LaunchAgent）。
+# Run echo-client as a background service (systemd user / launchd LaunchAgent).
+# 将 echo-client 作为后台服务运行（systemd 用户服务 / launchd LaunchAgent）。
 #
-# CLI: cc-connect daemon install|uninstall|start|stop|restart|status|logs
+# CLI: echo-client daemon install|uninstall|start|stop|restart|status|logs
 # Install: --log-file PATH, --log-max-size N (MB), --work-dir DIR, --force
 # Logs: -f/--follow, -n N, --log-file PATH
 # 配置均通过 CLI 参数，无需在此文件中设置。
@@ -369,9 +369,9 @@ level = "info" # debug, info, warn, error
 #   /commands del finduser
 #   /commands         — list all custom commands
 #
-# In addition, cc-connect auto-discovers .md files from the agent's commands
+# In addition, echo-client auto-discovers .md files from the agent's commands
 # directory (e.g. .claude/commands/*.md, .gemini/commands/*.md).
-# 此外，cc-connect 还会自动发现 Agent 的 commands 目录下的 .md 文件。
+# 此外，echo-client 还会自动发现 Agent 的 commands 目录下的 .md 文件。
 
 # =============================================================================
 # Banned Words / 违禁词
@@ -481,8 +481,8 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # router_url = "http://127.0.0.1:3456"  # Claude Code Router URL (default: http://127.0.0.1:3456)
 # router_api_key = "your-router-api-key" # Optional: API key if router requires authentication / 可选：如果 router 需要认证
 #
-# When router_url is set, cc-connect will automatically:
-# 设置 router_url 后，cc-connect 会自动：
+# When router_url is set, echo-client will automatically:
+# 设置 router_url 后，echo-client 会自动：
 #   - Set ANTHROPIC_BASE_URL to router_url
 #   - Set NO_PROXY=127.0.0.1 to prevent proxy interference
 #   - Disable telemetry and cost warnings for cleaner integration
@@ -495,7 +495,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # provider = "anthropic"
 
 # API Providers — switch between them via /provider command in chat
-# or via CLI: cc-connect provider add --project my-backend --name relay --api-key sk-xxx
+# or via CLI: echo-client provider add --project my-backend --name relay --api-key sk-xxx
 # API Provider 管理 — 可通过聊天命令 /provider 或 CLI 命令切换
 #
 # [[projects.agent.providers]]
@@ -512,7 +512,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # # Some providers (e.g. SiliconFlow) don't support Claude's adaptive thinking.
 # # Set thinking = "disabled" to auto-rewrite via a local proxy.
 # # 部分第三方 Provider（如硅基流动）不支持 Claude 的 adaptive thinking，
-# # 设置 thinking = "disabled" 后 cc-connect 会通过本地代理自动改写请求。
+# # 设置 thinking = "disabled" 后 echo-client 会通过本地代理自动改写请求。
 # [[projects.agent.providers]]
 # name = "siliconflow"
 # api_key = "sk-xxx"
@@ -664,8 +664,8 @@ app_secret = "your-feishu-app-secret"
 #    URL: http(s)://<your-domain>:<port>/wecom/callback
 #    Token: any random string / 任意随机字符串
 #    EncodingAESKey: click "Random Generate" (43 chars) / 点击"随机生成"（43位）
-#    (Start cc-connect FIRST, then save to pass verification)
-#    （先启动 cc-connect，再保存以通过验证）
+#    (Start echo-client FIRST, then save to pass verification)
+#    （先启动 echo-client，再保存以通过验证）
 # 5. App > Trusted IP > add your server's outbound IP
 #    应用 > 企业可信 IP > 添加服务器出口 IP
 # 6. (Optional) My Enterprise > WeChat Plugin > scan QR to link personal WeChat

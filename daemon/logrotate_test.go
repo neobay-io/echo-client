@@ -46,14 +46,20 @@ func TestRotatingWriter(t *testing.T) {
 func TestMetaSaveLoad(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	dir := t.TempDir()
-	os.Setenv("HOME", dir)
-	defer os.Setenv("HOME", origHome)
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
 
 	m := &Meta{
 		LogFile:     "/tmp/test.log",
 		LogMaxSize:  1024,
 		WorkDir:     "/tmp",
-		BinaryPath:  "/usr/local/bin/cc-connect",
+		BinaryPath:  "/usr/local/bin/echo-client",
 		InstalledAt: NowISO(),
 	}
 
@@ -71,5 +77,22 @@ func TestMetaSaveLoad(t *testing.T) {
 	}
 	if loaded.WorkDir != m.WorkDir {
 		t.Errorf("WorkDir mismatch: %s != %s", loaded.WorkDir, m.WorkDir)
+	}
+}
+
+func TestDefaultLogFileUsesEchoClientName(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	if got := DefaultLogFile(); got != filepath.Join(dir, ".cc-connect", "logs", "echo-client.log") {
+		t.Fatalf("DefaultLogFile() = %q", got)
 	}
 }

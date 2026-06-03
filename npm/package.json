@@ -15,14 +15,15 @@
     "chatbot",
     "bridge"
   ],
-  "homepage": "https://github.com/chenhg5/cc-connect",
+  "homepage": "https://github.com/neobay-io/echo-client",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chenhg5/cc-connect.git"
+    "url": "https://github.com/neobay-io/echo-client.git"
   },
   "license": "MIT",
   "author": "chenhg5",
   "bin": {
+    "echo-client": "run.js",
     "cc-connect": "run.js"
   },
   "scripts": {

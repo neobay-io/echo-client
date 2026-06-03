@@ -172,7 +172,7 @@ func (c *WorkerClient) runSession(ctx context.Context) error {
 
 	if _, err := c.request(ctx, map[string]any{
 		"type":           "hello",
-		"worker_version": "cc-connect",
+		"worker_version": "echo-client",
 	}, "hello_ack"); err != nil {
 		return err
 	}

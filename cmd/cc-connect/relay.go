@@ -92,7 +92,7 @@ func runRelaySend(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
 	}
 
@@ -127,16 +127,16 @@ func runRelaySend(args []string) {
 }
 
 func printRelayUsage() {
-	fmt.Println(`Usage: cc-connect relay <command> [options]
+	fmt.Printf(`Usage: %s relay <command> [options]
 
 Commands:
   send      Send a message to another bot via relay
 
-Run 'cc-connect relay <command> --help' for details.`)
+Run '%s relay <command> --help' for details.`, appName, appName)
 }
 
 func printRelaySendUsage() {
-	fmt.Println(`Usage: cc-connect relay send [options] [<target_project> <message>]
+	fmt.Printf(`Usage: %s relay send [options] [<target_project> <message>]
 
 Send a message to another bot and wait for the response.
 
@@ -149,6 +149,6 @@ Options:
   -h, --help                 Show this help
 
 Examples:
-  cc-connect relay send --to claude-bot "What's the weather today?"
-  cc-connect relay send claude-bot What is the weather today`)
+  %s relay send --to claude-bot "What's the weather today?"
+  %s relay send claude-bot What is the weather today`, appName, appName, appName)
 }

@@ -34,11 +34,11 @@ fi
 DEPLOY_ENV="${DEPLOY_BASE_DIR}/config/cc-connect/deploy.env"
 source "${DEPLOY_ENV}"
 
-echo "Building cc-connect binary"
+echo "Building echo-client binary"
 cd "${ROOT_DIR}"
 go build -o "${CC_CONNECT_BINARY}" ./cmd/cc-connect
 
-echo "cc-connect worker prepared"
+echo "echo-client worker prepared"
 echo "Config: ${CC_CONNECT_CONFIG_PATH}"
 echo "Binary: ${CC_CONNECT_BINARY}"
 echo "Run:"

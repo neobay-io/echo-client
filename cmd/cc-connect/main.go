@@ -108,11 +108,11 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
+		fmt.Printf("%s %s\ncommit:  %s\nbuilt:   %s\n", appName, version, commit, buildTime)
 		return
 	}
 
-	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
+	core.VersionInfo = fmt.Sprintf("%s %s\ncommit: %s\nbuilt: %s", appName, version, commit, buildTime)
 	core.CurrentVersion = version
 	serviceCtx, stopServices := context.WithCancel(context.Background())
 	defer stopServices()
@@ -125,7 +125,7 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Created default config at %s\n", configPath)
-		fmt.Println("Please edit this file to add your agent and platform credentials, then run cc-connect again.")
+		fmt.Printf("Please edit this file to add your agent and platform credentials, then run %s again.\n", appName)
 		os.Exit(0)
 	}
 
@@ -573,7 +573,7 @@ func main() {
 		}
 	}
 
-	slog.Info("cc-connect is running", "projects", len(engines))
+	slog.Info("echo-client is running", "projects", len(engines))
 
 	// After startup, check if we were restarted and send success notification
 	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
@@ -719,8 +719,8 @@ func bootstrapConfig(path string) error {
 		return err
 	}
 
-	const tmpl = `# cc-connect configuration
-# Docs: https://github.com/chenhg5/cc-connect
+	const tmpl = `# echo-client configuration
+# Docs: https://github.com/neobay-io/echo-client
 
 [log]
 level = "info"
@@ -747,7 +747,7 @@ app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 
 # For more platforms (DingTalk, Telegram, Slack, Discord, LINE, WeChat Work)
-# see: https://github.com/chenhg5/cc-connect/blob/main/config.example.toml
+# see: https://github.com/neobay-io/echo-client/blob/main/config.example.toml
 `
 	return os.WriteFile(path, []byte(tmpl), 0o644)
 }
@@ -768,12 +768,12 @@ func printUsage() {
   Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
   Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, QQ, QQ Bot
 
-  GitHub:  https://github.com/chenhg5/cc-connect
-  Docs:    https://github.com/chenhg5/cc-connect/blob/main/INSTALL.md
+  GitHub:  %s
+  Docs:    %s
 
 Usage:
-  cc-connect [flags]
-  cc-connect <command> [args]
+  %s [flags]
+  %s <command> [args]
 
 Flags:
   --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect/config.toml)
@@ -781,7 +781,7 @@ Flags:
   --help             Show this help message
 
 Commands:
-  daemon             Manage cc-connect as a background service (systemd/launchd)
+  daemon             Manage echo-client as a background service (systemd/launchd)
     install          Install and start the daemon service
     uninstall        Remove the daemon service
     start            Start the daemon
@@ -812,17 +812,17 @@ Commands:
   config-example     Print a complete annotated config.toml example
 
 Examples:
-  cc-connect                          Start with default config
-  cc-connect --config /path/to.toml   Start with a specific config file
-  cc-connect daemon install           Install as a system service
-  cc-connect daemon logs -f           Follow daemon logs
-  cc-connect send -m "hello"          Send a message to the active session
-  cc-connect cron list                List all scheduled tasks
-  cc-connect update                   Update to the latest version
-  cc-connect config-example           Print full config.toml example
-  cc-connect config-example > c.toml  Save example config to a file
+  %s                          Start with default config
+  %s --config /path/to.toml   Start with a specific config file
+  %s daemon install           Install as a system service
+  %s daemon logs -f           Follow daemon logs
+  %s send -m "hello"          Send a message to the active session
+  %s cron list                List all scheduled tasks
+  %s update                   Update to the latest version
+  %s config-example           Print full config.toml example
+  %s config-example > c.toml  Save example config to a file
 
-`, v)
+`, v, appGitHubURL, appDocsURL, appName, appName, appName, appName, appName, appName, appName, appName, appName, appName, appName)
 }
 
 func setupLogger(level string, w io.Writer) {

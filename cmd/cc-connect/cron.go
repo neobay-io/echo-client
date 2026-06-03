@@ -135,7 +135,7 @@ func runCronAdd(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
 	}
 
@@ -205,7 +205,7 @@ func runCronList(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
 	}
 
@@ -295,7 +295,7 @@ func runCronDel(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
 	}
 
@@ -373,7 +373,7 @@ func runCronEdit(args []string) {
 		}
 	}
 	if len(pos) < 3 {
-		fmt.Fprintln(os.Stderr, "Error: usage: cc-connect cron edit <id> <field> <value>")
+		fmt.Fprintf(os.Stderr, "Error: usage: %s cron edit <id> <field> <value>\n", appName)
 		printCronEditUsage()
 		os.Exit(1)
 	}
@@ -428,7 +428,7 @@ func apiPost(sockPath, path string, payload []byte) (*http.Response, error) {
 }
 
 func printCronUsage() {
-	fmt.Println(`Usage: cc-connect cron <command> [options]
+	fmt.Printf(`Usage: %s cron <command> [options]
 
 Commands:
   add       Create a new scheduled task
@@ -438,11 +438,11 @@ Commands:
   edit      Modify one task field
   del <id>  Delete a scheduled task
 
-Run 'cc-connect cron <command> --help' for details.`)
+Run '%s cron <command> --help' for details.`, appName, appName)
 }
 
 func printCronAddUsage() {
-	fmt.Println(`Usage: cc-connect cron add [options] [<min> <hour> <day> <month> <weekday> <prompt>]
+	fmt.Printf(`Usage: %s cron add [options] [<min> <hour> <day> <month> <weekday> <prompt>]
 
 Create a new scheduled task.
 
@@ -459,21 +459,21 @@ Options:
   -h, --help                 Show this help
 
 Examples:
-  cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
-  cc-connect cron add --cron "0 6 * * *" --exec "git status --short" --desc "Daily Git Check"
-  cc-connect cron add 0 6 * * * Collect GitHub trending data and send me a summary`)
+  %s cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
+  %s cron add --cron "0 6 * * *" --exec "git status --short" --desc "Daily Git Check"
+  %s cron add 0 6 * * * Collect GitHub trending data and send me a summary`, appName, appName, appName, appName)
 }
 
 func printCronEditUsage() {
-	fmt.Println(`Usage: cc-connect cron edit <id> <field> <value>
+	fmt.Printf(`Usage: %s cron edit <id> <field> <value>
 
 Editable fields:
   project session_key cron_expr prompt exec work_dir description
   enabled silent mute session_mode timeout_mins
 
 Examples:
-  cc-connect cron edit abc123 description Nightly sync
-  cc-connect cron edit abc123 enabled false
-  cc-connect cron edit abc123 session_mode new_per_run
-  cc-connect cron edit abc123 timeout_mins 10`)
+  %s cron edit abc123 description Nightly sync
+  %s cron edit abc123 enabled false
+  %s cron edit abc123 session_mode new_per_run
+  %s cron edit abc123 timeout_mins 10`, appName, appName, appName, appName, appName)
 }

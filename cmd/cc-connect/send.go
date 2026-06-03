@@ -69,7 +69,7 @@ func runSend(args []string) {
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
 	}
 
@@ -114,12 +114,12 @@ func resolveSocketPath(dataDir string) string {
 }
 
 func printSendUsage() {
-	fmt.Println(`Usage: cc-connect send [options] <message>
-       cc-connect send [options] -m <message>
-       cc-connect send [options] --stdin < file
-       echo "msg" | cc-connect send [options] --stdin
+	fmt.Printf(`Usage: %s send [options] <message>
+       %s send [options] -m <message>
+       %s send [options] --stdin < file
+       echo "msg" | %s send [options] --stdin
 
-Send a message to an active cc-connect session.
+Send a message to an active %s session.
 
 Options:
   -m, --message <text>     Message to send (preferred over positional args)
@@ -130,9 +130,9 @@ Options:
   -h, --help               Show this help
 
 Examples:
-  cc-connect send "Daily summary: ..."
-  cc-connect send -m "Build completed successfully"
-  cc-connect send --stdin <<'EOF'
+  %s send "Daily summary: ..."
+  %s send -m "Build completed successfully"
+  %s send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
-  EOF`)
+  EOF`, appName, appName, appName, appName, appName, appName, appName, appName)
 }

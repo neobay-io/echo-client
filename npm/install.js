@@ -11,9 +11,9 @@ const zlib = require("zlib");
 
 const PACKAGE = require("./package.json");
 const VERSION = `v${PACKAGE.version}`;
-const NAME = "cc-connect";
+const NAME = "echo-client";
 
-const GITHUB_REPO = "chenhg5/cc-connect";
+const GITHUB_REPO = "neobay-io/echo-client";
 const GITEE_REPO = "cg33/cc-connect";
 
 const PLATFORM_MAP = {
@@ -53,7 +53,7 @@ function fetch(url, redirects = 5) {
     if (redirects <= 0) return reject(new Error("Too many redirects"));
     const mod = url.startsWith("https") ? https : http;
     mod
-      .get(url, { headers: { "User-Agent": "cc-connect-npm" } }, (res) => {
+      .get(url, { headers: { "User-Agent": "echo-client-npm" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           return resolve(fetch(res.headers.location, redirects - 1));
         }
@@ -73,16 +73,16 @@ function fetch(url, redirects = 5) {
 async function download(urls) {
   for (const url of urls) {
     try {
-      console.log(`[cc-connect] Downloading from ${url}`);
+      console.log(`[echo-client] Downloading from ${url}`);
       const data = await fetch(url);
-      console.log(`[cc-connect] Downloaded ${(data.length / 1024 / 1024).toFixed(1)} MB`);
+      console.log(`[echo-client] Downloaded ${(data.length / 1024 / 1024).toFixed(1)} MB`);
       return data;
     } catch (err) {
-      console.warn(`[cc-connect] Failed: ${err.message}, trying next source...`);
+      console.warn(`[echo-client] Failed: ${err.message}, trying next source...`);
     }
   }
   throw new Error(
-    `[cc-connect] Could not download binary from any source.\n` +
+    `[echo-client] Could not download binary from any source.\n` +
       `  Tried: ${urls.join(", ")}\n` +
       `  You can download manually from https://github.com/${GITHUB_REPO}/releases`
   );
@@ -124,7 +124,7 @@ function extractZip(buffer, destDir, binaryName) {
 
 async function main() {
   const { platform, arch, ext, filename } = getPlatformInfo();
-  console.log(`[cc-connect] Platform: ${platform}/${arch}`);
+  console.log(`[echo-client] Platform: ${platform}/${arch}`);
 
   const binDir = path.join(__dirname, "bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -136,13 +136,13 @@ async function main() {
     try {
       const out = execSync(`"${binaryPath}" --version`, { encoding: "utf8", timeout: 5000 });
       if (out.includes(VERSION.slice(1))) {
-        console.log(`[cc-connect] Binary ${VERSION} already installed, skipping.`);
+        console.log(`[echo-client] Binary ${VERSION} already installed, skipping.`);
         return;
       }
-      console.log(`[cc-connect] Existing binary is outdated, upgrading to ${VERSION}...`);
+      console.log(`[echo-client] Existing binary is outdated, upgrading to ${VERSION}...`);
       fs.unlinkSync(binaryPath);
     } catch {
-      console.log(`[cc-connect] Replacing existing binary with ${VERSION}...`);
+      console.log(`[echo-client] Replacing existing binary with ${VERSION}...`);
       fs.unlinkSync(binaryPath);
     }
   }
@@ -163,19 +163,19 @@ async function main() {
   if (platform === "darwin") {
     try {
       execSync(`xattr -d com.apple.quarantine "${binaryPath}"`, { stdio: "pipe" });
-      console.log(`[cc-connect] Removed macOS quarantine attribute`);
+      console.log(`[echo-client] Removed macOS quarantine attribute`);
     } catch {
       // xattr fails if the attribute doesn't exist, which is fine
     }
   }
 
-  console.log(`[cc-connect] Installed to ${binaryPath}`);
+  console.log(`[echo-client] Installed to ${binaryPath}`);
 }
 
 main().catch((err) => {
   console.error(err.message);
   console.error(
-    "[cc-connect] Installation failed. You can install manually:\n" +
+    "[echo-client] Installation failed. You can install manually:\n" +
       `  https://github.com/${GITHUB_REPO}/releases/tag/${VERSION}`
   );
   process.exit(1);
