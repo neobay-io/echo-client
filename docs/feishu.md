@@ -228,7 +228,7 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 
 这适合群聊里接着另一位机器人或同事的输出继续追问，不需要手动再复制一遍原文。
 
-如果你希望先收集多条转发/消息，最后再统一告诉 agent 如何处理，请参考 [Forward Collection Design](./2026-05-20-forward-collection.md)。
+如果你希望先收集多条转发/消息，最后再统一告诉 agent 如何处理，请参考 [Forward Collection Design](./designs/2026-05-20-forward-collection.md)。
 
 ---
 

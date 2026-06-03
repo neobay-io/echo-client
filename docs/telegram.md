@@ -185,7 +185,7 @@ If you reply to an existing Telegram message and mention the bot, cc-connect for
 
 This is useful in group chats when you want to continue from another bot's output without copying it into your new message.
 
-For staged forwarding and batch processing of many forwarded messages, see [Forward Collection Design](./2026-05-20-forward-collection.md).
+For staged forwarding and batch processing of many forwarded messages, see [Forward Collection Design](./designs/2026-05-20-forward-collection.md).
 
 ---
 
