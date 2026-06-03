@@ -2,13 +2,11 @@
 
 Point-in-time design documents. Naming: `YYYY-MM-DD-{slug}.md`.
 
-## Convention
+Follows the canonical [docs-organization pattern](https://github.com/neobay-io/skipping-stone/blob/main/patterns/docs-organization/README.md) — full convention lives there. This README only indexes this directory's current entries.
 
-Design docs describe what was proposed / decided at a **specific point in time** for a **specific scope of changes**. They differ from perpetual reference docs at repo root (README, INSTALL, CHANGELOG) and platform integration guides in `docs/` (feishu.md, slack.md, etc. — which are continuously updated as platforms evolve).
+Note: cc-connect's `docs/` root also holds **persistent platform integration guides** (`feishu.md`, `slack.md`, etc.) which are continuously updated — they are NOT design docs and do not get date prefixes.
 
-When a milestone's design ships and stabilizes, relevant content gets folded into the perpetual reference docs; the dated design doc remains as historical record.
-
-Modeled on co-ceo's pattern: time-bound artifacts use date prefix; stable references don't.
+Status lifecycle: `draft → proposed → accepted → shipped / superseded / rejected`
 
 ## Current designs
 
