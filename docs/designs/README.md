@@ -4,7 +4,7 @@ Point-in-time design documents. Naming: `YYYY-MM-DD-{slug}.md`.
 
 ## Convention
 
-Design docs describe what was proposed / decided at a **specific point in time** for a **specific scope of changes**. They differ from perpetual reference docs (the existing `docs/*.md` platform integration guides like `feishu.md`, `slack.md`, etc.) which are continuously updated.
+Design docs describe what was proposed / decided at a **specific point in time** for a **specific scope of changes**. They differ from perpetual reference docs at repo root (README, INSTALL, CHANGELOG) and platform integration guides in `docs/` (feishu.md, slack.md, etc. — which are continuously updated as platforms evolve).
 
 When a milestone's design ships and stabilizes, relevant content gets folded into the perpetual reference docs; the dated design doc remains as historical record.
 
@@ -12,9 +12,11 @@ Modeled on co-ceo's pattern: time-bound artifacts use date prefix; stable refere
 
 ## Current designs
 
-| File | Status | Description |
-|------|--------|-------------|
-| [`2026-05-09-transcript-collector.md`](./2026-05-09-transcript-collector.md) | proposed | New `transcript-collector` daemon module: scans local AI CLI transcript paths (`~/.claude/projects/`, `~/.codex/sessions/`, etc.), parses + summarizes new sessions incrementally, attributes person/org/project via cwd lookup + Echo `/git-binding`, pushes `AgentSessionSummary` to Echo. Companion to `neobay-io/echo/docs/designs/2026-05-09-echo-v2-extension.md` §4.12. |
+| Date | File | Status | Description |
+|------|------|--------|-------------|
+| 2026-04-08 | [`2026-04-08-skills-integration.md`](./2026-04-08-skills-integration.md) | proposed | Per-project native Skills integration — how cc-connect should support and surface skill assets within agent workspaces. |
+| 2026-04-16 | [`2026-04-16-reasoning-integration.md`](./2026-04-16-reasoning-integration.md) | proposed | Reasoning-level integration — runtime + config-driven reasoning-depth selection across Codex, Claude Code, Gemini CLI, Qoder. Stable user-facing chat control; preserves native effort knobs where available. |
+| 2026-05-09 | [`2026-05-09-transcript-collector.md`](./2026-05-09-transcript-collector.md) | proposed | New `transcript-collector` daemon: scans local AI CLI transcript paths (`~/.claude/projects/`, `~/.codex/sessions/`, ...), parses + summarizes new sessions incrementally, attributes person/org/project via cwd lookup + Echo `/git-binding`, pushes `AgentSessionSummary` to Echo. Companion to `neobay-io/echo/docs/designs/2026-05-09-echo-v2-extension.md` §4.12. |
 
 ## Adding a new design doc
 
