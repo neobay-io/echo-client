@@ -12,6 +12,7 @@ const zlib = require("zlib");
 const PACKAGE = require("./package.json");
 const VERSION = `v${PACKAGE.version}`;
 const NAME = "echo-client";
+const LEGACY_NAME = "cc-connect";
 
 const GITHUB_REPO = "neobay-io/echo-client";
 const GITEE_REPO = "cg33/cc-connect";
@@ -37,14 +38,15 @@ function getPlatformInfo() {
     );
   }
   const ext = platform === "windows" ? ".zip" : ".tar.gz";
-  const filename = `${NAME}-${VERSION}-${platform}-${arch}${ext}`;
-  return { platform, arch, ext, filename };
+  const githubFilename = `${NAME}-${VERSION}-${platform}-${arch}${ext}`;
+  const giteeFilename = `${LEGACY_NAME}-${VERSION}-${platform}-${arch}${ext}`;
+  return { platform, arch, ext, githubFilename, giteeFilename };
 }
 
-function getDownloadURLs(filename) {
+function getDownloadURLs(githubFilename, giteeFilename) {
   return [
-    `https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${filename}`,
-    `https://gitee.com/${GITEE_REPO}/releases/download/${VERSION}/${filename}`,
+    `https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${githubFilename}`,
+    `https://gitee.com/${GITEE_REPO}/releases/download/${VERSION}/${giteeFilename}`,
   ];
 }
 
@@ -96,7 +98,7 @@ function extractTarGz(buffer, destDir, binaryName) {
   } finally {
     fs.unlinkSync(tmpFile);
   }
-  const extracted = fs.readdirSync(destDir).find((f) => f.startsWith(NAME) && !f.endsWith(".tar.gz"));
+  const extracted = fs.readdirSync(destDir).find((f) => (f.startsWith(NAME) || f.startsWith(LEGACY_NAME)) && !f.endsWith(".tar.gz"));
   if (extracted && extracted !== binaryName) {
     fs.renameSync(path.join(destDir, extracted), path.join(destDir, binaryName));
   }
@@ -116,14 +118,14 @@ function extractZip(buffer, destDir, binaryName) {
   } finally {
     try { fs.unlinkSync(tmpFile); } catch {}
   }
-  const extracted = fs.readdirSync(destDir).find((f) => f.startsWith(NAME) && f.endsWith(".exe"));
+  const extracted = fs.readdirSync(destDir).find((f) => (f.startsWith(NAME) || f.startsWith(LEGACY_NAME)) && f.endsWith(".exe"));
   if (extracted && extracted !== binaryName) {
     fs.renameSync(path.join(destDir, extracted), path.join(destDir, binaryName));
   }
 }
 
 async function main() {
-  const { platform, arch, ext, filename } = getPlatformInfo();
+  const { platform, arch, ext, githubFilename, giteeFilename } = getPlatformInfo();
   console.log(`[echo-client] Platform: ${platform}/${arch}`);
 
   const binDir = path.join(__dirname, "bin");
@@ -147,7 +149,7 @@ async function main() {
     }
   }
 
-  const urls = getDownloadURLs(filename);
+  const urls = getDownloadURLs(githubFilename, giteeFilename);
   const data = await download(urls);
 
   if (ext === ".tar.gz") {

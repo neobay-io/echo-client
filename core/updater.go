@@ -20,10 +20,13 @@ import (
 )
 
 const (
-	githubReleasesAPI = "https://api.github.com/repos/neobay-io/echo-client/releases"
-	giteeReleasesAPI  = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases"
-	githubDownload    = "https://github.com/neobay-io/echo-client/releases/download"
-	giteeDownload     = "https://gitee.com/cg33/cc-connect/releases/download"
+	githubReleasesAPI     = "https://api.github.com/repos/neobay-io/echo-client/releases"
+	giteeReleasesAPI      = "https://gitee.com/api/v5/repos/cg33/cc-connect/releases"
+	githubDownload        = "https://github.com/neobay-io/echo-client/releases/download"
+	giteeDownload         = "https://gitee.com/cg33/cc-connect/releases/download"
+	currentBinaryPrefix   = "echo-client"
+	legacyBinaryPrefix    = "cc-connect"
+	updateTempFilePattern = "echo-client-update-*"
 )
 
 type ReleaseInfo struct {
@@ -128,14 +131,8 @@ func SelfUpdate(tag string, preferGitee bool) error {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 
-	ext := ".tar.gz"
-	if goos == "windows" {
-		ext = ".zip"
-	}
-	filename := fmt.Sprintf("echo-client-%s-%s-%s%s", tag, goos, goarch, ext)
-
-	giteeURL := fmt.Sprintf("%s/%s/%s", giteeDownload, tag, filename)
-	githubURL := fmt.Sprintf("%s/%s/%s", githubDownload, tag, filename)
+	githubURL := fmt.Sprintf("%s/%s/%s", githubDownload, tag, releaseAssetName(currentBinaryPrefix, tag, goos, goarch))
+	giteeURL := fmt.Sprintf("%s/%s/%s", giteeDownload, tag, releaseAssetName(legacyBinaryPrefix, tag, goos, goarch))
 	urls := []string{githubURL, giteeURL}
 	if preferGitee {
 		urls = []string{giteeURL, githubURL}
@@ -216,11 +213,11 @@ func extractBinaryFromTarGz(data []byte) ([]byte, error) {
 			return nil, err
 		}
 		name := filepath.Base(hdr.Name)
-		if strings.HasPrefix(name, "echo-client") && hdr.Typeflag == tar.TypeReg {
+		if matchesReleaseBinaryName(name) && hdr.Typeflag == tar.TypeReg {
 			return io.ReadAll(tr)
 		}
 	}
-	return nil, fmt.Errorf("echo-client binary not found in archive")
+	return nil, fmt.Errorf("compatible binary not found in archive")
 }
 
 func extractBinaryFromZip(data []byte) ([]byte, error) {
@@ -230,7 +227,7 @@ func extractBinaryFromZip(data []byte) ([]byte, error) {
 	}
 	for _, f := range r.File {
 		name := filepath.Base(f.Name)
-		if strings.HasPrefix(name, "echo-client") && !f.FileInfo().IsDir() {
+		if matchesReleaseBinaryName(name) && !f.FileInfo().IsDir() {
 			rc, err := f.Open()
 			if err != nil {
 				return nil, err
@@ -239,7 +236,7 @@ func extractBinaryFromZip(data []byte) ([]byte, error) {
 			return io.ReadAll(rc)
 		}
 	}
-	return nil, fmt.Errorf("echo-client binary not found in zip archive")
+	return nil, fmt.Errorf("compatible binary not found in zip archive")
 }
 
 func replaceBinary(newBinary []byte) error {
@@ -253,7 +250,7 @@ func replaceBinary(newBinary []byte) error {
 	}
 
 	dir := filepath.Dir(execPath)
-	tmpFile, err := os.CreateTemp(dir, "echo-client-update-*")
+	tmpFile, err := os.CreateTemp(dir, updateTempFilePattern)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -327,6 +324,18 @@ func normalizeVersion(v string) string {
 		v = "v" + v
 	}
 	return v
+}
+
+func releaseAssetName(prefix, tag, goos, goarch string) string {
+	ext := ".tar.gz"
+	if goos == "windows" {
+		ext = ".zip"
+	}
+	return fmt.Sprintf("%s-%s-%s-%s%s", prefix, tag, goos, goarch, ext)
+}
+
+func matchesReleaseBinaryName(name string) bool {
+	return strings.HasPrefix(name, currentBinaryPrefix) || strings.HasPrefix(name, legacyBinaryPrefix)
 }
 
 // semverCompare returns >0 if a > b, <0 if a < b, 0 if equal.

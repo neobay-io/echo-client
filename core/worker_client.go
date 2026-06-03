@@ -171,8 +171,11 @@ func (c *WorkerClient) runSession(ctx context.Context) error {
 	}()
 
 	if _, err := c.request(ctx, map[string]any{
-		"type":           "hello",
-		"worker_version": "echo-client",
+		"type": "hello",
+		// Keep the legacy identifier for protocol compatibility. Echo currently
+		// echoes this field back without validation, but older deployments may
+		// still assume the historical cc-connect marker.
+		"worker_version": "cc-connect",
 	}, "hello_ack"); err != nil {
 		return err
 	}

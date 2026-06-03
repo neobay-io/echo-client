@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +15,11 @@ import (
 const (
 	systemdServiceName = ServiceName + ".service"
 	legacySystemdName  = LegacyServiceName + ".service"
+)
+
+var (
+	lookupUser       = user.Lookup
+	systemdSystemDir = "/etc/systemd/system"
 )
 
 type systemdManager struct {
@@ -63,6 +69,9 @@ func (m *systemdManager) Install(cfg Config) error {
 		runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
 		_ = os.Remove(legacyUnitPath)
 	}
+	if warn := m.oppositeScopeLegacyWarning(); warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
+	}
 
 	unit := m.buildUnit(cfg)
 	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
@@ -85,6 +94,9 @@ func (m *systemdManager) Install(cfg Config) error {
 func (m *systemdManager) Uninstall() error {
 	runSystemctl(m.sysArgs("disable", "--now", systemdServiceName)...)
 	runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
+	if warn := m.oppositeScopeLegacyWarning(); warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
+	}
 
 	unitPath := m.unitPath()
 	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
@@ -164,10 +176,43 @@ func (m *systemdManager) unitPath() string {
 
 func (m *systemdManager) unitPathFor(serviceName string) string {
 	if m.system {
-		return filepath.Join("/etc/systemd/system", serviceName)
+		return filepath.Join(systemdSystemDir, serviceName)
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "systemd", "user", serviceName)
+}
+
+func (m *systemdManager) oppositeScopeLegacyWarning() string {
+	if m.system {
+		if home := invokingUserHome(); home != "" {
+			userUnit := filepath.Join(home, ".config", "systemd", "user", legacySystemdName)
+			if _, err := os.Stat(userUnit); err == nil {
+				return fmt.Sprintf(
+					"Warning: detected legacy user-level %s at %s. Disable it manually to avoid duplicate daemons:\n  systemctl --user disable --now %s",
+					legacySystemdName, userUnit, legacySystemdName,
+				)
+			}
+		}
+		return ""
+	}
+
+	systemUnit := filepath.Join(systemdSystemDir, legacySystemdName)
+	if _, err := os.Stat(systemUnit); err == nil {
+		return fmt.Sprintf(
+			"Warning: detected legacy system-level %s at %s. Disable it manually to avoid duplicate daemons:\n  sudo systemctl disable --now %s",
+			legacySystemdName, systemUnit, legacySystemdName,
+		)
+	}
+	return ""
+}
+
+func invokingUserHome() string {
+	if sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER")); sudoUser != "" && sudoUser != "root" {
+		if userInfo, err := lookupUser(sudoUser); err == nil {
+			return strings.TrimSpace(userInfo.HomeDir)
+		}
+	}
+	return ""
 }
 
 func (m *systemdManager) buildUnit(cfg Config) string {
