@@ -436,17 +436,17 @@ func saveConfig(cfg *Config) error {
 	tmpPath := tmp.Name()
 
 	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("encode config: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	return os.Rename(tmpPath, ConfigPath)

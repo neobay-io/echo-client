@@ -270,7 +270,7 @@ func runProviderImport(args []string) {
 	if *appType != "" {
 		// Sanitize: only allow simple alphanumeric app type values
 		for _, c := range *appType {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
 				fmt.Fprintf(os.Stderr, "Error: invalid app_type value %q\n", *appType)
 				os.Exit(1)
 			}

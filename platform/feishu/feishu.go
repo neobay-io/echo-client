@@ -1374,51 +1374,6 @@ func cardFromButtons(content string, buttons [][]core.ButtonOption) *core.Card {
 	return cb.Build()
 }
 
-// buildCardWithButtonsJSON builds a Feishu interactive card with markdown content and action buttons.
-func buildCardWithButtonsJSON(content string, buttons [][]core.ButtonOption) string {
-	processed := content
-	if containsMarkdown(content) {
-		processed = preprocessFeishuMarkdown(content)
-	}
-
-	// Schema 2.0: buttons go directly in elements array (no "action" wrapper)
-	elements := []any{
-		map[string]any{
-			"tag":     "markdown",
-			"content": processed,
-		},
-	}
-	for _, row := range buttons {
-		for _, b := range row {
-			btnType := "default"
-			if strings.Contains(b.Data, "allow") {
-				btnType = "primary"
-			} else if strings.Contains(b.Data, "deny") {
-				btnType = "danger"
-			}
-			elements = append(elements, map[string]any{
-				"tag":  "button",
-				"text": map[string]any{"tag": "plain_text", "content": b.Text},
-				"type": btnType,
-				"size": "medium",
-				"value": map[string]any{
-					"data": b.Data,
-				},
-			})
-		}
-	}
-
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{"wide_screen_mode": true},
-		"body": map[string]any{
-			"elements": elements,
-		},
-	}
-	b, _ := json.Marshal(card)
-	return string(b)
-}
-
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
 		p.cancel()

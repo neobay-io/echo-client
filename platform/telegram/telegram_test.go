@@ -22,8 +22,7 @@ func TestExtractQuotedMessage_Text(t *testing.T) {
 	quoted := extractQuotedMessage(msg)
 	if quoted == nil {
 		t.Fatal("expected quoted message")
-	}
-	if quoted.messageID != "42" || quoted.userID != "123" || quoted.userName != "alice" || quoted.content != "Quoted text" {
+	} else if quoted.messageID != "42" || quoted.userID != "123" || quoted.userName != "alice" || quoted.content != "Quoted text" {
 		t.Fatalf("unexpected quoted message: %#v", quoted)
 	}
 }
@@ -42,12 +41,13 @@ func TestExtractQuotedMessage_UsesCaptionFallback(t *testing.T) {
 	quoted := extractQuotedMessage(msg)
 	if quoted == nil {
 		t.Fatal("expected quoted message")
-	}
-	if quoted.userName != "Bob Smith" {
-		t.Fatalf("userName = %q, want Bob Smith", quoted.userName)
-	}
-	if quoted.content != "Image caption" {
-		t.Fatalf("content = %q, want caption", quoted.content)
+	} else {
+		if quoted.userName != "Bob Smith" {
+			t.Fatalf("userName = %q, want Bob Smith", quoted.userName)
+		}
+		if quoted.content != "Image caption" {
+			t.Fatalf("content = %q, want caption", quoted.content)
+		}
 	}
 }
 

@@ -51,14 +51,14 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	sockPath := filepath.Join(sockDir, "api.sock")
 
 	// Remove stale socket
-	os.Remove(sockPath)
+	_ = os.Remove(sockPath)
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		return nil, fmt.Errorf("listen unix socket: %w", err)
 	}
 	if err := os.Chmod(sockPath, 0o660); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
 
@@ -136,8 +136,10 @@ func (s *APIServer) Start() {
 }
 
 func (s *APIServer) Stop() {
-	s.server.Close()
-	os.Remove(s.socketPath)
+	if s.server != nil {
+		_ = s.server.Close()
+	}
+	_ = os.Remove(s.socketPath)
 }
 
 func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {

@@ -67,7 +67,9 @@ func runUpdate() {
 		fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.Remove(tmpFile)
+	defer func() {
+		_ = os.Remove(tmpFile)
+	}()
 
 	execPath, err := os.Executable()
 	if err != nil {
@@ -102,7 +104,9 @@ func fetchLatestPreRelease() (*githubRelease, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
@@ -129,7 +133,9 @@ func fetchLatestStableRelease() (*githubRelease, error) {
 
 	resp, err := client.Do(req)
 	if err == nil {
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 		if resp.StatusCode == 200 {
 			var release githubRelease
 			if err := json.NewDecoder(resp.Body).Decode(&release); err == nil {
@@ -150,7 +156,9 @@ func fetchLatestStableRelease() (*githubRelease, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp2.Body.Close()
+	defer func() {
+		_ = resp2.Body.Close()
+	}()
 
 	loc := resp2.Header.Get("Location")
 	if loc == "" {
@@ -188,7 +196,9 @@ func downloadToTemp(url string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
@@ -201,11 +211,14 @@ func downloadToTemp(url string) (string, error) {
 
 	size, err := io.Copy(tmp, resp.Body)
 	if err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return "", fmt.Errorf("write: %w", err)
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("close temp file: %w", err)
+	}
 
 	fmt.Printf("Downloaded %.1f MB\n", float64(size)/1024/1024)
 	return tmp.Name(), nil
@@ -219,7 +232,7 @@ func replaceExecutable(target, src string) error {
 	// On Windows, rename over a running exe is not possible directly.
 	// Move old binary aside, then move new one in.
 	backup := target + ".old"
-	os.Remove(backup)
+	_ = os.Remove(backup)
 
 	if err := os.Rename(target, backup); err != nil {
 		return fmt.Errorf("backup old binary: %w", err)
@@ -237,7 +250,7 @@ func replaceExecutable(target, src string) error {
 		return fmt.Errorf("chmod new binary: %w", err)
 	}
 
-	os.Remove(backup)
+	_ = os.Remove(backup)
 	return nil
 }
 
@@ -246,13 +259,17 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() {
+		_ = in.Close()
+	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		_ = out.Close()
+	}()
 
 	if _, err := io.Copy(out, in); err != nil {
 		return err

@@ -112,7 +112,9 @@ func fetchReleasesFrom(apiURL string) ([]ReleaseInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API returned %d", resp.StatusCode)
@@ -186,7 +188,9 @@ func downloadFile(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
@@ -201,7 +205,9 @@ func extractBinaryFromTarGz(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer gr.Close()
+	defer func() {
+		_ = gr.Close()
+	}()
 
 	tr := tar.NewReader(gr)
 	for {
@@ -232,7 +238,9 @@ func extractBinaryFromZip(data []byte) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			defer rc.Close()
+			defer func() {
+				_ = rc.Close()
+			}()
 			return io.ReadAll(rc)
 		}
 	}
@@ -257,22 +265,25 @@ func replaceBinary(newBinary []byte) error {
 	tmpPath := tmpFile.Name()
 
 	if _, err := tmpFile.Write(newBinary); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write new binary: %w", err)
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp file: %w", err)
+	}
 
 	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod: %w", err)
 	}
 
 	oldPath := execPath + ".old"
-	os.Remove(oldPath)
+	_ = os.Remove(oldPath)
 
 	if err := os.Rename(execPath, oldPath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("backup old binary: %w", err)
 	}
 

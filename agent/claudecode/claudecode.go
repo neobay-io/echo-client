@@ -226,7 +226,9 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 		slog.Debug("claudecode: failed to fetch models", "error", err)
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
@@ -369,7 +371,9 @@ func scanSessionMeta(path string) (string, int) {
 	if err != nil {
 		return "", 0
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
@@ -425,7 +429,9 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: open session file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	var entries []core.HistoryEntry
 	scanner := bufio.NewScanner(f)

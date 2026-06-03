@@ -27,7 +27,7 @@ func NewRotatingWriter(path string, maxSize int64) (*RotatingWriter, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	return &RotatingWriter{

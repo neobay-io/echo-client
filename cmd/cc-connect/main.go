@@ -616,7 +616,9 @@ func main() {
 		}
 	}
 	if logCloser != nil {
-		logCloser.Close()
+		if err := logCloser.Close(); err != nil {
+			slog.Warn("log close error", "error", err)
+		}
 	}
 
 	if restartReq != nil {

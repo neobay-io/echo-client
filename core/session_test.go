@@ -11,15 +11,16 @@ func TestSessionManager_GetOrCreateActive(t *testing.T) {
 	s1 := sm.GetOrCreateActive("user1")
 	if s1 == nil {
 		t.Fatal("expected non-nil session")
-	}
-	s2 := sm.GetOrCreateActive("user1")
-	if s1.ID != s2.ID {
-		t.Error("same user should get same active session")
-	}
+	} else {
+		s2 := sm.GetOrCreateActive("user1")
+		if s1.ID != s2.ID {
+			t.Error("same user should get same active session")
+		}
 
-	s3 := sm.GetOrCreateActive("user2")
-	if s3.ID == s1.ID {
-		t.Error("different user should get different session")
+		s3 := sm.GetOrCreateActive("user2")
+		if s3.ID == s1.ID {
+			t.Error("different user should get different session")
+		}
 	}
 }
 

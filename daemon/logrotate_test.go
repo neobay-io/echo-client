@@ -16,7 +16,9 @@ func TestRotatingWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRotatingWriter: %v", err)
 	}
-	defer w.Close()
+	defer func() {
+		_ = w.Close()
+	}()
 
 	line := strings.Repeat("A", 100) + "\n" // 101 bytes
 

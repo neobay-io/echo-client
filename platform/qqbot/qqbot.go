@@ -224,7 +224,9 @@ func (p *Platform) refreshToken() error {
 	if err != nil {
 		return fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -307,19 +309,19 @@ func (p *Platform) connectGateway(ctx context.Context) error {
 
 	// Wait for Hello (op 10)
 	if err := p.waitForHello(conn); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return err
 	}
 
 	// Send Identify (op 2)
 	if err := p.sendIdentify(conn, token); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return err
 	}
 
 	// Wait for READY event
 	if err := p.waitForReady(conn); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return err
 	}
 
@@ -341,7 +343,9 @@ func (p *Platform) getGatewayURL(token string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gateway request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	var result struct {
 		URL string `json:"url"`
@@ -554,7 +558,7 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 	// Close existing connection
 	p.wsMu.Lock()
 	if p.wsConn != nil {
-		p.wsConn.Close()
+		_ = p.wsConn.Close()
 		p.wsConn = nil
 	}
 	p.wsMu.Unlock()
@@ -598,7 +602,7 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 
 		if err := p.waitForHello(conn); err != nil {
 			slog.Warn("qqbot: hello failed during reconnect", "error", err)
-			conn.Close()
+			_ = conn.Close()
 			backoff = min(backoff*2, maxReconnectBackoff)
 			continue
 		}
@@ -609,24 +613,24 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 				slog.Warn("qqbot: resume failed, falling back to identify", "error", err)
 				p.sessionID = ""
 				if err := p.sendIdentify(conn, token); err != nil {
-					conn.Close()
+					_ = conn.Close()
 					backoff = min(backoff*2, maxReconnectBackoff)
 					continue
 				}
 				if err := p.waitForReady(conn); err != nil {
-					conn.Close()
+					_ = conn.Close()
 					backoff = min(backoff*2, maxReconnectBackoff)
 					continue
 				}
 			}
 		} else {
 			if err := p.sendIdentify(conn, token); err != nil {
-				conn.Close()
+				_ = conn.Close()
 				backoff = min(backoff*2, maxReconnectBackoff)
 				continue
 			}
 			if err := p.waitForReady(conn); err != nil {
-				conn.Close()
+				_ = conn.Close()
 				backoff = min(backoff*2, maxReconnectBackoff)
 				continue
 			}
@@ -906,7 +910,9 @@ func (p *Platform) apiRequest(method, url string, body any) error {
 	if err != nil {
 		return fmt.Errorf("qqbot: api request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	// Retry once on 401 (token may have expired)
 	if resp.StatusCode == http.StatusUnauthorized {
@@ -928,7 +934,9 @@ func (p *Platform) apiRequest(method, url string, body any) error {
 		if err != nil {
 			return fmt.Errorf("qqbot: api retry failed: %w", err)
 		}
-		defer resp2.Body.Close()
+		defer func() {
+			_ = resp2.Body.Close()
+		}()
 
 		if resp2.StatusCode >= 300 {
 			raw, _ := io.ReadAll(resp2.Body)
@@ -972,7 +980,7 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 			continue
 		}
 		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			slog.Warn("qqbot: read image body failed", "error", err)
 			continue

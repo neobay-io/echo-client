@@ -202,7 +202,9 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 		slog.Debug("codex: failed to fetch models", "error", err)
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}

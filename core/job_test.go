@@ -42,6 +42,7 @@ func waitForJobStatus(t *testing.T, jm *JobManager, jobID string, want string) *
 	job, _ := jm.Get(jobID)
 	if job == nil {
 		t.Fatalf("job %s not found", jobID)
+		return nil
 	}
 	t.Fatalf("job %s status = %s, want %s", jobID, job.Status, want)
 	return nil

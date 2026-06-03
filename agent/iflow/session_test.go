@@ -14,12 +14,16 @@ func TestReadExecutionInfoSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTemp: %v", err)
 	}
-	defer os.Remove(f.Name())
+	defer func() {
+		_ = os.Remove(f.Name())
+	}()
 
 	if _, err := f.WriteString(`{"session-id":"session-123"}`); err != nil {
 		t.Fatalf("WriteString: %v", err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	sid, err := readExecutionInfoSessionID(f.Name())
 	if err != nil {
@@ -328,7 +332,9 @@ while :; do sleep 1; done
 	if err != nil {
 		t.Fatalf("newIFlowSession: %v", err)
 	}
-	defer sess.Close()
+	defer func() {
+		_ = sess.Close()
+	}()
 
 	if err := sess.Send("执行ls", nil, nil); err != nil {
 		t.Fatalf("Send #1: %v", err)

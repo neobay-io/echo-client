@@ -112,7 +112,9 @@ func (r engineJobRunner) Run(
 	if err != nil {
 		return nil, fmt.Errorf("start job session: %w", err)
 	}
-	defer agentSession.Close()
+	defer func() {
+		_ = agentSession.Close()
+	}()
 	skillsMeta := r.engine.takePreparedSkillMeta(sessionKey)
 
 	if err := agentSession.Send(req.Prompt, nil, nil); err != nil {

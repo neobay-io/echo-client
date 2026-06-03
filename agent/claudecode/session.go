@@ -503,7 +503,9 @@ func convertHEICImage(img core.ImageAttachment) (core.ImageAttachment, error) {
 	if err != nil {
 		return img, err
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
 
 	name := strings.TrimSpace(img.FileName)
 	if name == "" {

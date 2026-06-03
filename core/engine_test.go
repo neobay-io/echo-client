@@ -1142,24 +1142,24 @@ func TestRenderCronCard_UsesTwoButtonsPerRow(t *testing.T) {
 	card := e.renderCronCard(job.SessionKey, "")
 	if card == nil {
 		t.Fatal("expected cron card")
-	}
-
-	rows := 0
-	for _, el := range card.Elements {
-		actions, ok := el.(CardActions)
-		if !ok {
-			continue
+	} else {
+		rows := 0
+		for _, el := range card.Elements {
+			actions, ok := el.(CardActions)
+			if !ok {
+				continue
+			}
+			if len(actions.Buttons) == 0 {
+				continue
+			}
+			rows++
+			if len(actions.Buttons) > 2 {
+				t.Fatalf("button row size = %d, want <= 2", len(actions.Buttons))
+			}
 		}
-		if len(actions.Buttons) == 0 {
-			continue
+		if rows < 2 {
+			t.Fatalf("button rows = %d, want at least 2", rows)
 		}
-		rows++
-		if len(actions.Buttons) > 2 {
-			t.Fatalf("button row size = %d, want <= 2", len(actions.Buttons))
-		}
-	}
-	if rows < 2 {
-		t.Fatalf("button rows = %d, want at least 2", rows)
 	}
 }
 
@@ -1648,23 +1648,23 @@ func TestReviewerSelectorCardIncludesCurrentProjectWhenNoReviewerRole(t *testing
 	card := e.reviewerSelectorCard()
 	if card == nil {
 		t.Fatal("expected selector card")
-	}
-
-	var labels []string
-	for _, el := range card.Elements {
-		actions, ok := el.(CardActions)
-		if !ok {
-			continue
+	} else {
+		var labels []string
+		for _, el := range card.Elements {
+			actions, ok := el.(CardActions)
+			if !ok {
+				continue
+			}
+			for _, btn := range actions.Buttons {
+				labels = append(labels, btn.Text)
+			}
 		}
-		for _, btn := range actions.Buttons {
-			labels = append(labels, btn.Text)
-		}
-	}
 
-	want := []string{"codex", "gemini", "qoder"}
-	slices.Sort(labels)
-	if !slices.Equal(labels, want) {
-		t.Fatalf("selector labels = %#v, want %#v", labels, want)
+		want := []string{"codex", "gemini", "qoder"}
+		slices.Sort(labels)
+		if !slices.Equal(labels, want) {
+			t.Fatalf("selector labels = %#v, want %#v", labels, want)
+		}
 	}
 }
 
@@ -1952,19 +1952,19 @@ func TestReviewerSelectorCard_GroupsButtonsByRow(t *testing.T) {
 	card := origin.reviewerSelectorCard()
 	if card == nil {
 		t.Fatal("expected selector card")
-	}
-
-	actionRows := 0
-	for _, el := range card.Elements {
-		if actions, ok := el.(CardActions); ok {
-			actionRows++
-			if len(actions.Buttons) > 2 {
-				t.Fatalf("row button count = %d, want <= 2", len(actions.Buttons))
+	} else {
+		actionRows := 0
+		for _, el := range card.Elements {
+			if actions, ok := el.(CardActions); ok {
+				actionRows++
+				if len(actions.Buttons) > 2 {
+					t.Fatalf("row button count = %d, want <= 2", len(actions.Buttons))
+				}
 			}
 		}
-	}
-	if actionRows != 2 {
-		t.Fatalf("action rows = %d, want 2 for 3 reviewers", actionRows)
+		if actionRows != 2 {
+			t.Fatalf("action rows = %d, want 2 for 3 reviewers", actionRows)
+		}
 	}
 }
 
@@ -3484,15 +3484,17 @@ func TestQuietSessionToggle(t *testing.T) {
 	e.interactiveMu.Lock()
 	state := e.interactiveStates["test:user1"]
 	e.interactiveMu.Unlock()
+	q := false
 
 	if state == nil {
 		t.Fatal("expected interactiveState to be created")
-	}
-	state.mu.Lock()
-	q := state.quiet
-	state.mu.Unlock()
-	if !q {
-		t.Fatal("expected session quiet to be true")
+	} else {
+		state.mu.Lock()
+		q = state.quiet
+		state.mu.Unlock()
+		if !q {
+			t.Fatal("expected session quiet to be true")
+		}
 	}
 
 	// /quiet — per-session toggle off

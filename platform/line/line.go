@@ -131,7 +131,7 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: userID,
+				UserID:    userID, UserName: userID,
 				Content: m.Text, ReplyCtx: rctx,
 			})
 
@@ -145,8 +145,8 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: userID,
-				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+				UserID:    userID, UserName: userID,
+				Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 				ReplyCtx: rctx,
 			})
 
@@ -164,7 +164,7 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "line",
 				MessageID: m.Id,
-				UserID: userID, UserName: userID,
+				UserID:    userID, UserName: userID,
 				Audio: &core.AudioAttachment{
 					MimeType: "audio/m4a",
 					Data:     audioData,
@@ -201,7 +201,9 @@ func (p *Platform) downloadContent(messageID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	return io.ReadAll(resp.Body)
 }
 

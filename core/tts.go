@@ -124,7 +124,9 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	if err != nil {
 		return nil, "", fmt.Errorf("qwen tts: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -162,7 +164,9 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	if err != nil {
 		return nil, "", fmt.Errorf("qwen tts: download audio: %w", err)
 	}
-	defer audioResp.Body.Close()
+	defer func() {
+		_ = audioResp.Body.Close()
+	}()
 
 	wavData, err := io.ReadAll(audioResp.Body)
 	if err != nil {
@@ -233,7 +237,9 @@ func (o *OpenAITTS) Synthesize(ctx context.Context, text string, opts TTSSynthes
 	if err != nil {
 		return nil, "", fmt.Errorf("openai tts: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -315,7 +321,9 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 	if err != nil {
 		return nil, "", fmt.Errorf("minimax tts: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

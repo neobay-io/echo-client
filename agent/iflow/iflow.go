@@ -364,7 +364,9 @@ func parseIFlowSessionFile(path string) (sid, summary string, msgCount int, modi
 	if err != nil {
 		return "", "", 0, time.Time{}
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*64), 1024*1024)

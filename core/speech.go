@@ -92,7 +92,9 @@ func (w *OpenAIWhisper) Transcribe(ctx context.Context, audio []byte, format str
 	if lang != "" {
 		_ = writer.WriteField("language", lang)
 	}
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("close multipart writer: %w", err)
+	}
 
 	url := w.BaseURL + "/audio/transcriptions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
@@ -106,7 +108,9 @@ func (w *OpenAIWhisper) Transcribe(ctx context.Context, audio []byte, format str
 	if err != nil {
 		return "", fmt.Errorf("whisper request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -193,7 +197,9 @@ func (q *QwenASR) Transcribe(ctx context.Context, audio []byte, format string, l
 	if err != nil {
 		return "", fmt.Errorf("qwen asr request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -321,7 +327,9 @@ func (g *GeminiSTT) TranscribeWithHint(ctx context.Context, audio []byte, format
 	if err != nil {
 		return "", fmt.Errorf("gemini stt: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

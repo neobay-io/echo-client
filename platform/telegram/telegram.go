@@ -854,7 +854,9 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	return io.ReadAll(resp.Body)
 }
 
@@ -1048,7 +1050,7 @@ func isValidTelegramCommand(cmd string) bool {
 	// Rest can be letters, digits, or underscores
 	for i := 1; i < len(cmd); i++ {
 		c := cmd[i]
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
 			return false
 		}
 	}

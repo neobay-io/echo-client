@@ -100,12 +100,13 @@ func TestDetectTextInteractionPromptYesNo(t *testing.T) {
 	prompt := detectTextInteractionPrompt("Would you like me to proceed with the refactor?")
 	if prompt == nil {
 		t.Fatal("expected yes/no prompt to be detected")
-	}
-	if len(prompt.Choices) != 1 || len(prompt.Choices[0]) != 2 {
-		t.Fatalf("unexpected choices: %#v", prompt.Choices)
-	}
-	if prompt.Choices[0][0].SendText != "yes" || prompt.Choices[0][1].SendText != "no" {
-		t.Fatalf("unexpected choice send texts: %#v", prompt.Choices[0])
+	} else {
+		if len(prompt.Choices) != 1 || len(prompt.Choices[0]) != 2 {
+			t.Fatalf("unexpected choices: %#v", prompt.Choices)
+		}
+		if prompt.Choices[0][0].SendText != "yes" || prompt.Choices[0][1].SendText != "no" {
+			t.Fatalf("unexpected choice send texts: %#v", prompt.Choices[0])
+		}
 	}
 }
 
@@ -114,12 +115,13 @@ func TestDetectTextInteractionPromptNumberedChoices(t *testing.T) {
 	prompt := detectTextInteractionPrompt(text)
 	if prompt == nil {
 		t.Fatal("expected numbered choice prompt to be detected")
-	}
-	if len(prompt.Choices) != 1 || len(prompt.Choices[0]) != 2 {
-		t.Fatalf("unexpected choices: %#v", prompt.Choices)
-	}
-	if prompt.Choices[0][0].SendText != "1" || prompt.Choices[0][1].SendText != "2" {
-		t.Fatalf("unexpected numbered send texts: %#v", prompt.Choices[0])
+	} else {
+		if len(prompt.Choices) != 1 || len(prompt.Choices[0]) != 2 {
+			t.Fatalf("unexpected choices: %#v", prompt.Choices)
+		}
+		if prompt.Choices[0][0].SendText != "1" || prompt.Choices[0][1].SendText != "2" {
+			t.Fatalf("unexpected numbered send texts: %#v", prompt.Choices[0])
+		}
 	}
 }
 
@@ -128,12 +130,13 @@ func TestDetectTextInteractionPromptOptionsXML(t *testing.T) {
 	prompt := detectTextInteractionPrompt(text)
 	if prompt == nil {
 		t.Fatal("expected XML options prompt to be detected")
-	}
-	if len(prompt.Choices) != 1 || len(prompt.Choices[0]) != 2 {
-		t.Fatalf("unexpected choices: %#v", prompt.Choices)
-	}
-	if prompt.Choices[0][0].SendText != "Update the API handler" || prompt.Choices[0][1].SendText != "Ship a minimal fix" {
-		t.Fatalf("unexpected XML option send texts: %#v", prompt.Choices[0])
+	} else {
+		if len(prompt.Choices) != 1 || len(prompt.Choices[0]) != 2 {
+			t.Fatalf("unexpected choices: %#v", prompt.Choices)
+		}
+		if prompt.Choices[0][0].SendText != "Update the API handler" || prompt.Choices[0][1].SendText != "Ship a minimal fix" {
+			t.Fatalf("unexpected XML option send texts: %#v", prompt.Choices[0])
+		}
 	}
 }
 

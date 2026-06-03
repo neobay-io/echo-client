@@ -271,8 +271,7 @@ func TestCronSchedulerUpdateJobDoesNotPersistInvalidSessionMode(t *testing.T) {
 	got := store.Get(job.ID)
 	if got == nil {
 		t.Fatal("expected stored job")
-	}
-	if got.SessionMode != "" {
+	} else if got.SessionMode != "" {
 		t.Fatalf("SessionMode = %q, want unchanged empty string", got.SessionMode)
 	}
 }

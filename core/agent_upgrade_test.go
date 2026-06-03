@@ -66,14 +66,16 @@ func TestAgentUpgradeManagerStatuses(t *testing.T) {
 	if codex == nil || gemini == nil {
 		t.Fatalf("statuses missing codex/gemini: %#v", statuses)
 	}
-	if codex.BusySessions != 2 {
-		t.Fatalf("codex busy = %d, want 2", codex.BusySessions)
-	}
-	if !strings.Contains(codex.Version, "codex --version") {
-		t.Fatalf("codex version = %q", codex.Version)
-	}
-	if gemini.Actionable {
-		t.Fatalf("gemini actionable = true, want false for observe strategy")
+	if codex != nil && gemini != nil {
+		if codex.BusySessions != 2 {
+			t.Fatalf("codex busy = %d, want 2", codex.BusySessions)
+		}
+		if !strings.Contains(codex.Version, "codex --version") {
+			t.Fatalf("codex version = %q", codex.Version)
+		}
+		if gemini.Actionable {
+			t.Fatalf("gemini actionable = true, want false for observe strategy")
+		}
 	}
 }
 
@@ -173,14 +175,16 @@ func TestAgentUpgradeManagerRunAll(t *testing.T) {
 	if claude == nil || codex == nil || gemini == nil || qoder == nil {
 		t.Fatalf("unexpected results: %#v", results)
 	}
-	if !claude.Changed || claude.BeforeVersion != "claude 1.0.0" || claude.AfterVersion != "claude 1.1.0" {
-		t.Fatalf("claude result = %#v", claude)
-	}
-	if !codex.Skipped || !strings.Contains(codex.Reason, "active session") {
-		t.Fatalf("codex result = %#v, want busy skip", codex)
-	}
-	if !gemini.Skipped || gemini.Reason != "observe-only" {
-		t.Fatalf("gemini result = %#v, want observe-only skip", gemini)
+	if claude != nil && codex != nil && gemini != nil && qoder != nil {
+		if !claude.Changed || claude.BeforeVersion != "claude 1.0.0" || claude.AfterVersion != "claude 1.1.0" {
+			t.Fatalf("claude result = %#v", claude)
+		}
+		if !codex.Skipped || !strings.Contains(codex.Reason, "active session") {
+			t.Fatalf("codex result = %#v, want busy skip", codex)
+		}
+		if !gemini.Skipped || gemini.Reason != "observe-only" {
+			t.Fatalf("gemini result = %#v, want observe-only skip", gemini)
+		}
 	}
 	if qoder.Skipped || qoder.Err != nil || qoder.Changed {
 		t.Fatalf("qoder result = %#v, want successful no-change update", qoder)

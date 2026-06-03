@@ -292,7 +292,9 @@ func TestWorkerClientRegistersAndHeartbeats(t *testing.T) {
 		if err != nil {
 			t.Fatalf("upgrade: %v", err)
 		}
-		defer conn.Close()
+		defer func() {
+			_ = conn.Close()
+		}()
 		for {
 			var payload map[string]any
 			if err := conn.ReadJSON(&payload); err != nil {
@@ -450,7 +452,9 @@ func TestWorkerClientCancelsAssignedTask(t *testing.T) {
 		if err != nil {
 			t.Fatalf("upgrade: %v", err)
 		}
-		defer conn.Close()
+		defer func() {
+			_ = conn.Close()
+		}()
 		for {
 			var payload map[string]any
 			if err := conn.ReadJSON(&payload); err != nil {
@@ -575,7 +579,9 @@ func TestWorkerClientHandlesWorkspaceAndRepoRPCs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("upgrade: %v", err)
 		}
-		defer conn.Close()
+		defer func() {
+			_ = conn.Close()
+		}()
 		for {
 			var payload map[string]any
 			if err := conn.ReadJSON(&payload); err != nil {

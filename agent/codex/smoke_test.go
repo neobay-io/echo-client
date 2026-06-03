@@ -128,7 +128,7 @@ func TestResumeOmitsAddDir(t *testing.T) {
 	}
 
 	// Second send — resume, should NOT have --add-dir
-	os.Remove(argsFile)
+	_ = os.Remove(argsFile)
 	if err := sess.Send("world", nil, nil); err != nil {
 		t.Fatalf("Send resume: %v", err)
 	}

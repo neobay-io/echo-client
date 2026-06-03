@@ -232,7 +232,7 @@ func (p *Platform) handleVerify(w http.ResponseWriter, msgSig, timestamp, nonce,
 	slog.Info("wecom: URL verification succeeded")
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, plain)
+	_, _ = fmt.Fprint(w, plain)
 }
 
 // handleMessage processes incoming encrypted message POSTs.
@@ -298,7 +298,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: strconv.FormatInt(msg.MsgId, 10),
-			UserID: msg.FromUserName, UserName: msg.FromUserName,
+			UserID:    msg.FromUserName, UserName: msg.FromUserName,
 			Content: msg.Content, ReplyCtx: rctx,
 		})
 
@@ -313,8 +313,8 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID: msg.FromUserName, UserName: msg.FromUserName,
-				Images:  []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
+				UserID:    msg.FromUserName, UserName: msg.FromUserName,
+				Images:   []core.ImageAttachment{{MimeType: "image/jpeg", Data: imgData}},
 				ReplyCtx: rctx,
 			})
 		}()
@@ -334,7 +334,7 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			p.handler(p, &core.Message{
 				SessionKey: sessionKey, Platform: "wecom",
 				MessageID: strconv.FormatInt(msg.MsgId, 10),
-				UserID: msg.FromUserName, UserName: msg.FromUserName,
+				UserID:    msg.FromUserName, UserName: msg.FromUserName,
 				Audio:    &core.AudioAttachment{MimeType: "audio/" + format, Data: audioData, Format: format},
 				ReplyCtx: rctx,
 			})
@@ -401,7 +401,9 @@ func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
 	if err != nil {
 		return fmt.Errorf("wecom: send markdown: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	var result struct {
 		ErrCode int    `json:"errcode"`
@@ -432,7 +434,9 @@ func (p *Platform) sendText(accessToken, toUser, text string) error {
 	if err != nil {
 		return fmt.Errorf("wecom: send message: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	var result struct {
 		ErrCode int    `json:"errcode"`
@@ -464,7 +468,9 @@ func (p *Platform) getAccessToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("wecom: request access_token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	var result struct {
 		ErrCode     int    `json:"errcode"`
@@ -589,7 +595,9 @@ func (p *Platform) downloadMedia(mediaID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	return io.ReadAll(resp.Body)
 }
 

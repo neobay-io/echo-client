@@ -71,7 +71,9 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	stat, err := f.Stat()
 	if err != nil {
@@ -121,7 +123,8 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				} `json:"content"`
 			}
 			if json.Unmarshal(entry.Payload, &item) == nil {
-				if item.Role == "user" {
+				switch item.Role {
+				case "user":
 					userMsgSeen++
 					msgCount++
 					// The actual user prompt is the last user response_item
@@ -132,7 +135,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 							summary = c.Text
 						}
 					}
-				} else if item.Role == "assistant" {
+				case "assistant":
 					msgCount++
 				}
 			}
@@ -196,7 +199,9 @@ func getSessionHistory(sessionID string, limit int) ([]core.HistoryEntry, error)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	var entries []core.HistoryEntry
 

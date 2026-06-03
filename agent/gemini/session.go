@@ -103,13 +103,13 @@ func (gs *geminiSession) Send(prompt string, images []core.ImageAttachment, file
 			}
 			fpath := f.Name()
 			if _, err := f.Write(img.Data); err != nil {
-				f.Close()
-				os.Remove(fpath)
+				_ = f.Close()
+				_ = os.Remove(fpath)
 				slog.Warn("geminiSession: failed to save image", "error", err)
 				continue
 			}
 			if err := f.Close(); err != nil {
-				os.Remove(fpath)
+				_ = os.Remove(fpath)
 				slog.Warn("geminiSession: failed to save image", "error", err)
 				continue
 			}
@@ -192,7 +192,7 @@ func (gs *geminiSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 	defer func() {
 		// Clean up temp image files
 		for _, f := range tempImages {
-			os.Remove(f)
+			_ = os.Remove(f)
 		}
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())

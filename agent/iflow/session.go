@@ -206,7 +206,9 @@ func (s *iflowSession) readLoop(turn *iflowTurn, cmd *exec.Cmd, ptmx *os.File) {
 	defer s.wg.Done()
 	defer s.turnActive.Store(false)
 	defer turn.cancel()
-	defer ptmx.Close()
+	defer func() {
+		_ = ptmx.Close()
+	}()
 
 	var termBuf bytes.Buffer
 	drainDone := make(chan struct{})
@@ -314,7 +316,9 @@ func (s *iflowSession) consumeTranscript(turn *iflowTurn) error {
 		}
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	fi, err := f.Stat()
 	if err != nil {

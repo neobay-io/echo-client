@@ -65,7 +65,7 @@ func ConsumeRestartNotify(dataDir string) *RestartRequest {
 	if err != nil {
 		return nil
 	}
-	os.Remove(p)
+	_ = os.Remove(p)
 	var req RestartRequest
 	if json.Unmarshal(data, &req) != nil {
 		return nil
@@ -830,7 +830,9 @@ func (e *Engine) Stop() error {
 	for key, state := range states {
 		if state.agentSession != nil {
 			slog.Debug("engine.Stop: closing agent session", "session", key)
-			state.agentSession.Close()
+			if err := state.agentSession.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close agent session %s: %w", key, err))
+			}
 		}
 	}
 
@@ -2389,7 +2391,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 
 		done := make(chan struct{})
 		go func() {
-			state.agentSession.Close()
+			_ = state.agentSession.Close()
 			close(done)
 		}()
 
@@ -3099,9 +3101,9 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 
 	var sb strings.Builder
 	if totalPages > 1 {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitlePaged), agentName, total, page, totalPages))
+		fmt.Fprintf(&sb, e.i18n.T(MsgListTitlePaged), agentName, total, page, totalPages)
 	} else {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListTitle), agentName, total))
+		fmt.Fprintf(&sb, e.i18n.T(MsgListTitle), agentName, total)
 	}
 	for i := start; i < end; i++ {
 		s := agentSessions[i]
@@ -3122,11 +3124,11 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 				displayName = string([]rune(displayName)[:40]) + "…"
 			}
 		}
-		sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
-			marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+		fmt.Fprintf(&sb, "%s **%d.** %s · **%d** msgs · %s\n",
+			marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04"))
 	}
 	if totalPages > 1 {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
+		fmt.Fprintf(&sb, e.i18n.T(MsgListPageHint), page, totalPages)
 	}
 	sb.WriteString(e.i18n.T(MsgListSwitchHint))
 	e.reply(p, msg.ReplyCtx, sb.String())
@@ -3546,14 +3548,14 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 
 	// Build result message
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgSearchResult), len(results), keyword))
+	fmt.Fprintf(&sb, e.i18n.T(MsgSearchResult), len(results), keyword)
 
 	for i, r := range results {
 		shortID := r.id
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
 		}
-		sb.WriteString(fmt.Sprintf("\n%d. [%s] %s", i+1, shortID, r.name))
+		fmt.Fprintf(&sb, "\n%d. [%s] %s", i+1, shortID, r.name)
 	}
 
 	sb.WriteString("\n\n" + e.i18n.T(MsgSearchHint))
@@ -3793,7 +3795,7 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📜 History (last %d):\n\n", len(entries)))
+	fmt.Fprintf(&sb, "📜 History (last %d):\n\n", len(entries))
 	for _, h := range entries {
 		icon := "👤"
 		if h.Role == "assistant" {
@@ -3803,7 +3805,7 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		if len([]rune(content)) > 200 {
 			content = string([]rune(content)[:200]) + "..."
 		}
-		sb.WriteString(fmt.Sprintf("%s [%s]\n%s\n\n", icon, h.Timestamp.Format("15:04:05"), content))
+		fmt.Fprintf(&sb, "%s [%s]\n%s\n\n", icon, h.Timestamp.Format("15:04:05"), content)
 	}
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
@@ -4032,7 +4034,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			if desc != "" {
 				desc = " — " + desc
 			}
-			sb.WriteString(fmt.Sprintf("%s%d. %s%s\n", marker, i+1, m.Name, desc))
+			fmt.Fprintf(&sb, "%s%d. %s%s\n", marker, i+1, m.Name, desc)
 		}
 		sb.WriteString("\n")
 		sb.WriteString(e.i18n.T(MsgModelUsage))
@@ -4281,9 +4283,9 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 				marker = "▶ "
 			}
 			if zhLike {
-				sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.NameZh, m.DescZh))
+				fmt.Fprintf(&sb, "%s**%s** — %s\n", marker, m.NameZh, m.DescZh)
 			} else {
-				sb.WriteString(fmt.Sprintf("%s**%s** — %s\n", marker, m.Name, m.Desc))
+				fmt.Fprintf(&sb, "%s**%s** — %s\n", marker, m.Name, m.Desc)
 			}
 		}
 		sb.WriteString(e.modeUsageText(modes))
@@ -4641,7 +4643,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			if prov.Model != "" {
 				detail += " [" + prov.Model + "]"
 			}
-			sb.WriteString(fmt.Sprintf("%s%s\n", marker, detail))
+			fmt.Fprintf(&sb, "%s%s\n", marker, detail)
 		}
 		sb.WriteString("\n" + e.i18n.T(MsgProviderSwitchHint))
 		e.reply(p, msg.ReplyCtx, sb.String())
@@ -4673,7 +4675,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 			if prov.Model != "" {
 				detail += " [" + prov.Model + "]"
 			}
-			sb.WriteString(fmt.Sprintf("%s%s\n", marker, detail))
+			fmt.Fprintf(&sb, "%s%s\n", marker, detail)
 		}
 		sb.WriteString("\n" + e.i18n.T(MsgProviderSwitchHint))
 		e.reply(p, msg.ReplyCtx, sb.String())
@@ -5093,7 +5095,9 @@ func (e *Engine) appendMemoryFile(p Platform, msg *Message, filePath, text strin
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgMemoryAddFailed), err))
 		return
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	entry := "\n- " + text + "\n"
 	if _, err := f.WriteString(entry); err != nil {
@@ -5613,7 +5617,7 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 	lang := e.i18n.CurrentLang()
 	now := time.Now()
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
+	fmt.Fprintf(&sb, e.i18n.T(MsgCronListTitle), len(jobs))
 	sb.WriteString("\n")
 	sb.WriteString("\n")
 
@@ -5634,9 +5638,9 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 				desc = firstNonEmptyLine(j.Prompt)
 			}
 		}
-		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
+		fmt.Fprintf(&sb, "%s %s\n", status, desc)
 
-		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
+		fmt.Fprintf(&sb, "ID: %s\n", j.ID)
 
 		human := CronExprToHuman(j.CronExpr, lang)
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
@@ -5651,13 +5655,13 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 			fmtStr := cronTimeFormat(j.LastRun, now)
 			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
 			if j.LastError != "" {
-				sb.WriteString(fmt.Sprintf(" (failed: %s)", truncateStr(j.LastError, 40)))
+				fmt.Fprintf(&sb, " (failed: %s)", truncateStr(j.LastError, 40))
 			}
 			sb.WriteString("\n")
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgCronListFooter)))
+	fmt.Fprintf(&sb, "\n%s", e.i18n.T(MsgCronListFooter))
 	e.reply(p, msg.ReplyCtx, sb.String())
 }
 
@@ -6043,7 +6047,7 @@ func (e *Engine) cmdCommandsList(p Platform, msg *Message) {
 		} else if c.Exec != "" {
 			tag = " [shell]"
 		}
-		sb.WriteString(fmt.Sprintf("/%s%s\n", c.Name, tag))
+		fmt.Fprintf(&sb, "/%s%s\n", c.Name, tag)
 
 		// Description or fallback
 		desc := c.Description
@@ -6054,7 +6058,7 @@ func (e *Engine) cmdCommandsList(p Platform, msg *Message) {
 				desc = truncateStr(c.Prompt, 60)
 			}
 		}
-		sb.WriteString(fmt.Sprintf("  %s\n\n", desc))
+		fmt.Fprintf(&sb, "  %s\n\n", desc)
 	}
 
 	sb.WriteString(e.i18n.T(MsgCommandsHint))
@@ -6192,7 +6196,7 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 	for _, s := range skills {
 		desc := s.Description
 		name := s.Name
-		sb.WriteString(fmt.Sprintf("  /%s — %s\n", name, desc))
+		fmt.Fprintf(&sb, "  /%s — %s\n", name, desc)
 	}
 
 	sb.WriteString("\n" + e.i18n.T(MsgSkillsHint))
@@ -6274,7 +6278,7 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 		var sb strings.Builder
 		sb.WriteString(e.i18n.T(MsgConfigTitle))
 		for _, item := range items {
-			sb.WriteString(fmt.Sprintf("`%s` = `%s`\n  %s\n\n", item.key, item.getFunc(), item.description(isZh)))
+			fmt.Fprintf(&sb, "`%s` = `%s`\n  %s\n\n", item.key, item.getFunc(), item.description(isZh))
 		}
 		sb.WriteString(e.i18n.T(MsgConfigHint))
 		e.reply(p, msg.ReplyCtx, sb.String())
@@ -6612,7 +6616,7 @@ func (e *Engine) cmdAliasList(p Platform, msg *Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgAliasListHeader), len(e.aliases)))
+	fmt.Fprintf(&sb, e.i18n.T(MsgAliasListHeader), len(e.aliases))
 	sb.WriteString("\n")
 
 	names := make([]string, 0, len(e.aliases))
@@ -6622,7 +6626,7 @@ func (e *Engine) cmdAliasList(p Platform, msg *Message) {
 	sort.Strings(names)
 
 	for _, n := range names {
-		sb.WriteString(fmt.Sprintf("  %s → %s\n", n, e.aliases[n]))
+		fmt.Fprintf(&sb, "  %s → %s\n", n, e.aliases[n])
 	}
 	e.reply(p, msg.ReplyCtx, strings.TrimRight(sb.String(), "\n"))
 }
@@ -7643,7 +7647,9 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 	if err != nil {
 		return setupError, baseName, err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
 	if _, err := f.WriteString(block); err != nil {

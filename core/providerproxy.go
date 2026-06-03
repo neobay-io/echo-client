@@ -86,7 +86,7 @@ func NewProviderProxy(targetURL, thinkingOverride string) (*ProviderProxy, strin
 // Close shuts down the proxy.
 func (pp *ProviderProxy) Close() {
 	pp.once.Do(func() {
-		pp.server.Close()
+		_ = pp.server.Close()
 	})
 }
 
@@ -97,7 +97,7 @@ func rewriteThinkingInRequest(r *http.Request, override string) {
 		return
 	}
 	body, err := io.ReadAll(r.Body)
-	r.Body.Close()
+	_ = r.Body.Close()
 	if err != nil {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		return

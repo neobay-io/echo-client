@@ -94,7 +94,7 @@ func LoadMeta() (*Meta, error) {
 }
 
 func RemoveMeta() {
-	os.Remove(metaPath())
+	_ = os.Remove(metaPath())
 }
 
 func NowISO() string {
