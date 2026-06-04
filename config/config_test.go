@@ -178,9 +178,9 @@ func TestResolveDataDirForConfigPathUsesConfiguredOverrideOutsideHome(t *testing
 		t.Fatalf("WriteFile config: %v", err)
 	}
 
-	got, ok := ResolveDataDirForConfigPath(configPath)
-	if !ok {
-		t.Fatalf("ResolveDataDirForConfigPath() reported no config")
+	got, err := ResolveDataDirForConfigPath(configPath)
+	if err != nil {
+		t.Fatalf("ResolveDataDirForConfigPath(): %v", err)
 	}
 	if got != customDataDir {
 		t.Fatalf("ResolveDataDirForConfigPath() = %q, want %q", got, customDataDir)

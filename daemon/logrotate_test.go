@@ -233,3 +233,74 @@ func TestDefaultDataDirUsesConfiguredDaemonMetadataPath(t *testing.T) {
 		t.Fatalf("DefaultLogFile() = %q", got)
 	}
 }
+
+func TestLoadMetaPrefersMostRecentlyInstalledRecordAcrossDirs(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	preferredMetaPath := filepath.Join(dir, ".echo-client", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(preferredMetaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred meta dir: %v", err)
+	}
+	if err := os.WriteFile(preferredMetaPath, []byte(`{"data_dir":"/tmp/preferred-data","config_path":"/tmp/preferred.toml","installed_at":"2026-06-01T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile preferred meta: %v", err)
+	}
+
+	legacyMetaPath := filepath.Join(dir, ".cc-connect", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(legacyMetaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy meta dir: %v", err)
+	}
+	if err := os.WriteFile(legacyMetaPath, []byte(`{"data_dir":"/tmp/legacy-data","config_path":"/tmp/legacy.toml","installed_at":"2026-06-02T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile legacy meta: %v", err)
+	}
+
+	meta, err := LoadMeta()
+	if err != nil {
+		t.Fatalf("LoadMeta: %v", err)
+	}
+	if meta.DataDir != "/tmp/legacy-data" {
+		t.Fatalf("meta.DataDir = %q, want latest legacy record", meta.DataDir)
+	}
+}
+
+func TestRemoveMetaRemovesBothPreferredAndLegacyFiles(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	paths := []string{
+		filepath.Join(dir, ".echo-client", "daemon.json"),
+		filepath.Join(dir, ".cc-connect", "daemon.json"),
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(`{"installed_at":"2026-06-02T00:00:00Z"}`), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", path, err)
+		}
+	}
+
+	RemoveMeta()
+
+	for _, path := range paths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to be removed, got err=%v", path, err)
+		}
+	}
+}

@@ -296,23 +296,30 @@ func ResolveDefaultHomeDataDirForConfigPath(configPath string) string {
 	}
 }
 
-func ResolveDataDirForConfigPath(configPath string) (string, bool) {
+func ResolveDataDirForConfigPath(configPath string) (string, error) {
 	if !fileExists(configPath) {
-		return "", false
+		if _, err := os.Stat(configPath); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("config path is not a file: %s", configPath)
 	}
 
 	dataDir, err := loadDataDirOverride(configPath)
 	if err != nil {
-		return "", false
+		return "", err
 	}
 	if strings.TrimSpace(dataDir) != "" {
-		return dataDir, true
+		return dataDir, nil
 	}
-	return ResolveDefaultHomeDataDirForConfigPath(configPath), true
+	return ResolveDefaultHomeDataDirForConfigPath(configPath), nil
 }
 
 func ResolveDefaultHomeDataDirFromHomeConfig() (string, bool) {
-	return ResolveDataDirForConfigPath(ResolveDefaultHomeConfigPath())
+	dataDir, err := ResolveDataDirForConfigPath(ResolveDefaultHomeConfigPath())
+	if err != nil {
+		return "", false
+	}
+	return dataDir, true
 }
 
 func resolveHomeDirs() (preferred string, legacy string, ok bool) {

@@ -138,7 +138,11 @@ func runCronAdd(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir, configPath)
+	sockPath, err := resolveSocketPath(dataDir, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -213,7 +217,11 @@ func runCronList(args []string) {
 		project = os.Getenv("CC_PROJECT")
 	}
 
-	sockPath := resolveSocketPath(dataDir, configPath)
+	sockPath, err := resolveSocketPath(dataDir, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -308,7 +316,11 @@ func runCronDel(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir, configPath)
+	sockPath, err := resolveSocketPath(dataDir, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -354,7 +366,11 @@ func runCronInfo(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir, configPath)
+	sockPath, err := resolveSocketPath(dataDir, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial("unix", sockPath)
@@ -421,7 +437,11 @@ func runCronEdit(args []string) {
 		value = n
 	}
 
-	sockPath := resolveSocketPath(dataDir, configPath)
+	sockPath, err := resolveSocketPath(dataDir, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"id":    id,
 		"field": field,

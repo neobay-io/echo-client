@@ -61,7 +61,7 @@ func daemonInstall(args []string) {
 	}
 
 	configPath := strings.TrimSpace(cfg.ConfigPath)
-	if configPath == "" || filepath.Clean(filepath.Dir(configPath)) != filepath.Clean(cfg.WorkDir) {
+	if configPath == "" {
 		configPath = filepath.Join(cfg.WorkDir, "config.toml")
 	}
 	if _, err := os.Stat(configPath); err != nil {

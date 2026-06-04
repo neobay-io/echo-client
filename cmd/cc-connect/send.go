@@ -75,7 +75,11 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir, configPath)
+	sockPath, err := resolveSocketPath(dataDir, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -113,24 +117,39 @@ func runSend(args []string) {
 	fmt.Println("Message sent successfully.")
 }
 
-func resolveSocketPath(dataDir, configPath string) string {
+func resolveSocketPath(dataDir, configPath string) (string, error) {
 	if dataDir != "" {
-		return filepath.Join(dataDir, "run", "api.sock")
+		return filepath.Join(dataDir, "run", "api.sock"), nil
 	}
-	return filepath.Join(resolveDefaultDataDir(configPath), "run", "api.sock")
+	resolvedDataDir, err := resolveDefaultDataDir(configPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedDataDir, "run", "api.sock"), nil
 }
 
-func resolveDefaultDataDir(configPath string) string {
-	if dataDir, ok := config.ResolveDataDirForConfigPath(strings.TrimSpace(configPath)); ok {
-		return dataDir
+func resolveDefaultDataDir(configPath string) (string, error) {
+	if cfgPath := strings.TrimSpace(configPath); cfgPath != "" {
+		dataDir, err := config.ResolveDataDirForConfigPath(cfgPath)
+		if err != nil {
+			return "", fmt.Errorf("resolve data_dir from config %s: %w", cfgPath, err)
+		}
+		return dataDir, nil
 	}
-	if meta, err := daemon.LoadMeta(); err == nil && strings.TrimSpace(meta.DataDir) != "" {
-		return meta.DataDir
+	if meta, err := daemon.LoadMeta(); err == nil {
+		if cfgPath := strings.TrimSpace(meta.ConfigPath); cfgPath != "" {
+			if dataDir, err := config.ResolveDataDirForConfigPath(cfgPath); err == nil {
+				return dataDir, nil
+			}
+		}
+		if strings.TrimSpace(meta.DataDir) != "" {
+			return meta.DataDir, nil
+		}
 	}
 	if dataDir, ok := config.ResolveDefaultHomeDataDirFromHomeConfig(); ok {
-		return dataDir
+		return dataDir, nil
 	}
-	return config.ResolveDefaultHomeDataDir()
+	return config.ResolveDefaultHomeDataDir(), nil
 }
 
 func printSendUsage() {

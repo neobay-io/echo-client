@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,13 +58,12 @@ func DefaultLogFile() string {
 }
 
 func DefaultDataDir() string {
-	if meta, err := LoadMeta(); err == nil {
+	if rec, err := loadSelectedMetaRecord(); err == nil && rec != nil {
+		meta := rec.Meta
 		if strings.TrimSpace(meta.DataDir) != "" {
 			return meta.DataDir
 		}
-		if dir := daemonStateMetaDir(); dir != "" {
-			return dir
-		}
+		return rec.Dir
 	}
 	if dataDir, ok := config.ResolveDefaultHomeDataDirFromHomeConfig(); ok {
 		return dataDir
@@ -86,32 +86,33 @@ type Meta struct {
 	InstalledAt string `json:"installed_at"`
 }
 
+type metaRecord struct {
+	Path string
+	Dir  string
+	Meta *Meta
+}
+
 func metaPath() string {
+	if rec, err := loadSelectedMetaRecord(); err == nil {
+		return rec.Path
+	}
 	return filepath.Join(defaultMetaDir(), "daemon.json")
 }
 
-func daemonStateMetaDir() string {
+func metaCandidatePaths() []string {
 	preferredDir, legacyDir, ok := configHomeDirs()
 	if !ok {
-		return ""
+		return []string{filepath.Join(config.DefaultAppHomeDirName, "daemon.json")}
 	}
-
-	preferredMeta := filepath.Join(preferredDir, "daemon.json")
-	legacyMeta := filepath.Join(legacyDir, "daemon.json")
-
-	switch {
-	case metaFileIsUsable(preferredMeta):
-		return preferredDir
-	case metaFileIsUsable(legacyMeta):
-		return legacyDir
-	default:
-		return ""
+	return []string{
+		filepath.Join(preferredDir, "daemon.json"),
+		filepath.Join(legacyDir, "daemon.json"),
 	}
 }
 
 func defaultMetaDir() string {
-	if dir := daemonStateMetaDir(); dir != "" {
-		return dir
+	if rec, err := loadSelectedMetaRecord(); err == nil {
+		return rec.Dir
 	}
 	preferredDir, legacyDir, ok := configHomeDirs()
 	if !ok {
@@ -167,16 +168,63 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func metaFileIsUsable(path string) bool {
+func loadMetaRecord(path string) (*metaRecord, error) {
 	if !fileExists(path) {
-		return false
+		return nil, os.ErrNotExist
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return nil, err
 	}
 	var meta Meta
-	return json.Unmarshal(data, &meta) == nil
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	return &metaRecord{
+		Path: path,
+		Dir:  filepath.Dir(path),
+		Meta: &meta,
+	}, nil
+}
+
+func metaRecordRank(rec *metaRecord) (time.Time, bool) {
+	if rec == nil || rec.Meta == nil {
+		return time.Time{}, false
+	}
+	resolves := false
+	if strings.TrimSpace(rec.Meta.ConfigPath) != "" {
+		_, err := config.ResolveDataDirForConfigPath(strings.TrimSpace(rec.Meta.ConfigPath))
+		resolves = err == nil
+	}
+	if t, err := time.Parse(time.RFC3339, rec.Meta.InstalledAt); err == nil {
+		return t, resolves
+	}
+	return time.Time{}, resolves
+}
+
+func loadSelectedMetaRecord() (*metaRecord, error) {
+	records := make([]*metaRecord, 0, 2)
+	for _, path := range metaCandidatePaths() {
+		rec, err := loadMetaRecord(path)
+		if err == nil {
+			records = append(records, rec)
+		}
+	}
+	if len(records) == 0 {
+		return nil, os.ErrNotExist
+	}
+	sort.Slice(records, func(i, j int) bool {
+		ti, ri := metaRecordRank(records[i])
+		tj, rj := metaRecordRank(records[j])
+		if ri != rj {
+			return ri
+		}
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return records[i].Path < records[j].Path
+	})
+	return records[0], nil
 }
 
 func SaveMeta(m *Meta) error {
@@ -195,19 +243,17 @@ func SaveMeta(m *Meta) error {
 }
 
 func LoadMeta() (*Meta, error) {
-	data, err := os.ReadFile(metaPath())
+	rec, err := loadSelectedMetaRecord()
 	if err != nil {
 		return nil, err
 	}
-	var m Meta
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
-	}
-	return &m, nil
+	return rec.Meta, nil
 }
 
 func RemoveMeta() {
-	_ = os.Remove(metaPath())
+	for _, path := range metaCandidatePaths() {
+		_ = os.Remove(path)
+	}
 }
 
 func NowISO() string {

@@ -76,7 +76,11 @@ func runSendFile(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir, configPath)
+	sockPath, err := resolveSocketPath(dataDir, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)

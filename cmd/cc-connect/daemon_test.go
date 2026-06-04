@@ -55,4 +55,7 @@ func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
 	if cfg.WorkDir != want {
 		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
 	}
+	if cfg.ConfigPath != "/tmp/example/config.toml" {
+		t.Fatalf("cfg.ConfigPath = %q", cfg.ConfigPath)
+	}
 }
