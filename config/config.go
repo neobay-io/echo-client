@@ -296,6 +296,22 @@ func ResolveDefaultHomeDataDirForConfigPath(configPath string) string {
 	}
 }
 
+func ResolveDefaultHomeDataDirFromHomeConfig() (string, bool) {
+	configPath := ResolveDefaultHomeConfigPath()
+	if !fileExists(configPath) {
+		return "", false
+	}
+
+	dataDir, err := loadDataDirOverride(configPath)
+	if err != nil {
+		return "", false
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return dataDir, true
+	}
+	return ResolveDefaultHomeDataDirForConfigPath(configPath), true
+}
+
 func resolveHomeDirs() (preferred string, legacy string, ok bool) {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -320,6 +336,21 @@ func pathExists(path string) bool {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func loadDataDirOverride(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	var raw struct {
+		DataDir string `toml:"data_dir"`
+	}
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(raw.DataDir), nil
 }
 
 func samePath(a, b string) bool {

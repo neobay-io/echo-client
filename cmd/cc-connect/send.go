@@ -115,10 +115,8 @@ func resolveSocketPath(dataDir string) string {
 }
 
 func resolveDefaultDataDir() string {
-	configPath := resolveConfigPath("")
-	cfg, err := config.Load(configPath)
-	if err == nil && strings.TrimSpace(cfg.DataDir) != "" {
-		return cfg.DataDir
+	if dataDir, ok := config.ResolveDefaultHomeDataDirFromHomeConfig(); ok {
+		return dataDir
 	}
 	return config.ResolveDefaultHomeDataDir()
 }

@@ -248,6 +248,50 @@ func TestResolveSocketPathUsesConfiguredDataDirFromDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestResolveSocketPathIgnoresCWDConfigAndUsesHomeConfigDataDir(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	homeDir := t.TempDir()
+	if err := os.Setenv("HOME", homeDir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+
+	homeConfigPath := filepath.Join(homeDir, ".echo-client", "config.toml")
+	homeDataDir := filepath.Join(homeDir, "home-data")
+	if err := os.MkdirAll(filepath.Dir(homeConfigPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll home config dir: %v", err)
+	}
+	homeContent := "data_dir = \"" + homeDataDir + "\"\n" + minimalConfigForMainTests
+	if err := os.WriteFile(homeConfigPath, []byte(homeContent), 0o644); err != nil {
+		t.Fatalf("WriteFile home config: %v", err)
+	}
+
+	cwdDir := t.TempDir()
+	cwdDataDir := filepath.Join(cwdDir, "cwd-data")
+	cwdContent := "data_dir = \"" + cwdDataDir + "\"\n" + minimalConfigForMainTests
+	if err := os.WriteFile(filepath.Join(cwdDir, "config.toml"), []byte(cwdContent), 0o644); err != nil {
+		t.Fatalf("WriteFile cwd config: %v", err)
+	}
+	if err := os.Chdir(cwdDir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+
+	if got := resolveSocketPath(""); got != filepath.Join(homeDataDir, "run", "api.sock") {
+		t.Fatalf("resolveSocketPath() with cwd config present = %q, want home config data dir", got)
+	}
+}
+
 const minimalConfigForMainTests = `
 [[projects]]
 name = "demo"

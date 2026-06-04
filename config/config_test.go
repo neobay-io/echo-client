@@ -139,6 +139,70 @@ func TestLoadUsesLegacyDataDirWhenLoadingLegacyHomeConfigEvenIfPreferredDirExist
 	}
 }
 
+func TestResolveDefaultHomeDataDirFromHomeConfigUsesConfiguredOverride(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	configPath := filepath.Join(dir, ".echo-client", "config.toml")
+	customDataDir := filepath.Join(dir, "custom-data")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll config dir: %v", err)
+	}
+	content := "data_dir = \"" + customDataDir + "\"\n" + minimalConfigTOML
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	got, ok := ResolveDefaultHomeDataDirFromHomeConfig()
+	if !ok {
+		t.Fatalf("ResolveDefaultHomeDataDirFromHomeConfig() reported no config")
+	}
+	if got != customDataDir {
+		t.Fatalf("ResolveDefaultHomeDataDirFromHomeConfig() = %q, want %q", got, customDataDir)
+	}
+}
+
+func TestResolveDefaultHomeDataDirFromHomeConfigFallsBackToLegacyHomeDirForLegacyConfig(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	if err := os.MkdirAll(filepath.Join(dir, ".echo-client"), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred dir: %v", err)
+	}
+	legacyPath := filepath.Join(dir, ".cc-connect", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy config dir: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(minimalConfigTOML), 0o644); err != nil {
+		t.Fatalf("WriteFile legacy config: %v", err)
+	}
+
+	got, ok := ResolveDefaultHomeDataDirFromHomeConfig()
+	if !ok {
+		t.Fatalf("ResolveDefaultHomeDataDirFromHomeConfig() reported no config")
+	}
+	want := filepath.Join(dir, ".cc-connect")
+	if got != want {
+		t.Fatalf("ResolveDefaultHomeDataDirFromHomeConfig() = %q, want %q", got, want)
+	}
+}
+
 func TestLoadParsesEchoConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	content := minimalConfigTOML + `

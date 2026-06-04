@@ -47,7 +47,7 @@ type DoctorChecker interface {
 }
 
 // RunDoctorChecks performs all diagnostic checks.
-func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform, dataDir string) []DoctorCheckResult {
+func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform, dataDir, configPath string) []DoctorCheckResult {
 	var results []DoctorCheckResult
 
 	results = append(results, checkAgentBinary(ctx, agent)...)
@@ -56,7 +56,7 @@ func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform, dat
 	results = append(results, checkSystem(ctx)...)
 	results = append(results, checkDependencies()...)
 	results = append(results, checkNetwork(ctx)...)
-	results = append(results, checkConfigFile()...)
+	results = append(results, checkConfigFile(configPath)...)
 	results = append(results, checkDataDir(dataDir)...)
 
 	if dc, ok := agent.(DoctorChecker); ok {
@@ -90,8 +90,11 @@ func checkDataDir(dataDir string) []DoctorCheckResult {
 	}}
 }
 
-func checkConfigFile() []DoctorCheckResult {
-	cfgPath := strings.TrimSpace(os.Getenv("CC_CONFIG_PATH"))
+func checkConfigFile(configPath string) []DoctorCheckResult {
+	cfgPath := strings.TrimSpace(configPath)
+	if cfgPath == "" {
+		cfgPath = strings.TrimSpace(os.Getenv("CC_CONFIG_PATH"))
+	}
 	if cfgPath == "" {
 		return nil
 	}
@@ -102,7 +105,11 @@ func checkConfigFile() []DoctorCheckResult {
 			Detail: cfgPath + ": " + err.Error(),
 		}}
 	}
-	return nil
+	return []DoctorCheckResult{{
+		Name:   "Config File",
+		Status: DoctorPass,
+		Detail: cfgPath,
+	}}
 }
 
 var agentBinMap = map[string]string{

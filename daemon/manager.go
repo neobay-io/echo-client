@@ -84,9 +84,9 @@ func daemonStateDataDir() string {
 	legacyMeta := filepath.Join(legacyDir, "daemon.json")
 
 	switch {
-	case fileExists(preferredMeta):
+	case metaFileIsUsable(preferredMeta):
 		return preferredDir
-	case fileExists(legacyMeta):
+	case metaFileIsUsable(legacyMeta):
 		return legacyDir
 	default:
 		return ""
@@ -104,6 +104,18 @@ func configHomeDirs() (preferred string, legacy string, ok bool) {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func metaFileIsUsable(path string) bool {
+	if !fileExists(path) {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var meta Meta
+	return json.Unmarshal(data, &meta) == nil
 }
 
 func SaveMeta(m *Meta) error {

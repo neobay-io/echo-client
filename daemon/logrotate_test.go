@@ -156,3 +156,36 @@ func TestLoadMetaPrefersExistingLegacyDaemonStateWhenPreferredDirAlsoExists(t *t
 		t.Fatalf("DefaultLogFile() = %q, want legacy default log file", got)
 	}
 }
+
+func TestDefaultLogFileIgnoresCorruptLegacyDaemonState(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	preferredMetaPath := filepath.Join(dir, ".echo-client", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(preferredMetaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred meta dir: %v", err)
+	}
+	if err := os.WriteFile(preferredMetaPath, []byte(`{"log_file":"/tmp/preferred.log","work_dir":"/tmp/preferred","binary_path":"/usr/local/bin/echo-client","installed_at":"2026-01-01T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile preferred meta: %v", err)
+	}
+
+	legacyMetaPath := filepath.Join(dir, ".cc-connect", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(legacyMetaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy meta dir: %v", err)
+	}
+	if err := os.WriteFile(legacyMetaPath, []byte("{"), 0o644); err != nil {
+		t.Fatalf("WriteFile corrupt legacy meta: %v", err)
+	}
+
+	if got := DefaultLogFile(); got != filepath.Join(dir, ".echo-client", "logs", "echo-client.log") {
+		t.Fatalf("DefaultLogFile() = %q, want preferred default log file", got)
+	}
+}

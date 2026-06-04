@@ -149,11 +149,12 @@ type Engine struct {
 
 	cronScheduler *CronScheduler
 
-	commands *CommandRegistry
-	skills   *SkillRegistry
-	dataDir  string
-	aliases  map[string]string // trigger → command (e.g. "帮助" → "/help")
-	aliasMu  sync.RWMutex
+	commands   *CommandRegistry
+	skills     *SkillRegistry
+	dataDir    string
+	configPath string
+	aliases    map[string]string // trigger → command (e.g. "帮助" → "/help")
+	aliasMu    sync.RWMutex
 
 	aliasSaveAddFunc func(name, command string) error
 	aliasSaveDelFunc func(name string) error
@@ -401,6 +402,10 @@ func (e *Engine) SetSkillDirs(dirs []string) {
 
 func (e *Engine) SetDataDir(dataDir string) {
 	e.dataDir = dataDir
+}
+
+func (e *Engine) SetConfigPath(configPath string) {
+	e.configPath = strings.TrimSpace(configPath)
 }
 
 func (e *Engine) SetManagedSkillConfig(enabled bool, roots []string) {
@@ -6347,7 +6352,7 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir, e.configPath)
 	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
 }

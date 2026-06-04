@@ -202,6 +202,7 @@ func main() {
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
 		engine.SetRole(proj.Role)
 		engine.SetDataDir(cfg.DataDir)
+		engine.SetConfigPath(configPath)
 		engine.SetSkillDirs(resolveProjectSkillDirs(proj, agent))
 		engine.SetManagedSkillConfig(len(proj.SkillDirs) > 0, resolveProjectSkillDirs(proj, agent))
 
