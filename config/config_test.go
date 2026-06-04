@@ -6,6 +6,83 @@ import (
 	"testing"
 )
 
+func TestResolveDefaultHomeDataDirPrefersEchoClient(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	want := filepath.Join(dir, ".echo-client")
+	if got := ResolveDefaultHomeDataDir(); got != want {
+		t.Fatalf("ResolveDefaultHomeDataDir() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveDefaultHomeDataDirFallsBackToLegacy(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	legacyDir := filepath.Join(dir, ".cc-connect")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy: %v", err)
+	}
+
+	if got := ResolveDefaultHomeDataDir(); got != legacyDir {
+		t.Fatalf("ResolveDefaultHomeDataDir() = %q, want %q", got, legacyDir)
+	}
+}
+
+func TestResolveDefaultHomeConfigPathPrefersEchoClientButFallsBackToLegacy(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	legacyPath := filepath.Join(dir, ".cc-connect", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy dir: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(minimalConfigTOML), 0o644); err != nil {
+		t.Fatalf("WriteFile legacy config: %v", err)
+	}
+
+	if got := ResolveDefaultHomeConfigPath(); got != legacyPath {
+		t.Fatalf("ResolveDefaultHomeConfigPath() = %q, want %q", got, legacyPath)
+	}
+
+	preferredPath := filepath.Join(dir, ".echo-client", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(preferredPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred dir: %v", err)
+	}
+	if err := os.WriteFile(preferredPath, []byte(minimalConfigTOML), 0o644); err != nil {
+		t.Fatalf("WriteFile preferred config: %v", err)
+	}
+
+	if got := ResolveDefaultHomeConfigPath(); got != preferredPath {
+		t.Fatalf("ResolveDefaultHomeConfigPath() after preferred exists = %q, want %q", got, preferredPath)
+	}
+}
+
 func TestLoadParsesEchoConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	content := minimalConfigTOML + `

@@ -8,10 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/chenhg5/cc-connect/config"
 )
 
 type DoctorStatus int
@@ -408,27 +409,25 @@ func checkNetwork(ctx context.Context) []DoctorCheckResult {
 	}
 
 	// Check data directory
-	if home, err := os.UserHomeDir(); err == nil {
-		dataDir := filepath.Join(home, ".cc-connect")
-		if info, err := os.Stat(dataDir); err != nil {
-			results = append(results, DoctorCheckResult{
-				Name:   "Data Directory",
-				Status: DoctorWarn,
-				Detail: dataDir + " does not exist",
-			})
-		} else if !info.IsDir() {
-			results = append(results, DoctorCheckResult{
-				Name:   "Data Directory",
-				Status: DoctorFail,
-				Detail: dataDir + " is not a directory",
-			})
-		} else {
-			results = append(results, DoctorCheckResult{
-				Name:   "Data Directory",
-				Status: DoctorPass,
-				Detail: dataDir,
-			})
-		}
+	dataDir := config.ResolveDefaultHomeDataDir()
+	if info, err := os.Stat(dataDir); err != nil {
+		results = append(results, DoctorCheckResult{
+			Name:   "Data Directory",
+			Status: DoctorWarn,
+			Detail: dataDir + " does not exist",
+		})
+	} else if !info.IsDir() {
+		results = append(results, DoctorCheckResult{
+			Name:   "Data Directory",
+			Status: DoctorFail,
+			Detail: dataDir + " is not a directory",
+		})
+	} else {
+		results = append(results, DoctorCheckResult{
+			Name:   "Data Directory",
+			Status: DoctorPass,
+			Detail: dataDir,
+		})
 	}
 
 	return results

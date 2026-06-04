@@ -119,7 +119,7 @@ Options:
       --caption <text>     Optional short caption sent alongside the file
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
-      --data-dir <path>    Data directory (default: ~/.cc-connect)
+      --data-dir <path>    Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
   -h, --help               Show this help
 
 Examples:

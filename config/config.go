@@ -16,8 +16,13 @@ var configMu sync.Mutex
 // ConfigPath stores the path to the config file for saving
 var ConfigPath string
 
+const (
+	DefaultAppHomeDirName = ".echo-client"
+	LegacyAppHomeDirName  = ".cc-connect"
+)
+
 type Config struct {
-	DataDir               string              `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	DataDir               string              `toml:"data_dir"` // session store directory, default ~/.echo-client (fallback ~/.cc-connect)
 	Projects              []ProjectConfig     `toml:"projects"`
 	Commands              []CommandConfig     `toml:"commands"`     // global custom slash commands
 	Aliases               []AliasConfig       `toml:"aliases"`      // global command aliases
@@ -232,17 +237,59 @@ func Load(path string) (*Config, error) {
 	}
 
 	if cfg.DataDir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			cfg.DataDir = filepath.Join(home, ".cc-connect")
-		} else {
-			cfg.DataDir = ".cc-connect"
-		}
+		cfg.DataDir = ResolveDefaultHomeDataDir()
 	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+func ResolveDefaultHomeDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return DefaultAppHomeDirName
+	}
+
+	preferred := filepath.Join(home, DefaultAppHomeDirName)
+	legacy := filepath.Join(home, LegacyAppHomeDirName)
+
+	if pathExists(preferred) {
+		return preferred
+	}
+	if pathExists(legacy) {
+		return legacy
+	}
+	return preferred
+}
+
+func ResolveDefaultHomeConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "config.toml"
+	}
+
+	preferred := filepath.Join(home, DefaultAppHomeDirName, "config.toml")
+	legacy := filepath.Join(home, LegacyAppHomeDirName, "config.toml")
+
+	if fileExists(preferred) {
+		return preferred
+	}
+	if fileExists(legacy) {
+		return legacy
+	}
+	return preferred
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func (c *Config) validate() error {

@@ -94,7 +94,29 @@ func TestDefaultLogFileUsesEchoClientName(t *testing.T) {
 		}
 	}()
 
-	if got := DefaultLogFile(); got != filepath.Join(dir, ".cc-connect", "logs", "echo-client.log") {
+	if got := DefaultLogFile(); got != filepath.Join(dir, ".echo-client", "logs", "echo-client.log") {
+		t.Fatalf("DefaultLogFile() = %q", got)
+	}
+}
+
+func TestDefaultLogFileFallsBackToLegacyHomeDir(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	legacyDir := filepath.Join(dir, ".cc-connect")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy: %v", err)
+	}
+
+	if got := DefaultLogFile(); got != filepath.Join(legacyDir, "logs", "echo-client.log") {
 		t.Fatalf("DefaultLogFile() = %q", got)
 	}
 }

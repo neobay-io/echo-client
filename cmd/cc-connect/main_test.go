@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -129,5 +131,65 @@ func TestResolveProjectSkillDirsCanIncludeAgentDefaults(t *testing.T) {
 	want := []string{"/project/tester", "/project/shared", "/default/a", "/default/b"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolveProjectSkillDirs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveConfigPathPrefersEchoClientButFallsBackToLegacy(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	legacyPath := filepath.Join(dir, ".cc-connect", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile legacy: %v", err)
+	}
+	if got := resolveConfigPath(""); got != legacyPath {
+		t.Fatalf("resolveConfigPath legacy = %q, want %q", got, legacyPath)
+	}
+
+	preferredPath := filepath.Join(dir, ".echo-client", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(preferredPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred: %v", err)
+	}
+	if err := os.WriteFile(preferredPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile preferred: %v", err)
+	}
+	if got := resolveConfigPath(""); got != preferredPath {
+		t.Fatalf("resolveConfigPath preferred = %q, want %q", got, preferredPath)
+	}
+}
+
+func TestResolveSocketPathUsesCompatibleDefaultDataDir(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	if got := resolveSocketPath(""); got != filepath.Join(dir, ".echo-client", "run", "api.sock") {
+		t.Fatalf("resolveSocketPath() = %q", got)
+	}
+
+	legacyDir := filepath.Join(dir, ".cc-connect")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy: %v", err)
+	}
+	if got := resolveSocketPath(""); got != filepath.Join(legacyDir, "run", "api.sock") {
+		t.Fatalf("resolveSocketPath() with legacy dir = %q", got)
 	}
 }

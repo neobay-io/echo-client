@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/chenhg5/cc-connect/config"
 )
 
 const (
@@ -45,17 +47,16 @@ func NewManager() (Manager, error) {
 }
 
 func DefaultLogFile() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cc-connect", "logs", "echo-client.log")
+	return filepath.Join(DefaultDataDir(), "logs", "echo-client.log")
 }
 
 func DefaultDataDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cc-connect")
+	return config.ResolveDefaultHomeDataDir()
 }
 
 // ── Metadata ────────────────────────────────────────────────
-// Stored at ~/.cc-connect/daemon.json so that `logs`, `status`,
+// Stored at ~/.echo-client/daemon.json by default (or legacy ~/.cc-connect/daemon.json)
+// so that `logs`, `status`,
 // etc. can locate the log file without parsing service definitions.
 
 type Meta struct {

@@ -455,7 +455,7 @@ Options:
       --desc <text>          Short description
       --session-mode <mode>  reuse | new_per_run
       --timeout-mins <mins>  omit for default (30m), 0=unlimited
-      --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --data-dir <path>      Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
   -h, --help                 Show this help
 
 Examples:

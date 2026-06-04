@@ -102,7 +102,7 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
-	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
+	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.echo-client/config.toml; falls back to ~/.cc-connect/config.toml)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = printUsage
 	flag.Parse()
@@ -702,7 +702,7 @@ func sessionStorePath(dataDir, name, workDir string) string {
 }
 
 // resolveConfigPath determines which config file to use.
-// Priority: explicit flag → ./config.toml → ~/.cc-connect/config.toml
+// Priority: explicit flag → ./config.toml → ~/.echo-client/config.toml → ~/.cc-connect/config.toml
 func resolveConfigPath(explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -710,10 +710,7 @@ func resolveConfigPath(explicit string) string {
 	if _, err := os.Stat("config.toml"); err == nil {
 		return "config.toml"
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect", "config.toml")
-	}
-	return "config.toml"
+	return config.ResolveDefaultHomeConfigPath()
 }
 
 func bootstrapConfig(path string) error {
@@ -778,7 +775,7 @@ Usage:
   %s <command> [args]
 
 Flags:
-  --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect/config.toml)
+  --config <path>    Path to config file (default: ./config.toml or ~/.echo-client/config.toml; falls back to ~/.cc-connect/config.toml)
   --version          Print version and exit
   --help             Show this help message
 

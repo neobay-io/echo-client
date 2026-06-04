@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/chenhg5/cc-connect/config"
 )
 
 func runSend(args []string) {
@@ -109,10 +111,7 @@ func resolveSocketPath(dataDir string) string {
 	if dataDir != "" {
 		return filepath.Join(dataDir, "run", "api.sock")
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cc-connect", "run", "api.sock")
-	}
-	return filepath.Join(".cc-connect", "run", "api.sock")
+	return filepath.Join(config.ResolveDefaultHomeDataDir(), "run", "api.sock")
 }
 
 func printSendUsage() {
@@ -128,7 +127,7 @@ Options:
       --stdin              Read message from stdin (best for long/special-char messages)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
-      --data-dir <path>    Data directory (default: ~/.cc-connect)
+      --data-dir <path>    Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
   -h, --help               Show this help
 
 Examples:
