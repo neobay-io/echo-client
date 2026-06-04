@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/daemon"
 )
 
@@ -50,15 +51,34 @@ func daemonInstall(args []string) {
 		os.Exit(1)
 	}
 
-	if err := daemon.Resolve(&cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	if cfg.WorkDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		cfg.WorkDir = wd
 	}
 
-	configPath := cfg.WorkDir + "/config.toml"
+	configPath := strings.TrimSpace(cfg.ConfigPath)
+	if configPath == "" || filepath.Clean(filepath.Dir(configPath)) != filepath.Clean(cfg.WorkDir) {
+		configPath = filepath.Join(cfg.WorkDir, "config.toml")
+	}
 	if _, err := os.Stat(configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", cfg.WorkDir)
 		fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
+		os.Exit(1)
+	}
+	appCfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config (%s): %v\n", configPath, err)
+		os.Exit(1)
+	}
+	cfg.DataDir = appCfg.DataDir
+	cfg.ConfigPath = configPath
+
+	if err := daemon.Resolve(&cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -84,6 +104,8 @@ func daemonInstall(args []string) {
 		LogMaxSize:  cfg.LogMaxSize,
 		WorkDir:     cfg.WorkDir,
 		BinaryPath:  cfg.BinaryPath,
+		DataDir:     cfg.DataDir,
+		ConfigPath:  cfg.ConfigPath,
 		InstalledAt: daemon.NowISO(),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
@@ -155,12 +177,15 @@ func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
 			if err != nil {
 				return daemon.Config{}, false, err
 			}
+			cfg.ConfigPath = value
 			cfg.WorkDir = filepath.Dir(value)
 			i = next
 		case strings.HasPrefix(arg, "--config="):
-			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "--config="))
+			cfg.ConfigPath = strings.TrimPrefix(arg, "--config=")
+			cfg.WorkDir = filepath.Dir(cfg.ConfigPath)
 		case strings.HasPrefix(arg, "-config="):
-			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "-config="))
+			cfg.ConfigPath = strings.TrimPrefix(arg, "-config=")
+			cfg.WorkDir = filepath.Dir(cfg.ConfigPath)
 		default:
 			return daemon.Config{}, false, fmt.Errorf("unknown flag: %s", arg)
 		}
@@ -275,6 +300,12 @@ func daemonStatus() {
 
 	if meta, err := daemon.LoadMeta(); err == nil {
 		fmt.Printf("  Log:       %s\n", meta.LogFile)
+		if meta.DataDir != "" {
+			fmt.Printf("  DataDir:   %s\n", meta.DataDir)
+		}
+		if meta.ConfigPath != "" {
+			fmt.Printf("  Config:    %s\n", meta.ConfigPath)
+		}
 		fmt.Printf("  WorkDir:   %s\n", meta.WorkDir)
 		if t, err := time.Parse(time.RFC3339, meta.InstalledAt); err == nil {
 			fmt.Printf("  Installed: %s\n", t.Format("2006-01-02 15:04:05"))

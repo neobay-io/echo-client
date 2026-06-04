@@ -27,7 +27,7 @@ func runRelay(args []string) {
 }
 
 func runRelaySend(args []string) {
-	var from, to, sessionKey, message, dataDir string
+	var from, to, sessionKey, message, dataDir, configPath string
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -56,6 +56,11 @@ func runRelaySend(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		case "--help", "-h":
 			printRelaySendUsage()
@@ -90,7 +95,7 @@ func runRelaySend(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir)
+	sockPath := resolveSocketPath(dataDir, configPath)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -147,6 +152,7 @@ Options:
   -t, --to <project>         Target bot project name
   -s, --session-key <key>    Session key (auto-detected from CC_SESSION_KEY env)
   -m, --message <text>       Message to send
+      --config <path>        Config file used to resolve data_dir
       --data-dir <path>      Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
   -h, --help                 Show this help
 

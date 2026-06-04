@@ -41,7 +41,7 @@ func runCron(args []string) {
 }
 
 func runCronAdd(args []string) {
-	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, sessionMode string
+	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, configPath, sessionMode string
 	var timeoutMins *int
 
 	var positional []string
@@ -81,6 +81,11 @@ func runCronAdd(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		case "--session-mode":
 			if i+1 < len(args) {
@@ -133,7 +138,7 @@ func runCronAdd(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir)
+	sockPath := resolveSocketPath(dataDir, configPath)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -183,7 +188,7 @@ func runCronAdd(args []string) {
 }
 
 func runCronList(args []string) {
-	var project, dataDir string
+	var project, dataDir, configPath string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--project", "-p":
@@ -196,6 +201,11 @@ func runCronList(args []string) {
 				i++
 				dataDir = args[i]
 			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
+			}
 		}
 	}
 
@@ -203,7 +213,7 @@ func runCronList(args []string) {
 		project = os.Getenv("CC_PROJECT")
 	}
 
-	sockPath := resolveSocketPath(dataDir)
+	sockPath := resolveSocketPath(dataDir, configPath)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -273,7 +283,7 @@ func runCronList(args []string) {
 }
 
 func runCronDel(args []string) {
-	var dataDir string
+	var dataDir, configPath string
 	var id string
 
 	for i := 0; i < len(args); i++ {
@@ -282,6 +292,11 @@ func runCronDel(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		default:
 			id = args[i]
@@ -293,7 +308,7 @@ func runCronDel(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir)
+	sockPath := resolveSocketPath(dataDir, configPath)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -317,13 +332,18 @@ func runCronDel(args []string) {
 }
 
 func runCronInfo(args []string) {
-	var dataDir, id string
+	var dataDir, configPath, id string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--data-dir":
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		default:
 			id = args[i]
@@ -334,7 +354,7 @@ func runCronInfo(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir)
+	sockPath := resolveSocketPath(dataDir, configPath)
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial("unix", sockPath)
@@ -356,7 +376,7 @@ func runCronInfo(args []string) {
 }
 
 func runCronEdit(args []string) {
-	var dataDir string
+	var dataDir, configPath string
 	pos := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -364,6 +384,11 @@ func runCronEdit(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		case "--help", "-h":
 			printCronEditUsage()
@@ -396,7 +421,7 @@ func runCronEdit(args []string) {
 		value = n
 	}
 
-	sockPath := resolveSocketPath(dataDir)
+	sockPath := resolveSocketPath(dataDir, configPath)
 	payload, _ := json.Marshal(map[string]any{
 		"id":    id,
 		"field": field,
@@ -455,6 +480,7 @@ Options:
       --desc <text>          Short description
       --session-mode <mode>  reuse | new_per_run
       --timeout-mins <mins>  omit for default (30m), 0=unlimited
+      --config <path>        Config file used to resolve data_dir
       --data-dir <path>      Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
   -h, --help                 Show this help
 

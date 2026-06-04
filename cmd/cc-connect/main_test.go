@@ -188,7 +188,7 @@ func TestResolveSocketPathUsesCompatibleDefaultDataDir(t *testing.T) {
 	if err := os.WriteFile(preferredConfig, []byte(minimalConfigForMainTests), 0o644); err != nil {
 		t.Fatalf("WriteFile preferred config: %v", err)
 	}
-	if got := resolveSocketPath(""); got != filepath.Join(dir, ".echo-client", "run", "api.sock") {
+	if got := resolveSocketPath("", ""); got != filepath.Join(dir, ".echo-client", "run", "api.sock") {
 		t.Fatalf("resolveSocketPath() = %q", got)
 	}
 }
@@ -216,7 +216,7 @@ func TestResolveSocketPathUsesLegacyDataDirWhenLegacyHomeConfigIsActive(t *testi
 	if err := os.WriteFile(legacyConfig, []byte(minimalConfigForMainTests), 0o644); err != nil {
 		t.Fatalf("WriteFile legacy config: %v", err)
 	}
-	if got := resolveSocketPath(""); got != filepath.Join(dir, ".cc-connect", "run", "api.sock") {
+	if got := resolveSocketPath("", ""); got != filepath.Join(dir, ".cc-connect", "run", "api.sock") {
 		t.Fatalf("resolveSocketPath() with legacy dir = %q", got)
 	}
 }
@@ -243,7 +243,7 @@ func TestResolveSocketPathUsesConfiguredDataDirFromDefaultConfig(t *testing.T) {
 		t.Fatalf("WriteFile config: %v", err)
 	}
 
-	if got := resolveSocketPath(""); got != filepath.Join(customDataDir, "run", "api.sock") {
+	if got := resolveSocketPath("", ""); got != filepath.Join(customDataDir, "run", "api.sock") {
 		t.Fatalf("resolveSocketPath() with configured data_dir = %q", got)
 	}
 }
@@ -287,8 +287,59 @@ func TestResolveSocketPathIgnoresCWDConfigAndUsesHomeConfigDataDir(t *testing.T)
 		t.Fatalf("Chdir: %v", err)
 	}
 
-	if got := resolveSocketPath(""); got != filepath.Join(homeDataDir, "run", "api.sock") {
+	if got := resolveSocketPath("", ""); got != filepath.Join(homeDataDir, "run", "api.sock") {
 		t.Fatalf("resolveSocketPath() with cwd config present = %q, want home config data dir", got)
+	}
+}
+
+func TestResolveSocketPathUsesExplicitConfigPathDataDir(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	configPath := filepath.Join(t.TempDir(), "custom-config.toml")
+	customDataDir := filepath.Join(dir, "explicit-data")
+	content := "data_dir = \"" + customDataDir + "\"\n" + minimalConfigForMainTests
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	if got := resolveSocketPath("", configPath); got != filepath.Join(customDataDir, "run", "api.sock") {
+		t.Fatalf("resolveSocketPath() with explicit config path = %q", got)
+	}
+}
+
+func TestResolveSocketPathUsesDaemonMetadataDataDir(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	metaPath := filepath.Join(dir, ".echo-client", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll meta dir: %v", err)
+	}
+	customDataDir := filepath.Join(dir, "daemon-data")
+	meta := `{"data_dir":"` + customDataDir + `","log_file":"` + filepath.Join(customDataDir, "logs", "echo-client.log") + `"}`
+	if err := os.WriteFile(metaPath, []byte(meta), 0o644); err != nil {
+		t.Fatalf("WriteFile meta: %v", err)
+	}
+
+	if got := resolveSocketPath("", ""); got != filepath.Join(customDataDir, "run", "api.sock") {
+		t.Fatalf("resolveSocketPath() with daemon metadata = %q", got)
 	}
 }
 

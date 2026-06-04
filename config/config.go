@@ -296,8 +296,7 @@ func ResolveDefaultHomeDataDirForConfigPath(configPath string) string {
 	}
 }
 
-func ResolveDefaultHomeDataDirFromHomeConfig() (string, bool) {
-	configPath := ResolveDefaultHomeConfigPath()
+func ResolveDataDirForConfigPath(configPath string) (string, bool) {
 	if !fileExists(configPath) {
 		return "", false
 	}
@@ -310,6 +309,10 @@ func ResolveDefaultHomeDataDirFromHomeConfig() (string, bool) {
 		return dataDir, true
 	}
 	return ResolveDefaultHomeDataDirForConfigPath(configPath), true
+}
+
+func ResolveDefaultHomeDataDirFromHomeConfig() (string, bool) {
+	return ResolveDataDirForConfigPath(ResolveDefaultHomeConfigPath())
 }
 
 func resolveHomeDirs() (preferred string, legacy string, ok bool) {

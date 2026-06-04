@@ -13,10 +13,11 @@ import (
 	"strings"
 
 	"github.com/chenhg5/cc-connect/config"
+	"github.com/chenhg5/cc-connect/daemon"
 )
 
 func runSend(args []string) {
-	var project, sessionKey, dataDir, message string
+	var project, sessionKey, dataDir, configPath, message string
 	var useStdin bool
 
 	var positional []string
@@ -44,6 +45,11 @@ func runSend(args []string) {
 				i++
 				dataDir = args[i]
 			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
+			}
 		case "--help", "-h":
 			printSendUsage()
 			return
@@ -69,7 +75,7 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
-	sockPath := resolveSocketPath(dataDir)
+	sockPath := resolveSocketPath(dataDir, configPath)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %s is not running (socket not found: %s)\n", appName, sockPath)
 		os.Exit(1)
@@ -107,14 +113,20 @@ func runSend(args []string) {
 	fmt.Println("Message sent successfully.")
 }
 
-func resolveSocketPath(dataDir string) string {
+func resolveSocketPath(dataDir, configPath string) string {
 	if dataDir != "" {
 		return filepath.Join(dataDir, "run", "api.sock")
 	}
-	return filepath.Join(resolveDefaultDataDir(), "run", "api.sock")
+	return filepath.Join(resolveDefaultDataDir(configPath), "run", "api.sock")
 }
 
-func resolveDefaultDataDir() string {
+func resolveDefaultDataDir(configPath string) string {
+	if dataDir, ok := config.ResolveDataDirForConfigPath(strings.TrimSpace(configPath)); ok {
+		return dataDir
+	}
+	if meta, err := daemon.LoadMeta(); err == nil && strings.TrimSpace(meta.DataDir) != "" {
+		return meta.DataDir
+	}
 	if dataDir, ok := config.ResolveDefaultHomeDataDirFromHomeConfig(); ok {
 		return dataDir
 	}
@@ -134,6 +146,7 @@ Options:
       --stdin              Read message from stdin (best for long/special-char messages)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
+      --config <path>      Config file used to resolve data_dir
       --data-dir <path>    Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
   -h, --help               Show this help
 

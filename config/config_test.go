@@ -170,6 +170,23 @@ func TestResolveDefaultHomeDataDirFromHomeConfigUsesConfiguredOverride(t *testin
 	}
 }
 
+func TestResolveDataDirForConfigPathUsesConfiguredOverrideOutsideHome(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	customDataDir := filepath.Join(t.TempDir(), "custom-data")
+	content := "data_dir = \"" + customDataDir + "\"\n" + minimalConfigTOML
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	got, ok := ResolveDataDirForConfigPath(configPath)
+	if !ok {
+		t.Fatalf("ResolveDataDirForConfigPath() reported no config")
+	}
+	if got != customDataDir {
+		t.Fatalf("ResolveDataDirForConfigPath() = %q, want %q", got, customDataDir)
+	}
+}
+
 func TestResolveDefaultHomeDataDirFromHomeConfigFallsBackToLegacyHomeDirForLegacyConfig(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	dir := t.TempDir()

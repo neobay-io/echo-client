@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/chenhg5/cc-connect/config"
@@ -21,6 +22,8 @@ type Config struct {
 	WorkDir    string
 	LogFile    string
 	LogMaxSize int64
+	DataDir    string
+	ConfigPath string
 	EnvPATH    string // capture user's PATH so agents are accessible
 }
 
@@ -47,12 +50,23 @@ func NewManager() (Manager, error) {
 }
 
 func DefaultLogFile() string {
+	if meta, err := LoadMeta(); err == nil && strings.TrimSpace(meta.LogFile) != "" {
+		return meta.LogFile
+	}
 	return filepath.Join(DefaultDataDir(), "logs", "echo-client.log")
 }
 
 func DefaultDataDir() string {
-	if dir := daemonStateDataDir(); dir != "" {
-		return dir
+	if meta, err := LoadMeta(); err == nil {
+		if strings.TrimSpace(meta.DataDir) != "" {
+			return meta.DataDir
+		}
+		if dir := daemonStateMetaDir(); dir != "" {
+			return dir
+		}
+	}
+	if dataDir, ok := config.ResolveDefaultHomeDataDirFromHomeConfig(); ok {
+		return dataDir
 	}
 	return config.ResolveDefaultHomeDataDir()
 }
@@ -67,14 +81,16 @@ type Meta struct {
 	LogMaxSize  int64  `json:"log_max_size"`
 	WorkDir     string `json:"work_dir"`
 	BinaryPath  string `json:"binary_path"`
+	DataDir     string `json:"data_dir"`
+	ConfigPath  string `json:"config_path"`
 	InstalledAt string `json:"installed_at"`
 }
 
 func metaPath() string {
-	return filepath.Join(DefaultDataDir(), "daemon.json")
+	return filepath.Join(defaultMetaDir(), "daemon.json")
 }
 
-func daemonStateDataDir() string {
+func daemonStateMetaDir() string {
 	preferredDir, legacyDir, ok := configHomeDirs()
 	if !ok {
 		return ""
@@ -93,6 +109,46 @@ func daemonStateDataDir() string {
 	}
 }
 
+func defaultMetaDir() string {
+	if dir := daemonStateMetaDir(); dir != "" {
+		return dir
+	}
+	preferredDir, legacyDir, ok := configHomeDirs()
+	if !ok {
+		return config.DefaultAppHomeDirName
+	}
+	preferredConfig := filepath.Join(preferredDir, "config.toml")
+	legacyConfig := filepath.Join(legacyDir, "config.toml")
+	switch {
+	case fileExists(preferredConfig):
+		return preferredDir
+	case fileExists(legacyConfig):
+		return legacyDir
+	case dirExists(preferredDir):
+		return preferredDir
+	case dirExists(legacyDir):
+		return legacyDir
+	default:
+		return preferredDir
+	}
+}
+
+func metaPathForConfig(configPath string) string {
+	dir := defaultMetaDir()
+	preferredDir, legacyDir, ok := configHomeDirs()
+	if ok {
+		preferredConfig := filepath.Join(preferredDir, "config.toml")
+		legacyConfig := filepath.Join(legacyDir, "config.toml")
+		switch {
+		case samePath(configPath, preferredConfig), samePath(filepath.Dir(configPath), preferredDir):
+			dir = preferredDir
+		case samePath(configPath, legacyConfig), samePath(filepath.Dir(configPath), legacyDir):
+			dir = legacyDir
+		}
+	}
+	return filepath.Join(dir, "daemon.json")
+}
+
 func configHomeDirs() (preferred string, legacy string, ok bool) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -104,6 +160,11 @@ func configHomeDirs() (preferred string, legacy string, ok bool) {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func metaFileIsUsable(path string) bool {
@@ -119,14 +180,18 @@ func metaFileIsUsable(path string) bool {
 }
 
 func SaveMeta(m *Meta) error {
-	if err := os.MkdirAll(filepath.Dir(metaPath()), 0755); err != nil {
+	targetPath := metaPath()
+	if m != nil && strings.TrimSpace(m.ConfigPath) != "" {
+		targetPath = metaPathForConfig(m.ConfigPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(metaPath(), data, 0644)
+	return os.WriteFile(targetPath, data, 0644)
 }
 
 func LoadMeta() (*Meta, error) {
@@ -169,7 +234,11 @@ func Resolve(cfg *Config) error {
 		cfg.WorkDir = wd
 	}
 	if cfg.LogFile == "" {
-		cfg.LogFile = DefaultLogFile()
+		logDataDir := strings.TrimSpace(cfg.DataDir)
+		if logDataDir == "" {
+			logDataDir = DefaultDataDir()
+		}
+		cfg.LogFile = filepath.Join(logDataDir, "logs", "echo-client.log")
 	}
 	if cfg.LogMaxSize <= 0 {
 		cfg.LogMaxSize = DefaultLogMaxSize
@@ -178,4 +247,16 @@ func Resolve(cfg *Config) error {
 		cfg.EnvPATH = os.Getenv("PATH")
 	}
 	return nil
+}
+
+func samePath(a, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return filepath.Clean(absA) == filepath.Clean(absB)
 }

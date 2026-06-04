@@ -18,6 +18,9 @@ func TestParseDaemonInstallArgs_ConfigSetsWorkDir(t *testing.T) {
 	if cfg.WorkDir != want {
 		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
 	}
+	if cfg.ConfigPath != "/tmp/example/config.toml" {
+		t.Fatalf("cfg.ConfigPath = %q", cfg.ConfigPath)
+	}
 }
 
 func TestParseDaemonInstallArgs_ConfigEqualsFormSetsWorkDir(t *testing.T) {
@@ -29,6 +32,9 @@ func TestParseDaemonInstallArgs_ConfigEqualsFormSetsWorkDir(t *testing.T) {
 	want := filepath.Clean("/tmp/example")
 	if cfg.WorkDir != want {
 		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
+	}
+	if cfg.ConfigPath != "/tmp/example/config.toml" {
+		t.Fatalf("cfg.ConfigPath = %q", cfg.ConfigPath)
 	}
 }
 

@@ -62,6 +62,8 @@ func TestMetaSaveLoad(t *testing.T) {
 		LogMaxSize:  1024,
 		WorkDir:     "/tmp",
 		BinaryPath:  "/usr/local/bin/echo-client",
+		DataDir:     "/tmp/echo-data",
+		ConfigPath:  "/tmp/echo-config/config.toml",
 		InstalledAt: NowISO(),
 	}
 
@@ -79,6 +81,12 @@ func TestMetaSaveLoad(t *testing.T) {
 	}
 	if loaded.WorkDir != m.WorkDir {
 		t.Errorf("WorkDir mismatch: %s != %s", loaded.WorkDir, m.WorkDir)
+	}
+	if loaded.DataDir != m.DataDir {
+		t.Errorf("DataDir mismatch: %s != %s", loaded.DataDir, m.DataDir)
+	}
+	if loaded.ConfigPath != m.ConfigPath {
+		t.Errorf("ConfigPath mismatch: %s != %s", loaded.ConfigPath, m.ConfigPath)
 	}
 }
 
@@ -152,8 +160,11 @@ func TestLoadMetaPrefersExistingLegacyDaemonStateWhenPreferredDirAlsoExists(t *t
 	if loaded.LogFile != "/tmp/legacy.log" {
 		t.Fatalf("loaded.LogFile = %q, want legacy log path", loaded.LogFile)
 	}
-	if got := DefaultLogFile(); got != filepath.Join(dir, ".cc-connect", "logs", "echo-client.log") {
-		t.Fatalf("DefaultLogFile() = %q, want legacy default log file", got)
+	if got := DefaultDataDir(); got != filepath.Join(dir, ".cc-connect") {
+		t.Fatalf("DefaultDataDir() = %q, want legacy data dir", got)
+	}
+	if got := DefaultLogFile(); got != "/tmp/legacy.log" {
+		t.Fatalf("DefaultLogFile() = %q, want metadata log file", got)
 	}
 }
 
@@ -185,7 +196,40 @@ func TestDefaultLogFileIgnoresCorruptLegacyDaemonState(t *testing.T) {
 		t.Fatalf("WriteFile corrupt legacy meta: %v", err)
 	}
 
-	if got := DefaultLogFile(); got != filepath.Join(dir, ".echo-client", "logs", "echo-client.log") {
-		t.Fatalf("DefaultLogFile() = %q, want preferred default log file", got)
+	if got := DefaultDataDir(); got != filepath.Join(dir, ".echo-client") {
+		t.Fatalf("DefaultDataDir() = %q, want preferred data dir", got)
+	}
+	if got := DefaultLogFile(); got != "/tmp/preferred.log" {
+		t.Fatalf("DefaultLogFile() = %q, want metadata log file", got)
+	}
+}
+
+func TestDefaultDataDirUsesConfiguredDaemonMetadataPath(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	metaPath := filepath.Join(dir, ".echo-client", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll meta dir: %v", err)
+	}
+	customDataDir := filepath.Join(dir, "custom-data")
+	content := `{"data_dir":"` + customDataDir + `","log_file":"` + filepath.Join(customDataDir, "logs", "echo-client.log") + `","work_dir":"/tmp","binary_path":"/usr/local/bin/echo-client","installed_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(metaPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile meta: %v", err)
+	}
+
+	if got := DefaultDataDir(); got != customDataDir {
+		t.Fatalf("DefaultDataDir() = %q, want %q", got, customDataDir)
+	}
+	if got := DefaultLogFile(); got != filepath.Join(customDataDir, "logs", "echo-client.log") {
+		t.Fatalf("DefaultLogFile() = %q", got)
 	}
 }
