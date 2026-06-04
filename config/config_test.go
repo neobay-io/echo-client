@@ -83,6 +83,62 @@ func TestResolveDefaultHomeConfigPathPrefersEchoClientButFallsBackToLegacy(t *te
 	}
 }
 
+func TestResolveDefaultHomeDataDirForConfigPathUsesMatchingHomeConfigDir(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	preferredConfig := filepath.Join(dir, ".echo-client", "config.toml")
+	legacyConfig := filepath.Join(dir, ".cc-connect", "config.toml")
+
+	if got := ResolveDefaultHomeDataDirForConfigPath(preferredConfig); got != filepath.Join(dir, ".echo-client") {
+		t.Fatalf("ResolveDefaultHomeDataDirForConfigPath(preferred) = %q", got)
+	}
+	if got := ResolveDefaultHomeDataDirForConfigPath(legacyConfig); got != filepath.Join(dir, ".cc-connect") {
+		t.Fatalf("ResolveDefaultHomeDataDirForConfigPath(legacy) = %q", got)
+	}
+}
+
+func TestLoadUsesLegacyDataDirWhenLoadingLegacyHomeConfigEvenIfPreferredDirExists(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	if err := os.MkdirAll(filepath.Join(dir, ".echo-client"), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred dir: %v", err)
+	}
+
+	legacyPath := filepath.Join(dir, ".cc-connect", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy dir: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(minimalConfigTOML), 0o644); err != nil {
+		t.Fatalf("WriteFile legacy config: %v", err)
+	}
+
+	cfg, err := Load(legacyPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.DataDir; got != filepath.Join(dir, ".cc-connect") {
+		t.Fatalf("cfg.DataDir = %q, want legacy home dir", got)
+	}
+}
+
 func TestLoadParsesEchoConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	content := minimalConfigTOML + `

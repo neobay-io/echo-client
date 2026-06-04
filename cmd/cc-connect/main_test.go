@@ -181,15 +181,80 @@ func TestResolveSocketPathUsesCompatibleDefaultDataDir(t *testing.T) {
 		}
 	}()
 
+	preferredConfig := filepath.Join(dir, ".echo-client", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(preferredConfig), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred: %v", err)
+	}
+	if err := os.WriteFile(preferredConfig, []byte(minimalConfigForMainTests), 0o644); err != nil {
+		t.Fatalf("WriteFile preferred config: %v", err)
+	}
 	if got := resolveSocketPath(""); got != filepath.Join(dir, ".echo-client", "run", "api.sock") {
 		t.Fatalf("resolveSocketPath() = %q", got)
 	}
+}
 
-	legacyDir := filepath.Join(dir, ".cc-connect")
-	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+func TestResolveSocketPathUsesLegacyDataDirWhenLegacyHomeConfigIsActive(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	if err := os.MkdirAll(filepath.Join(dir, ".echo-client"), 0o755); err != nil {
+		t.Fatalf("MkdirAll preferred dir: %v", err)
+	}
+
+	legacyConfig := filepath.Join(dir, ".cc-connect", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(legacyConfig), 0o755); err != nil {
 		t.Fatalf("MkdirAll legacy: %v", err)
 	}
-	if got := resolveSocketPath(""); got != filepath.Join(legacyDir, "run", "api.sock") {
+	if err := os.WriteFile(legacyConfig, []byte(minimalConfigForMainTests), 0o644); err != nil {
+		t.Fatalf("WriteFile legacy config: %v", err)
+	}
+	if got := resolveSocketPath(""); got != filepath.Join(dir, ".cc-connect", "run", "api.sock") {
 		t.Fatalf("resolveSocketPath() with legacy dir = %q", got)
 	}
 }
+
+func TestResolveSocketPathUsesConfiguredDataDirFromDefaultConfig(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	dir := t.TempDir()
+	if err := os.Setenv("HOME", dir); err != nil {
+		t.Fatalf("Setenv HOME: %v", err)
+	}
+	defer func() {
+		if err := os.Setenv("HOME", origHome); err != nil {
+			t.Fatalf("restore HOME: %v", err)
+		}
+	}()
+
+	configPath := filepath.Join(dir, ".echo-client", "config.toml")
+	customDataDir := filepath.Join(dir, "custom-data")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll config dir: %v", err)
+	}
+	content := "data_dir = \"" + customDataDir + "\"\n" + minimalConfigForMainTests
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	if got := resolveSocketPath(""); got != filepath.Join(customDataDir, "run", "api.sock") {
+		t.Fatalf("resolveSocketPath() with configured data_dir = %q", got)
+	}
+}
+
+const minimalConfigForMainTests = `
+[[projects]]
+name = "demo"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "telegram"
+`

@@ -51,6 +51,9 @@ func DefaultLogFile() string {
 }
 
 func DefaultDataDir() string {
+	if dir := daemonStateDataDir(); dir != "" {
+		return dir
+	}
 	return config.ResolveDefaultHomeDataDir()
 }
 
@@ -69,6 +72,38 @@ type Meta struct {
 
 func metaPath() string {
 	return filepath.Join(DefaultDataDir(), "daemon.json")
+}
+
+func daemonStateDataDir() string {
+	preferredDir, legacyDir, ok := configHomeDirs()
+	if !ok {
+		return ""
+	}
+
+	preferredMeta := filepath.Join(preferredDir, "daemon.json")
+	legacyMeta := filepath.Join(legacyDir, "daemon.json")
+
+	switch {
+	case fileExists(preferredMeta):
+		return preferredDir
+	case fileExists(legacyMeta):
+		return legacyDir
+	default:
+		return ""
+	}
+}
+
+func configHomeDirs() (preferred string, legacy string, ok bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", "", false
+	}
+	return filepath.Join(home, config.DefaultAppHomeDirName), filepath.Join(home, config.LegacyAppHomeDirName), true
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func SaveMeta(m *Meta) error {

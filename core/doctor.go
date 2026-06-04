@@ -47,7 +47,7 @@ type DoctorChecker interface {
 }
 
 // RunDoctorChecks performs all diagnostic checks.
-func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []DoctorCheckResult {
+func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform, dataDir string) []DoctorCheckResult {
 	var results []DoctorCheckResult
 
 	results = append(results, checkAgentBinary(ctx, agent)...)
@@ -56,12 +56,53 @@ func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []D
 	results = append(results, checkSystem(ctx)...)
 	results = append(results, checkDependencies()...)
 	results = append(results, checkNetwork(ctx)...)
+	results = append(results, checkConfigFile()...)
+	results = append(results, checkDataDir(dataDir)...)
 
 	if dc, ok := agent.(DoctorChecker); ok {
 		results = append(results, dc.DoctorChecks(ctx)...)
 	}
 
 	return results
+}
+
+func checkDataDir(dataDir string) []DoctorCheckResult {
+	if strings.TrimSpace(dataDir) == "" {
+		dataDir = config.ResolveDefaultHomeDataDir()
+	}
+	if info, err := os.Stat(dataDir); err != nil {
+		return []DoctorCheckResult{{
+			Name:   "Data Directory",
+			Status: DoctorWarn,
+			Detail: dataDir + " does not exist",
+		}}
+	} else if !info.IsDir() {
+		return []DoctorCheckResult{{
+			Name:   "Data Directory",
+			Status: DoctorFail,
+			Detail: dataDir + " is not a directory",
+		}}
+	}
+	return []DoctorCheckResult{{
+		Name:   "Data Directory",
+		Status: DoctorPass,
+		Detail: dataDir,
+	}}
+}
+
+func checkConfigFile() []DoctorCheckResult {
+	cfgPath := strings.TrimSpace(os.Getenv("CC_CONFIG_PATH"))
+	if cfgPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(cfgPath); err != nil {
+		return []DoctorCheckResult{{
+			Name:   "Config File",
+			Status: DoctorFail,
+			Detail: cfgPath + ": " + err.Error(),
+		}}
+	}
+	return nil
 }
 
 var agentBinMap = map[string]string{
@@ -394,39 +435,6 @@ func checkNetwork(ctx context.Context) []DoctorCheckResult {
 			Status:  status,
 			Detail:  fmt.Sprintf("HTTP %d", resp.StatusCode),
 			Latency: latency,
-		})
-	}
-
-	// Check config file
-	if cfgPath := os.Getenv("CC_CONFIG_PATH"); cfgPath != "" {
-		if _, err := os.Stat(cfgPath); err != nil {
-			results = append(results, DoctorCheckResult{
-				Name:   "Config File",
-				Status: DoctorFail,
-				Detail: cfgPath + ": " + err.Error(),
-			})
-		}
-	}
-
-	// Check data directory
-	dataDir := config.ResolveDefaultHomeDataDir()
-	if info, err := os.Stat(dataDir); err != nil {
-		results = append(results, DoctorCheckResult{
-			Name:   "Data Directory",
-			Status: DoctorWarn,
-			Detail: dataDir + " does not exist",
-		})
-	} else if !info.IsDir() {
-		results = append(results, DoctorCheckResult{
-			Name:   "Data Directory",
-			Status: DoctorFail,
-			Detail: dataDir + " is not a directory",
-		})
-	} else {
-		results = append(results, DoctorCheckResult{
-			Name:   "Data Directory",
-			Status: DoctorPass,
-			Detail: dataDir,
 		})
 	}
 

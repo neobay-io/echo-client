@@ -237,7 +237,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	if cfg.DataDir == "" {
-		cfg.DataDir = ResolveDefaultHomeDataDir()
+		cfg.DataDir = ResolveDefaultHomeDataDirForConfigPath(path)
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -247,13 +247,10 @@ func Load(path string) (*Config, error) {
 }
 
 func ResolveDefaultHomeDataDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
+	preferred, legacy, ok := resolveHomeDirs()
+	if !ok {
 		return DefaultAppHomeDirName
 	}
-
-	preferred := filepath.Join(home, DefaultAppHomeDirName)
-	legacy := filepath.Join(home, LegacyAppHomeDirName)
 
 	if pathExists(preferred) {
 		return preferred
@@ -265,13 +262,10 @@ func ResolveDefaultHomeDataDir() string {
 }
 
 func ResolveDefaultHomeConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
+	preferred, legacy, ok := resolveHomeConfigPaths()
+	if !ok {
 		return "config.toml"
 	}
-
-	preferred := filepath.Join(home, DefaultAppHomeDirName, "config.toml")
-	legacy := filepath.Join(home, LegacyAppHomeDirName, "config.toml")
 
 	if fileExists(preferred) {
 		return preferred
@@ -282,6 +276,42 @@ func ResolveDefaultHomeConfigPath() string {
 	return preferred
 }
 
+func ResolveDefaultHomeDataDirForConfigPath(configPath string) string {
+	preferredDir, legacyDir, ok := resolveHomeDirs()
+	if !ok {
+		return ResolveDefaultHomeDataDir()
+	}
+	preferredConfig, legacyConfig, ok := resolveHomeConfigPaths()
+	if !ok {
+		return ResolveDefaultHomeDataDir()
+	}
+
+	switch {
+	case samePath(configPath, preferredConfig), samePath(filepath.Dir(configPath), preferredDir):
+		return preferredDir
+	case samePath(configPath, legacyConfig), samePath(filepath.Dir(configPath), legacyDir):
+		return legacyDir
+	default:
+		return ResolveDefaultHomeDataDir()
+	}
+}
+
+func resolveHomeDirs() (preferred string, legacy string, ok bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", "", false
+	}
+	return filepath.Join(home, DefaultAppHomeDirName), filepath.Join(home, LegacyAppHomeDirName), true
+}
+
+func resolveHomeConfigPaths() (preferred string, legacy string, ok bool) {
+	preferredDir, legacyDir, ok := resolveHomeDirs()
+	if !ok {
+		return "", "", false
+	}
+	return filepath.Join(preferredDir, "config.toml"), filepath.Join(legacyDir, "config.toml"), true
+}
+
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
@@ -290,6 +320,18 @@ func pathExists(path string) bool {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func samePath(a, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return filepath.Clean(absA) == filepath.Clean(absB)
 }
 
 func (c *Config) validate() error {

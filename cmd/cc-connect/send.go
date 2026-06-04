@@ -111,7 +111,16 @@ func resolveSocketPath(dataDir string) string {
 	if dataDir != "" {
 		return filepath.Join(dataDir, "run", "api.sock")
 	}
-	return filepath.Join(config.ResolveDefaultHomeDataDir(), "run", "api.sock")
+	return filepath.Join(resolveDefaultDataDir(), "run", "api.sock")
+}
+
+func resolveDefaultDataDir() string {
+	configPath := resolveConfigPath("")
+	cfg, err := config.Load(configPath)
+	if err == nil && strings.TrimSpace(cfg.DataDir) != "" {
+		return cfg.DataDir
+	}
+	return config.ResolveDefaultHomeDataDir()
 }
 
 func printSendUsage() {
