@@ -1,5 +1,7 @@
 /cc-connect
 /cc-connect-local
+/echo-client
+/echo-client-local
 config.toml
 .cc-connect/
 *.exe
