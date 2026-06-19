@@ -29,7 +29,7 @@ type systemdManager struct {
 func newPlatformManager() (Manager, error) {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return nil, fmt.Errorf("systemctl not found; systemd is required on Linux.\n" +
-			"  If running in a container without systemd, use nohup/tmux/screen instead.")
+			"  If running in a container without systemd, use nohup/tmux/screen instead")
 	}
 
 	isRoot := os.Getuid() == 0
@@ -66,7 +66,7 @@ func (m *systemdManager) Install(cfg Config) error {
 
 	legacyUnitPath := m.unitPathFor(legacySystemdName)
 	if legacyUnitPath != unitPath {
-		runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
+		_, _ = runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
 		_ = os.Remove(legacyUnitPath)
 	}
 	if warn := m.oppositeScopeLegacyWarning(); warn != "" {
@@ -92,8 +92,8 @@ func (m *systemdManager) Install(cfg Config) error {
 }
 
 func (m *systemdManager) Uninstall() error {
-	runSystemctl(m.sysArgs("disable", "--now", systemdServiceName)...)
-	runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
+	_, _ = runSystemctl(m.sysArgs("disable", "--now", systemdServiceName)...)
+	_, _ = runSystemctl(m.sysArgs("disable", "--now", legacySystemdName)...)
 	if warn := m.oppositeScopeLegacyWarning(); warn != "" {
 		fmt.Fprintln(os.Stderr, warn)
 	}
@@ -107,7 +107,7 @@ func (m *systemdManager) Uninstall() error {
 		_ = os.Remove(legacyUnitPath)
 	}
 
-	runSystemctl(m.sysArgs("daemon-reload")...)
+	_, _ = runSystemctl(m.sysArgs("daemon-reload")...)
 	return nil
 }
 

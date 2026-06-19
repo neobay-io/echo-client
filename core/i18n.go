@@ -1330,11 +1330,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Todavía no hay un resumen reciente para revisar.",
 	},
 	MsgReviewPromptTooLong: {
-		LangEnglish:            "The latest summary is too long to start a review cycle (max %d characters).",
-		LangChinese:            "最近总结过长，无法启动 review 周期（最大 %d 字符）。",
-		LangTraditionalChinese: "最近總結過長，無法啟動 review 週期（最大 %d 字元）。",
-		LangJapanese:           "直近の要約が長すぎるため、レビューを開始できません（最大 %d 文字）。",
-		LangSpanish:            "El resumen reciente es demasiado largo para iniciar una revisión (máx. %d caracteres).",
+		LangEnglish:            "Review content is too long to continue (max %d characters).",
+		LangChinese:            "review 内容过长，无法继续（最大 %d 字符）。",
+		LangTraditionalChinese: "review 內容過長，無法繼續（最大 %d 字元）。",
+		LangJapanese:           "review の内容が長すぎるため続行できません（最大 %d 文字）。",
+		LangSpanish:            "El contenido de review es demasiado largo para continuar (máx. %d caracteres).",
 	},
 	MsgSetupNative: {
 		LangEnglish:            "✅ This agent already supports cc-connect instructions natively. No extra setup is needed.",

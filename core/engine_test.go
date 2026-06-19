@@ -1840,6 +1840,255 @@ func TestStartReviewCycleRunsReviewerAndOriginRevision(t *testing.T) {
 	}
 }
 
+func TestCompactReviewPromptText(t *testing.T) {
+	t.Run("non positive max returns empty", func(t *testing.T) {
+		got, compacted := compactReviewPromptText("  hello  ", 0)
+		if got != "" {
+			t.Fatalf("compactReviewPromptText = %q, want empty string", got)
+		}
+		if !compacted {
+			t.Fatal("expected compaction for non-empty text with zero budget")
+		}
+	})
+
+	t.Run("short text is trimmed but not compacted", func(t *testing.T) {
+		got, compacted := compactReviewPromptText("  你好  ", 8)
+		if got != "你好" {
+			t.Fatalf("compactReviewPromptText = %q, want trimmed text", got)
+		}
+		if compacted {
+			t.Fatal("expected short text to remain un-compacted")
+		}
+	})
+
+	t.Run("tiny budgets use strict fallback", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			maxLen int
+			want   string
+		}{
+			{name: "one rune", maxLen: 1, want: "你"},
+			{name: "two runes", maxLen: 2, want: "你…"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got, compacted := compactReviewPromptText("你好世界", tc.maxLen)
+				if got != tc.want {
+					t.Fatalf("compactReviewPromptText = %q, want %q", got, tc.want)
+				}
+				if !compacted {
+					t.Fatal("expected compaction for tiny budget")
+				}
+				if gotLen := utf8.RuneCountInString(got); gotLen > tc.maxLen {
+					t.Fatalf("compactReviewPromptText length = %d, want <= %d", gotLen, tc.maxLen)
+				}
+			})
+		}
+	})
+
+	t.Run("multibyte text preserves both ends when marker fits", func(t *testing.T) {
+		text := strings.Repeat("你", 80) + "MID" + strings.Repeat("好", 80)
+		got, compacted := compactReviewPromptText(text, 80)
+		if !compacted {
+			t.Fatal("expected compaction for oversized text")
+		}
+		if !strings.Contains(got, "[... omitted ") {
+			t.Fatalf("compactReviewPromptText = %q, want omission marker", got)
+		}
+		if !strings.Contains(got, strings.Repeat("你", 8)) {
+			t.Fatalf("compactReviewPromptText = %q, want leading content preserved", got)
+		}
+		if !strings.Contains(got, strings.Repeat("好", 8)) {
+			t.Fatalf("compactReviewPromptText = %q, want trailing content preserved", got)
+		}
+		if gotLen := utf8.RuneCountInString(got); gotLen > 80 {
+			t.Fatalf("compactReviewPromptText length = %d, want <= %d", gotLen, 80)
+		}
+	})
+}
+
+func TestSplitReviewPromptBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		origin     string
+		review     string
+		budget     int
+		wantOrigin int
+		wantReview int
+	}{
+		{
+			name:       "under budget returns actual lengths",
+			origin:     "abc",
+			review:     "de",
+			budget:     10,
+			wantOrigin: 3,
+			wantReview: 2,
+		},
+		{
+			name:       "empty origin gives review full budget",
+			origin:     "",
+			review:     strings.Repeat("b", 10),
+			budget:     3,
+			wantOrigin: 0,
+			wantReview: 3,
+		},
+		{
+			name:       "extreme asymmetry still keeps both sides",
+			origin:     "a",
+			review:     strings.Repeat("b", 100000),
+			budget:     2,
+			wantOrigin: 1,
+			wantReview: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotOrigin, gotReview := splitReviewPromptBudget(tc.origin, tc.review, tc.budget)
+			if gotOrigin != tc.wantOrigin || gotReview != tc.wantReview {
+				t.Fatalf("splitReviewPromptBudget = (%d, %d), want (%d, %d)", gotOrigin, gotReview, tc.wantOrigin, tc.wantReview)
+			}
+			if gotOrigin+gotReview > tc.budget {
+				t.Fatalf("budget split sum = %d, want <= %d", gotOrigin+gotReview, tc.budget)
+			}
+		})
+	}
+}
+
+func TestBuildBoundedRevisionPromptCompactsBothSides(t *testing.T) {
+	originSummary := strings.Repeat("A", maxReviewPromptLen/2+800) + "\nORIGIN\n" + strings.Repeat("Z", maxReviewPromptLen/2+800)
+	reviewSummary := strings.Repeat("B", maxReviewPromptLen/2+900) + "\nREVIEW\n" + strings.Repeat("Y", maxReviewPromptLen/2+900)
+
+	prompt, originCompacted, reviewCompacted, err := buildBoundedRevisionPrompt("codex", "qoder", originSummary, reviewSummary, maxReviewPromptLen)
+	if err != nil {
+		t.Fatalf("buildBoundedRevisionPrompt: %v", err)
+	}
+	if !originCompacted || !reviewCompacted {
+		t.Fatalf("compacted flags = (%v, %v), want both true", originCompacted, reviewCompacted)
+	}
+	if got := utf8.RuneCountInString(prompt); got > maxReviewPromptLen {
+		t.Fatalf("prompt length = %d, want <= %d", got, maxReviewPromptLen)
+	}
+	if strings.Count(prompt, "[... omitted ") < 2 {
+		t.Fatalf("prompt = %q, want omission markers for both summaries", prompt)
+	}
+	for _, snippet := range []string{
+		strings.Repeat("A", 32),
+		strings.Repeat("Z", 32),
+		strings.Repeat("B", 32),
+		strings.Repeat("Y", 32),
+	} {
+		if !strings.Contains(prompt, snippet) {
+			t.Fatalf("prompt = %q, want snippet %q preserved", prompt, snippet)
+		}
+	}
+}
+
+func TestStartReviewCycleCompactsLongOriginSummary(t *testing.T) {
+	rm := NewRelayManager("")
+	originAgent := &scriptedRecordingAgent{responses: []string{
+		"<review_packet><recommended_review_target>summary_only</recommended_review_target></review_packet>",
+		"revised summary",
+	}}
+	reviewerAgent := &scriptedRecordingAgent{responses: []string{"reviewer summary"}}
+	originPlatform := &stubCardPlatform{n: "feishu"}
+	reviewerPlatform := &stubCardPlatform{n: "worker"}
+	origin := NewEngine("codex", originAgent, []Platform{originPlatform}, "", LangEnglish)
+	reviewer := NewEngine("qoder", reviewerAgent, []Platform{reviewerPlatform}, "", LangEnglish)
+	rm.RegisterEngine(origin.name, origin)
+	rm.RegisterEngine(reviewer.name, reviewer)
+	origin.SetRelayManager(rm)
+	reviewer.SetRelayManager(rm)
+
+	sessionKey := "feishu:chat:user"
+	originSession := origin.sessions.GetOrCreateActive(sessionKey)
+	originSummary := strings.Repeat("A", maxReviewPromptLen/2+400) + "\nMIDDLE\n" + strings.Repeat("Z", maxReviewPromptLen/2+400)
+	originSession.AddHistory("assistant", originSummary)
+
+	if err := origin.startReviewCycle(sessionKey, "qoder"); err != nil {
+		t.Fatalf("startReviewCycle: %v", err)
+	}
+
+	originSends := originAgent.session.Sends()
+	if len(originSends) != 2 {
+		t.Fatalf("origin send count = %d, want 2 (packet + revision)", len(originSends))
+	}
+
+	packetPrompt := originSends[0].prompt
+	if !strings.Contains(packetPrompt, "[... omitted ") {
+		t.Fatalf("origin packet prompt = %q, want compacted summary marker", packetPrompt)
+	}
+	if !strings.Contains(packetPrompt, strings.Repeat("A", 64)) {
+		t.Fatalf("origin packet prompt = %q, want leading summary content preserved", packetPrompt)
+	}
+	if !strings.Contains(packetPrompt, strings.Repeat("Z", 64)) {
+		t.Fatalf("origin packet prompt = %q, want trailing summary content preserved", packetPrompt)
+	}
+	if strings.Contains(packetPrompt, originSummary) {
+		t.Fatalf("origin packet prompt unexpectedly kept the full long summary")
+	}
+
+	revisionPrompt := originSends[1].prompt
+	if !strings.Contains(revisionPrompt, "[... omitted ") {
+		t.Fatalf("origin revision prompt = %q, want compacted summary marker", revisionPrompt)
+	}
+	if got := utf8.RuneCountInString(revisionPrompt); got > maxReviewPromptLen {
+		t.Fatalf("origin revision prompt length = %d, want <= %d", got, maxReviewPromptLen)
+	}
+
+	flow := origin.getReviewFlow(sessionKey)
+	if flow == nil || flow.LastOriginSummary != originSummary {
+		t.Fatalf("flow = %#v, want original full summary preserved in review flow", flow)
+	}
+}
+
+func TestStartReviewCycleCompactsLongReviewerSummary(t *testing.T) {
+	rm := NewRelayManager("")
+	originAgent := &scriptedRecordingAgent{responses: []string{
+		"<review_packet><recommended_review_target>summary_only</recommended_review_target></review_packet>",
+		"revised summary",
+	}}
+	reviewerSummary := strings.Repeat("B", maxReviewPromptLen/2+500) + "\nDETAIL\n" + strings.Repeat("Y", maxReviewPromptLen/2+500)
+	reviewerAgent := &scriptedRecordingAgent{responses: []string{reviewerSummary}}
+	originPlatform := &stubCardPlatform{n: "feishu"}
+	reviewerPlatform := &stubCardPlatform{n: "worker"}
+	origin := NewEngine("codex", originAgent, []Platform{originPlatform}, "", LangEnglish)
+	reviewer := NewEngine("qoder", reviewerAgent, []Platform{reviewerPlatform}, "", LangEnglish)
+	rm.RegisterEngine(origin.name, origin)
+	rm.RegisterEngine(reviewer.name, reviewer)
+	origin.SetRelayManager(rm)
+	reviewer.SetRelayManager(rm)
+
+	sessionKey := "feishu:chat:user"
+	originSession := origin.sessions.GetOrCreateActive(sessionKey)
+	originSession.AddHistory("assistant", "Short origin summary.")
+
+	if err := origin.startReviewCycle(sessionKey, "qoder"); err != nil {
+		t.Fatalf("startReviewCycle: %v", err)
+	}
+
+	originSends := originAgent.session.Sends()
+	if len(originSends) != 2 {
+		t.Fatalf("origin send count = %d, want 2 (packet + revision)", len(originSends))
+	}
+
+	revisionPrompt := originSends[1].prompt
+	if !strings.Contains(revisionPrompt, "[... omitted ") {
+		t.Fatalf("origin revision prompt = %q, want compacted reviewer feedback marker", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, strings.Repeat("B", 64)) {
+		t.Fatalf("origin revision prompt = %q, want leading reviewer content preserved", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, strings.Repeat("Y", 64)) {
+		t.Fatalf("origin revision prompt = %q, want trailing reviewer content preserved", revisionPrompt)
+	}
+	if got := utf8.RuneCountInString(revisionPrompt); got > maxReviewPromptLen {
+		t.Fatalf("origin revision prompt length = %d, want <= %d", got, maxReviewPromptLen)
+	}
+
+	flow := origin.getReviewFlow(sessionKey)
+	if flow == nil || flow.LastReviewSummary != reviewerSummary {
+		t.Fatalf("flow = %#v, want original full reviewer summary preserved in review flow", flow)
+	}
+}
+
 func TestStartReviewCycleAllowsCurrentProjectAsReviewerWhenNoReviewerRole(t *testing.T) {
 	rm := NewRelayManager("")
 	agent := &scriptedRecordingAgent{responses: []string{

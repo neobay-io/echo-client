@@ -527,6 +527,7 @@ func TestJobManagerStartRetriesJobIDCollision(t *testing.T) {
 	if job.ID != "job_unique" {
 		t.Fatalf("job ID = %q, want job_unique", job.ID)
 	}
+	waitForJobStatus(t, jm, job.ID, JobStatusCompleted)
 }
 
 func TestJobManagerListAgents(t *testing.T) {

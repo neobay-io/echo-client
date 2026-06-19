@@ -6,17 +6,17 @@ import (
 )
 
 var (
-	reCodeBlock   = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
-	reInlineCode  = regexp.MustCompile("`([^`]+)`")
-	reBoldAst     = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reBoldUnd     = regexp.MustCompile(`__(.+?)__`)
-	reItalicAst   = regexp.MustCompile(`\*(.+?)\*`)
-	reItalicUnd   = regexp.MustCompile(`_(.+?)_`)
-	reStrike      = regexp.MustCompile(`~~(.+?)~~`)
-	reLink        = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	reHeading     = regexp.MustCompile(`(?m)^#{1,6}\s+`)
-	reHorizontal  = regexp.MustCompile(`(?m)^---+\s*$`)
-	reBlockquote  = regexp.MustCompile(`(?m)^>\s?`)
+	reCodeBlock  = regexp.MustCompile("(?s)```[a-zA-Z]*\n?(.*?)```")
+	reInlineCode = regexp.MustCompile("`([^`]+)`")
+	reBoldAst    = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reBoldUnd    = regexp.MustCompile(`__(.+?)__`)
+	reItalicAst  = regexp.MustCompile(`\*(.+?)\*`)
+	reItalicUnd  = regexp.MustCompile(`_(.+?)_`)
+	reStrike     = regexp.MustCompile(`~~(.+?)~~`)
+	reLink       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+`)
+	reHorizontal = regexp.MustCompile(`(?m)^---+\s*$`)
+	reBlockquote = regexp.MustCompile(`(?m)^>\s?`)
 )
 
 // StripMarkdown converts Markdown-formatted text to clean plain text.

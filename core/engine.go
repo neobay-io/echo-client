@@ -6810,6 +6810,116 @@ func truncateIf(s string, maxLen int) string {
 	return string([]rune(s)[:maxLen]) + "..."
 }
 
+// compactReviewPromptText trims review prompt text to maxLen runes while preserving
+// both the start and end of the original text when possible. When maxLen is too
+// small for the omission marker, it falls back to a strict-length prefix snippet.
+func compactReviewPromptText(s string, maxLen int) (string, bool) {
+	text := strings.TrimSpace(s)
+	if maxLen <= 0 {
+		return "", text != ""
+	}
+	if utf8.RuneCountInString(text) <= maxLen {
+		return text, false
+	}
+	rs := []rune(text)
+
+	total := utf8.RuneCountInString(text)
+	omitted := total - maxLen
+	marker := ""
+	for {
+		marker = fmt.Sprintf("\n\n[... omitted %d characters for review ...]\n\n", omitted)
+		markerLen := utf8.RuneCountInString(marker)
+		if markerLen >= maxLen {
+			if maxLen <= 1 {
+				return string(rs[:maxLen]), true
+			}
+			return string(rs[:maxLen-1]) + "…", true
+		}
+		keep := maxLen - markerLen
+		nextOmitted := total - keep
+		if nextOmitted == omitted {
+			break
+		}
+		omitted = nextOmitted
+	}
+
+	markerLen := utf8.RuneCountInString(marker)
+	keep := maxLen - markerLen
+	head := keep / 2
+	tail := keep - head
+	return string(rs[:head]) + marker + string(rs[len(rs)-tail:]), true
+}
+
+func splitReviewPromptBudget(originSummary, reviewSummary string, budget int) (int, int) {
+	originLen := utf8.RuneCountInString(strings.TrimSpace(originSummary))
+	reviewLen := utf8.RuneCountInString(strings.TrimSpace(reviewSummary))
+
+	if budget <= 0 {
+		return 0, 0
+	}
+	if originLen == 0 {
+		if reviewLen < budget {
+			return 0, reviewLen
+		}
+		return 0, budget
+	}
+	if reviewLen == 0 {
+		if originLen < budget {
+			return originLen, 0
+		}
+		return budget, 0
+	}
+
+	total := originLen + reviewLen
+	if total <= budget {
+		return originLen, reviewLen
+	}
+
+	originBudget := budget * originLen / total
+	if originBudget <= 0 {
+		originBudget = 1
+	}
+	if originBudget >= budget {
+		originBudget = budget - 1
+	}
+	reviewBudget := budget - originBudget
+
+	if originLen < originBudget {
+		reviewBudget += originBudget - originLen
+		originBudget = originLen
+	}
+	if reviewLen < reviewBudget {
+		originBudget += reviewBudget - reviewLen
+		reviewBudget = reviewLen
+	}
+	return originBudget, reviewBudget
+}
+
+func buildBoundedRevisionPrompt(originProject, reviewerProject, originSummary, reviewSummary string, maxLen int) (string, bool, bool, error) {
+	prompt := buildRevisionPrompt(originProject, reviewerProject, originSummary, reviewSummary)
+	if maxLen <= 0 {
+		return "", false, false, fmt.Errorf("revision prompt exceeds max length")
+	}
+	if utf8.RuneCountInString(prompt) <= maxLen {
+		return prompt, false, false, nil
+	}
+
+	baseLen := utf8.RuneCountInString(buildRevisionPrompt(originProject, reviewerProject, "", ""))
+	if baseLen >= maxLen {
+		return "", false, false, fmt.Errorf("revision prompt template exceeds max length")
+	}
+
+	budget := maxLen - baseLen
+	originBudget, reviewBudget := splitReviewPromptBudget(originSummary, reviewSummary, budget)
+	compactedOrigin, originCompacted := compactReviewPromptText(originSummary, originBudget)
+	compactedReview, reviewCompacted := compactReviewPromptText(reviewSummary, reviewBudget)
+	prompt = buildRevisionPrompt(originProject, reviewerProject, compactedOrigin, compactedReview)
+	if utf8.RuneCountInString(prompt) > maxLen {
+		return "", originCompacted, reviewCompacted, fmt.Errorf("revision prompt exceeds max length")
+	}
+	return prompt, originCompacted, reviewCompacted, nil
+}
+
 func splitMessage(text string, maxLen int) []string {
 	if len(text) <= maxLen {
 		return []string{text}
@@ -6966,8 +7076,16 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 	if originSummary == "" {
 		return fmt.Errorf("%s", e.i18n.T(MsgReviewNoContent))
 	}
-	if utf8.RuneCountInString(originSummary) > maxReviewPromptLen {
-		return fmt.Errorf("%s", e.i18n.Tf(MsgReviewPromptTooLong, maxReviewPromptLen))
+	originSummaryForPrompt, truncatedOriginSummary := compactReviewPromptText(originSummary, maxReviewPromptLen)
+	if truncatedOriginSummary {
+		slog.Info("review: compacted long origin summary for prompt",
+			"origin_project", e.name,
+			"reviewer_project", reviewerProject,
+			"session_key", sessionKey,
+			"origin_session", originSession.ID,
+			"summary_runes", utf8.RuneCountInString(originSummary),
+			"prompt_runes", utf8.RuneCountInString(originSummaryForPrompt),
+		)
 	}
 
 	e.reviewMu.Lock()
@@ -6977,7 +7095,7 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 	}
 	e.reviewMu.Unlock()
 
-	packetPrompt := buildReviewPacketPrompt(e.name, reviewerProject, originSummary)
+	packetPrompt := buildReviewPacketPrompt(e.name, reviewerProject, originSummaryForPrompt)
 	packetPrefix := e.name + " review-packet: "
 	packetStart := time.Now()
 	slog.Info("review: preparing packet",
@@ -7016,6 +7134,8 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 		)
 		return fmt.Errorf("origin agent returned empty review packet")
 	}
+	// Review packets are structured XML handoff data; hard-fail instead of truncating
+	// so the reviewer never receives malformed or ambiguous packet content.
 	if utf8.RuneCountInString(reviewPacket) > maxReviewPromptLen {
 		slog.Warn("review: packet preparation returned oversized packet",
 			"origin_project", e.name,
@@ -7063,7 +7183,23 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 	}
 	e.reviewMu.Unlock()
 
-	revisionPrompt := buildRevisionPrompt(e.name, reviewerProject, originSummary, reviewSummary)
+	revisionPrompt, truncatedRevisionOrigin, truncatedReviewSummary, err := buildBoundedRevisionPrompt(e.name, reviewerProject, originSummary, reviewSummary, maxReviewPromptLen)
+	if err != nil {
+		return fmt.Errorf("%s", e.i18n.Tf(MsgReviewPromptTooLong, maxReviewPromptLen))
+	}
+	if truncatedRevisionOrigin || truncatedReviewSummary {
+		slog.Info("review: compacted revision prompt content",
+			"origin_project", e.name,
+			"reviewer_project", reviewerProject,
+			"session_key", sessionKey,
+			"origin_session", originSession.ID,
+			"origin_runes", utf8.RuneCountInString(originSummary),
+			"review_runes", utf8.RuneCountInString(reviewSummary),
+			"prompt_runes", utf8.RuneCountInString(revisionPrompt),
+			"origin_compacted", truncatedRevisionOrigin,
+			"review_compacted", truncatedReviewSummary,
+		)
+	}
 	originState := e.getOrCreateInteractiveState(sessionKey, originPlatform, originReplyCtx, originSession)
 	if originState == nil || originState.agentSession == nil {
 		return fmt.Errorf("failed to restart origin agent session")

@@ -24,9 +24,9 @@ type RelayBinding struct {
 // RelayManager coordinates bot-to-bot message relay across engines.
 type RelayManager struct {
 	mu        sync.RWMutex
-	engines   map[string]*Engine         // project name → engine (runtime only)
-	bindings  map[string]*RelayBinding   // chatID → binding
-	storePath string                     // empty = no persistence
+	engines   map[string]*Engine       // project name → engine (runtime only)
+	bindings  map[string]*RelayBinding // chatID → binding
+	storePath string                   // empty = no persistence
 }
 
 func NewRelayManager(dataDir string) *RelayManager {
