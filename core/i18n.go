@@ -227,6 +227,7 @@ const (
 	MsgReviewReviewerUnavailable MsgKey = "review_reviewer_unavailable"
 	MsgReviewReviewerBusy        MsgKey = "review_reviewer_busy"
 	MsgReviewNoContent           MsgKey = "review_no_content"
+	MsgReviewPacketEmpty         MsgKey = "review_packet_empty"
 	MsgReviewPromptTooLong       MsgKey = "review_prompt_too_long"
 	MsgSetupNative               MsgKey = "setup_native"
 
@@ -1328,6 +1329,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "目前還沒有可用於 review 的最近總結。",
 		LangJapanese:           "レビュー対象となる直近の要約がまだありません。",
 		LangSpanish:            "Todavía no hay un resumen reciente para revisar.",
+	},
+	MsgReviewPacketEmpty: {
+		LangEnglish:            "Review packet is empty, cannot continue.",
+		LangChinese:            "review packet 为空，无法继续。",
+		LangTraditionalChinese: "review packet 為空，無法繼續。",
+		LangJapanese:           "review packet が空のため続行できません。",
+		LangSpanish:            "El review packet está vacío y no se puede continuar.",
 	},
 	MsgReviewPromptTooLong: {
 		LangEnglish:            "Review content is too long to continue (max %d characters).",

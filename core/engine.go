@@ -6983,6 +6983,15 @@ func buildReviewPacketPrompt(originProject, reviewerProject, summary string) str
 	)
 }
 
+func buildReviewPacketRetryPrompt(reviewerProject string, maxLen int) string {
+	return fmt.Sprintf(
+		"Your previous <review_packet> for reviewer %s exceeded the %d-character limit.\n\nRewrite it as a valid <review_packet>...</review_packet> block under %d characters. Keep only the minimum information needed for the reviewer to determine scope and inspect the right code safely.\n\nPrioritize:\n- recommended_review_target\n- repo path, branch, and commit IDs only when needed\n- only the most relevant files\n- only minimal context\n\nReturn only the compacted <review_packet> block. Do not include prose outside the XML.",
+		reviewerProject,
+		maxLen,
+		maxLen,
+	)
+}
+
 func extractReviewPacket(content string) string {
 	text := strings.TrimSpace(content)
 	if text == "" {
@@ -7132,20 +7141,63 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 			"origin_session", originSession.ID,
 			"elapsed", time.Since(packetStart),
 		)
-		return fmt.Errorf("origin agent returned empty review packet")
+		return fmt.Errorf("%s", e.i18n.T(MsgReviewPacketEmpty))
 	}
-	// Review packets are structured XML handoff data; hard-fail instead of truncating
-	// so the reviewer never receives malformed or ambiguous packet content.
-	if utf8.RuneCountInString(reviewPacket) > maxReviewPromptLen {
+	packetRunes := utf8.RuneCountInString(reviewPacket)
+	if packetRunes > maxReviewPromptLen {
+		oversizedPacketRunes := packetRunes
 		slog.Warn("review: packet preparation returned oversized packet",
 			"origin_project", e.name,
 			"reviewer_project", reviewerProject,
 			"session_key", sessionKey,
 			"origin_session", originSession.ID,
 			"elapsed", time.Since(packetStart),
-			"runes", utf8.RuneCountInString(reviewPacket),
+			"runes", packetRunes,
 		)
-		return fmt.Errorf("%s", e.i18n.Tf(MsgReviewPromptTooLong, maxReviewPromptLen))
+		// Retry only once to keep review latency bounded if the agent keeps
+		// returning oversized packets despite explicit compaction instructions.
+		// We deliberately avoid resetting the origin session here, even though
+		// that leaves the oversized packet turn in agent-visible history.
+		retryPrompt := buildReviewPacketRetryPrompt(reviewerProject, maxReviewPromptLen)
+		if err := e.sendChunksWithPrefix(originPlatform, originReplyCtx, packetPrefix+"retry: ", retryPrompt); err != nil {
+			return err
+		}
+		retryPacket, err := e.runManagedTurn(originStateForReviewPacket(e, sessionKey, originPlatform, originReplyCtx, originSession), originSession, sessionKey, retryPrompt, managedTurnOpts{
+			AutoApprove: true,
+			Prefix:      packetPrefix,
+		})
+		if err != nil {
+			slog.Warn("review: packet retry failed",
+				"origin_project", e.name,
+				"reviewer_project", reviewerProject,
+				"session_key", sessionKey,
+				"origin_session", originSession.ID,
+				"error", err,
+			)
+			return err
+		}
+		reviewPacket = extractReviewPacket(retryPacket)
+		if reviewPacket == "" {
+			slog.Warn("review: packet retry returned empty packet",
+				"origin_project", e.name,
+				"reviewer_project", reviewerProject,
+				"session_key", sessionKey,
+				"origin_session", originSession.ID,
+			)
+			return fmt.Errorf("%s", e.i18n.T(MsgReviewPacketEmpty))
+		}
+		packetRunes = utf8.RuneCountInString(reviewPacket)
+		if packetRunes > maxReviewPromptLen {
+			return fmt.Errorf("%s", e.i18n.Tf(MsgReviewPromptTooLong, maxReviewPromptLen))
+		}
+		slog.Info("review: compacted oversized packet",
+			"origin_project", e.name,
+			"reviewer_project", reviewerProject,
+			"session_key", sessionKey,
+			"origin_session", originSession.ID,
+			"original_packet_runes", oversizedPacketRunes,
+			"packet_runes", packetRunes,
+		)
 	}
 	slog.Info("review: packet prepared",
 		"origin_project", e.name,

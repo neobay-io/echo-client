@@ -2089,6 +2089,138 @@ func TestStartReviewCycleCompactsLongReviewerSummary(t *testing.T) {
 	}
 }
 
+func TestStartReviewCycleRetriesOversizedReviewPacket(t *testing.T) {
+	rm := NewRelayManager("")
+	oversizedPacket := "<review_packet><recommended_review_target>working_tree</recommended_review_target><context>" +
+		strings.Repeat("X", maxReviewPromptLen+200) +
+		"</context></review_packet>"
+	compactedPacket := "<review_packet><recommended_review_target>summary_only</recommended_review_target><files><file>core/engine.go</file></files></review_packet>"
+	originAgent := &scriptedRecordingAgent{responses: []string{
+		oversizedPacket,
+		compactedPacket,
+		"revised summary",
+	}}
+	reviewerAgent := &scriptedRecordingAgent{responses: []string{"reviewer summary"}}
+	originPlatform := &stubCardPlatform{n: "feishu"}
+	reviewerPlatform := &stubCardPlatform{n: "worker"}
+	origin := NewEngine("codex", originAgent, []Platform{originPlatform}, "", LangEnglish)
+	reviewer := NewEngine("qoder", reviewerAgent, []Platform{reviewerPlatform}, "", LangEnglish)
+	rm.RegisterEngine(origin.name, origin)
+	rm.RegisterEngine(reviewer.name, reviewer)
+	origin.SetRelayManager(rm)
+	reviewer.SetRelayManager(rm)
+
+	sessionKey := "feishu:chat:user"
+	originSession := origin.sessions.GetOrCreateActive(sessionKey)
+	originSession.AddHistory("assistant", "Short origin summary.")
+
+	if err := origin.startReviewCycle(sessionKey, "qoder"); err != nil {
+		t.Fatalf("startReviewCycle: %v", err)
+	}
+
+	originSends := originAgent.session.Sends()
+	if len(originSends) != 3 {
+		t.Fatalf("origin send count = %d, want 3 (packet + retry + revision)", len(originSends))
+	}
+	if !strings.Contains(originSends[1].prompt, "Rewrite it as a valid <review_packet>...</review_packet> block under 10000 characters") {
+		t.Fatalf("packet retry prompt = %q, want compact retry instructions", originSends[1].prompt)
+	}
+
+	reviewerSends := reviewerAgent.session.Sends()
+	if len(reviewerSends) != 1 {
+		t.Fatalf("reviewer send count = %d, want 1", len(reviewerSends))
+	}
+	if !strings.Contains(reviewerSends[0].prompt, compactedPacket) {
+		t.Fatalf("reviewer prompt = %q, want compacted review packet", reviewerSends[0].prompt)
+	}
+	if strings.Contains(reviewerSends[0].prompt, strings.Repeat("X", 128)) {
+		t.Fatalf("reviewer prompt unexpectedly contains oversized packet content")
+	}
+	if strings.Contains(originSends[2].prompt, strings.Repeat("X", 128)) {
+		t.Fatalf("origin revision prompt unexpectedly contains oversized packet content")
+	}
+}
+
+func TestStartReviewCycleFailsWhenRetriedReviewPacketIsStillOversized(t *testing.T) {
+	rm := NewRelayManager("")
+	oversizedPacket := "<review_packet><recommended_review_target>working_tree</recommended_review_target><context>" +
+		strings.Repeat("X", maxReviewPromptLen+200) +
+		"</context></review_packet>"
+	originAgent := &scriptedRecordingAgent{responses: []string{
+		oversizedPacket,
+		oversizedPacket,
+	}}
+	reviewerAgent := &scriptedRecordingAgent{responses: []string{"reviewer summary"}}
+	originPlatform := &stubCardPlatform{n: "feishu"}
+	reviewerPlatform := &stubCardPlatform{n: "worker"}
+	origin := NewEngine("codex", originAgent, []Platform{originPlatform}, "", LangEnglish)
+	reviewer := NewEngine("qoder", reviewerAgent, []Platform{reviewerPlatform}, "", LangEnglish)
+	rm.RegisterEngine(origin.name, origin)
+	rm.RegisterEngine(reviewer.name, reviewer)
+	origin.SetRelayManager(rm)
+	reviewer.SetRelayManager(rm)
+
+	sessionKey := "feishu:chat:user"
+	originSession := origin.sessions.GetOrCreateActive(sessionKey)
+	originSession.AddHistory("assistant", "Short origin summary.")
+
+	err := origin.startReviewCycle(sessionKey, "qoder")
+	if err == nil {
+		t.Fatal("expected oversized retry packet to fail review cycle")
+	}
+	if got, want := err.Error(), origin.i18n.Tf(MsgReviewPromptTooLong, maxReviewPromptLen); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+
+	originSends := originAgent.session.Sends()
+	if len(originSends) != 2 {
+		t.Fatalf("origin send count = %d, want 2 (packet + retry)", len(originSends))
+	}
+	if reviewerAgent.session != nil && len(reviewerAgent.session.Sends()) != 0 {
+		t.Fatalf("expected reviewer not to receive a prompt, got %#v", reviewerAgent.session.Sends())
+	}
+}
+
+func TestStartReviewCycleFailsWhenRetriedReviewPacketIsEmpty(t *testing.T) {
+	rm := NewRelayManager("")
+	oversizedPacket := "<review_packet><recommended_review_target>working_tree</recommended_review_target><context>" +
+		strings.Repeat("X", maxReviewPromptLen+200) +
+		"</context></review_packet>"
+	originAgent := &scriptedRecordingAgent{responses: []string{
+		oversizedPacket,
+		"   ",
+	}}
+	reviewerAgent := &scriptedRecordingAgent{responses: []string{"reviewer summary"}}
+	originPlatform := &stubCardPlatform{n: "feishu"}
+	reviewerPlatform := &stubCardPlatform{n: "worker"}
+	origin := NewEngine("codex", originAgent, []Platform{originPlatform}, "", LangEnglish)
+	reviewer := NewEngine("qoder", reviewerAgent, []Platform{reviewerPlatform}, "", LangEnglish)
+	rm.RegisterEngine(origin.name, origin)
+	rm.RegisterEngine(reviewer.name, reviewer)
+	origin.SetRelayManager(rm)
+	reviewer.SetRelayManager(rm)
+
+	sessionKey := "feishu:chat:user"
+	originSession := origin.sessions.GetOrCreateActive(sessionKey)
+	originSession.AddHistory("assistant", "Short origin summary.")
+
+	err := origin.startReviewCycle(sessionKey, "qoder")
+	if err == nil {
+		t.Fatal("expected empty retry packet to fail review cycle")
+	}
+	if got, want := err.Error(), origin.i18n.T(MsgReviewPacketEmpty); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+
+	originSends := originAgent.session.Sends()
+	if len(originSends) != 2 {
+		t.Fatalf("origin send count = %d, want 2 (packet + retry)", len(originSends))
+	}
+	if reviewerAgent.session != nil && len(reviewerAgent.session.Sends()) != 0 {
+		t.Fatalf("expected reviewer not to receive a prompt, got %#v", reviewerAgent.session.Sends())
+	}
+}
+
 func TestStartReviewCycleAllowsCurrentProjectAsReviewerWhenNoReviewerRole(t *testing.T) {
 	rm := NewRelayManager("")
 	agent := &scriptedRecordingAgent{responses: []string{
