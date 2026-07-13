@@ -447,6 +447,9 @@ func newSerializedTurnAgent() *serializedTurnAgent {
 
 func (a *serializedTurnAgent) Name() string { return "serialized-turn" }
 func (a *serializedTurnAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
+	if sessionID == "" {
+		sessionID = "generated-codex-session"
+	}
 	return &serializedTurnSession{
 		agent:     a,
 		sessionID: sessionID,
@@ -2593,7 +2596,7 @@ func TestProcessInteractiveEvents_BindsSessionIDFromResultEvent(t *testing.T) {
 		replyCtx:     "ctx",
 	}
 
-	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now())
+	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 
 	if session.AgentSessionID != "codex-thread-123" {
 		t.Fatalf("AgentSessionID = %q, want codex-thread-123", session.AgentSessionID)
@@ -2731,7 +2734,7 @@ func TestProcessInteractiveMessage_BlocksKnownTurnsWhileAgentSessionIDUnknown(t 
 
 	sessionA := e.sessions.GetOrCreateActive("feishu:chat-a")
 	sessionB := e.sessions.GetOrCreateActive("feishu:chat-b")
-	sessionB.AgentSessionID = "known-codex-session"
+	sessionB.AgentSessionID = "generated-codex-session"
 
 	releaseFirst := sync.Once{}
 	release := func() {
@@ -2790,6 +2793,79 @@ func TestProcessInteractiveMessage_BlocksKnownTurnsWhileAgentSessionIDUnknown(t 
 	case <-time.After(time.Second):
 		t.Fatal("known-ID send did not start after unknown-ID turn completed")
 	}
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not finish")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("second turn did not finish")
+	}
+}
+
+func TestProcessInteractiveMessage_AllowsConcurrentTurnsForDifferentAgentSessionIDs(t *testing.T) {
+	agent := newSerializedTurnAgent()
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionA := e.sessions.GetOrCreateActive("feishu:chat-a")
+	sessionB := e.sessions.GetOrCreateActive("feishu:chat-b")
+	sessionB.AgentSessionID = "codex-session-b"
+
+	releaseFirst := sync.Once{}
+	release := func() {
+		releaseFirst.Do(func() { close(agent.releaseFirst) })
+	}
+	defer release()
+
+	if !sessionA.TryLock() {
+		t.Fatal("expected first session lock")
+	}
+	doneA := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-a",
+			Platform:   "feishu",
+			UserID:     "user-a",
+			UserName:   "Alice",
+			Content:    "first",
+			ReplyCtx:   "ctx-a",
+		}, sessionA)
+		close(doneA)
+	}()
+
+	select {
+	case <-agent.firstSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first send did not start")
+	}
+
+	if !sessionB.TryLock() {
+		t.Fatal("expected second session lock")
+	}
+	doneB := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-b",
+			Platform:   "feishu",
+			UserID:     "user-b",
+			UserName:   "Bob",
+			Content:    "second",
+			ReplyCtx:   "ctx-b",
+		}, sessionB)
+		close(doneB)
+	}()
+
+	select {
+	case <-agent.secondSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second send did not start after unbound first turn bound a different agent session")
+	}
+
+	release()
+
 	select {
 	case <-doneA:
 	case <-time.After(time.Second):
@@ -2875,6 +2951,65 @@ func TestHandleRelay_SerializesTurnsForSameAgentSessionID(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("relay turn did not finish")
+	}
+}
+
+func TestHandleRelay_WaitForAgentSessionTurnHonorsContext(t *testing.T) {
+	agent := newSerializedTurnAgent()
+	p := &stubCardPlatform{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	const sharedAgentSessionID = "shared-codex-session"
+	session := e.sessions.GetOrCreateActive("feishu:chat-a")
+	session.AgentSessionID = sharedAgentSessionID
+	relaySession := e.sessions.GetOrCreateActive("relay:origin:chat-1")
+	relaySession.AgentSessionID = sharedAgentSessionID
+
+	releaseFirst := sync.Once{}
+	release := func() {
+		releaseFirst.Do(func() { close(agent.releaseFirst) })
+	}
+	defer release()
+
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	doneInteractive := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-a",
+			Platform:   "feishu",
+			UserID:     "user-a",
+			UserName:   "Alice",
+			Content:    "first",
+			ReplyCtx:   "ctx-a",
+		}, session)
+		close(doneInteractive)
+	}()
+
+	select {
+	case <-agent.firstSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first send did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := e.HandleRelay(ctx, "origin", "chat-1", "relay message"); err == nil {
+		t.Fatal("HandleRelay succeeded while waiting context should have expired")
+	}
+
+	select {
+	case <-agent.secondSendStarted:
+		t.Fatal("relay send started after context expired while waiting")
+	default:
+	}
+
+	release()
+	select {
+	case <-doneInteractive:
+	case <-time.After(time.Second):
+		t.Fatal("interactive turn did not finish")
 	}
 }
 
@@ -2986,7 +3121,7 @@ func TestProcessInteractiveEvents_StripsOptionsXMLFromDisplayedReply(t *testing.
 		replyCtx:     "ctx",
 	}
 
-	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now())
+	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 
 	if len(p.sent) < 2 {
 		t.Fatalf("expected sanitized reply and follow-up buttons, got %#v", p.sent)
@@ -3021,7 +3156,7 @@ func TestProcessInteractiveEvents_FatalClaudeImageErrorCleansInteractiveState(t 
 	state := newInteractiveState(&eventfulStubAgentSession{events: events}, p, "ctx", false)
 	e.interactiveStates["test:user1"] = state
 
-	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now())
+	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 
 	if session.AgentSessionID != "" {
 		t.Fatalf("AgentSessionID = %q, want empty", session.AgentSessionID)
@@ -3049,7 +3184,7 @@ func TestProcessInteractiveEvents_RequestTooLargeCleansInteractiveState(t *testi
 	state := newInteractiveState(&eventfulStubAgentSession{events: events}, p, "ctx", false)
 	e.interactiveStates["test:user2"] = state
 
-	e.processInteractiveEvents(state, session, "test:user2", "msg-2", time.Now())
+	e.processInteractiveEvents(state, session, "test:user2", "msg-2", time.Now(), nil)
 
 	if session.AgentSessionID != "" {
 		t.Fatalf("AgentSessionID = %q, want empty", session.AgentSessionID)
@@ -3075,7 +3210,7 @@ func TestProcessInteractiveEvents_FirstEventTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now())
+		e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 	}()
 
 	select {
@@ -3104,7 +3239,7 @@ func TestProcessInteractiveEvents_TurnTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now())
+		e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 	}()
 
 	select {
@@ -4097,7 +4232,7 @@ func TestSessionIDPersistsAcrossReloadForAgentPatterns(t *testing.T) {
 				platform:     p,
 				replyCtx:     "ctx",
 			}
-			e1.processInteractiveEvents(state, session1, sessionKey, "msg-1", time.Now())
+			e1.processInteractiveEvents(state, session1, sessionKey, "msg-1", time.Now(), nil)
 
 			if session1.AgentSessionID != tc.sessionID {
 				t.Fatalf("stored AgentSessionID = %q, want %q", session1.AgentSessionID, tc.sessionID)
@@ -4140,7 +4275,7 @@ func TestCmdStopReleasesBusySessionWhenEventLoopIsWaiting(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer session.Unlock()
-		e.processInteractiveEvents(state, session, sessionKey, "msg-1", time.Now())
+		e.processInteractiveEvents(state, session, sessionKey, "msg-1", time.Now(), nil)
 	}()
 
 	e.cmdStop(p, &Message{SessionKey: sessionKey, ReplyCtx: "ctx"})

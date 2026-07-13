@@ -220,8 +220,16 @@ type interactiveState struct {
 }
 
 type agentSessionTurnLock struct {
-	mu   sync.Mutex
+	sem  chan struct{}
 	refs int
+}
+
+type agentSessionTurnGuard struct {
+	e             *Engine
+	agentName     string
+	bindExclusive bool
+	turnUnlock    func()
+	mu            sync.Mutex
 }
 
 func newInteractiveState(agentSession AgentSession, p Platform, replyCtx any, quiet bool) *interactiveState {
@@ -407,41 +415,144 @@ func (e *Engine) agentSessionTurnIdentity(session *Session) (string, string) {
 	return agentName, agentSessionID
 }
 
-func (e *Engine) lockAgentSessionTurn(session *Session) func() {
+func (e *Engine) lockAgentSessionTurn(ctx context.Context, session *Session) (*agentSessionTurnGuard, error) {
 	agentName, agentSessionID := e.agentSessionTurnIdentity(session)
 	if agentSessionID == "" {
 		// A fresh turn can bind to any newly-created agent session ID. While
-		// that ID is unknown, block all known-ID turns so no one can race it.
-		e.agentSessionBindMu.Lock()
-		return func() { e.agentSessionBindMu.Unlock() }
+		// that ID is unknown, block known-ID turns so no one can race it. The
+		// guard downgrades to a per-ID lock as soon as Bind sees the real ID.
+		if err := e.lockAgentSessionBind(ctx, true); err != nil {
+			return nil, err
+		}
+		return &agentSessionTurnGuard{
+			e:             e,
+			agentName:     agentName,
+			bindExclusive: true,
+		}, nil
 	}
 
-	e.agentSessionBindMu.RLock()
+	if err := e.lockAgentSessionBind(ctx, false); err != nil {
+		return nil, err
+	}
+	key, lock := e.retainAgentSessionTurnLock(agentName, agentSessionID)
+	e.agentSessionBindMu.RUnlock()
+	unlockTurn, err := e.waitAgentSessionTurnLock(ctx, key, lock)
+	if err != nil {
+		return nil, err
+	}
+	return &agentSessionTurnGuard{
+		e:          e,
+		agentName:  agentName,
+		turnUnlock: unlockTurn,
+	}, nil
+}
+
+func (e *Engine) lockAgentSessionBind(ctx context.Context, exclusive bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if exclusive {
+			if e.agentSessionBindMu.TryLock() {
+				return nil
+			}
+		} else if e.agentSessionBindMu.TryRLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (e *Engine) retainAgentSessionTurnLock(agentName, agentSessionID string) (string, *agentSessionTurnLock) {
 	key := agentName + ":" + agentSessionID
 	e.agentSessionTurnMu.Lock()
+	defer e.agentSessionTurnMu.Unlock()
 	if e.agentSessionTurns == nil {
 		e.agentSessionTurns = make(map[string]*agentSessionTurnLock)
 	}
 	lock := e.agentSessionTurns[key]
 	if lock == nil {
-		lock = &agentSessionTurnLock{}
+		lock = &agentSessionTurnLock{sem: make(chan struct{}, 1)}
 		e.agentSessionTurns[key] = lock
 	}
 	lock.refs++
-	e.agentSessionTurnMu.Unlock()
+	return key, lock
+}
 
-	lock.mu.Lock()
+func (e *Engine) waitAgentSessionTurnLock(ctx context.Context, key string, lock *agentSessionTurnLock) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	select {
+	case lock.sem <- struct{}{}:
+	case <-ctx.Done():
+		e.releaseAgentSessionTurnRef(key, lock)
+		return nil, ctx.Err()
+	}
 
 	return func() {
-		lock.mu.Unlock()
+		<-lock.sem
+		e.releaseAgentSessionTurnRef(key, lock)
+	}, nil
+}
 
-		e.agentSessionTurnMu.Lock()
-		lock.refs--
-		if lock.refs == 0 {
-			delete(e.agentSessionTurns, key)
-		}
-		e.agentSessionTurnMu.Unlock()
-		e.agentSessionBindMu.RUnlock()
+func (e *Engine) releaseAgentSessionTurnRef(key string, lock *agentSessionTurnLock) {
+	e.agentSessionTurnMu.Lock()
+	defer e.agentSessionTurnMu.Unlock()
+	lock.refs--
+	if lock.refs == 0 {
+		delete(e.agentSessionTurns, key)
+	}
+}
+
+func (g *agentSessionTurnGuard) Bind(ctx context.Context, agentSessionID string) error {
+	if g == nil || g.e == nil || strings.TrimSpace(agentSessionID) == "" {
+		return nil
+	}
+	agentSessionID = strings.TrimSpace(agentSessionID)
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.turnUnlock != nil {
+		return nil
+	}
+
+	key, lock := g.e.retainAgentSessionTurnLock(g.agentName, agentSessionID)
+	if g.bindExclusive {
+		g.e.agentSessionBindMu.Unlock()
+		g.bindExclusive = false
+	}
+	unlockTurn, err := g.e.waitAgentSessionTurnLock(ctx, key, lock)
+	if err != nil {
+		return err
+	}
+	g.turnUnlock = unlockTurn
+	return nil
+}
+
+func (g *agentSessionTurnGuard) Unlock() {
+	if g == nil || g.e == nil {
+		return
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.turnUnlock != nil {
+		g.turnUnlock()
+		g.turnUnlock = nil
+	}
+	if g.bindExclusive {
+		g.e.agentSessionBindMu.Unlock()
+		g.bindExclusive = false
 	}
 }
 
@@ -1314,8 +1425,11 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 		return "", fmt.Errorf("failed to start agent session")
 	}
 
-	unlockAgentTurn := e.lockAgentSessionTurn(session)
-	defer unlockAgentTurn()
+	agentTurn, err := e.lockAgentSessionTurn(e.ctx, session)
+	if err != nil {
+		return "", err
+	}
+	defer agentTurn.Unlock()
 
 	state.mu.Lock()
 	p := state.platform
@@ -1333,6 +1447,10 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 	e.sessions.Save()
 
 	drainEvents(state.agentSession.Events())
+	e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
+	if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
+		return "", err
+	}
 	if err := state.agentSession.Send(prompt, nil, nil); err != nil {
 		return "", err
 	}
@@ -1424,6 +1542,9 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 		}
 
 		e.bindAgentSessionID(session, event.SessionID)
+		if err := agentTurn.Bind(e.ctx, event.SessionID); err != nil {
+			return "", err
+		}
 
 		switch event.Type {
 		case EventThinking:
@@ -2205,8 +2326,11 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		return
 	}
 
-	unlockAgentTurn := e.lockAgentSessionTurn(session)
-	defer unlockAgentTurn()
+	agentTurn, err := e.lockAgentSessionTurn(e.ctx, session)
+	if err != nil {
+		return
+	}
+	defer agentTurn.Unlock()
 
 	turnStart := time.Now()
 	prompt := e.buildAgentPrompt(session, msg)
@@ -2224,6 +2348,10 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to start agent session"))
+		return
+	}
+	e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
+	if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
 		return
 	}
 
@@ -2259,6 +2387,10 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 				return
 			}
+			e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
+			if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
+				return
+			}
 			sendStart = time.Now()
 			if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
@@ -2279,7 +2411,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
+	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn)
 }
 
 func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, session *Session, done func(error)) {
@@ -2291,8 +2423,15 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 			session.Unlock()
 			return
 		}
-		unlockAgentTurn := e.lockAgentSessionTurn(session)
-		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session)
+		agentTurn, err := e.lockAgentSessionTurn(e.ctx, session)
+		if err != nil {
+			if done != nil {
+				done(err)
+			}
+			session.Unlock()
+			return
+		}
+		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session, agentTurn)
 		if err != nil {
 			if done != nil {
 				done(err)
@@ -2300,7 +2439,16 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 			if stopTyping != nil {
 				stopTyping()
 			}
-			unlockAgentTurn()
+			agentTurn.Unlock()
+			session.Unlock()
+			return
+		}
+		e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
+		if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
+			if done != nil {
+				done(err)
+			}
+			agentTurn.Unlock()
 			session.Unlock()
 			return
 		}
@@ -2309,15 +2457,15 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 			done(nil)
 		}
 		defer session.Unlock()
-		defer unlockAgentTurn()
+		defer agentTurn.Unlock()
 		if stopTyping != nil {
 			defer stopTyping()
 		}
-		e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart)
+		e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn)
 	}()
 }
 
-func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session) (*interactiveState, string, time.Time, func(), error) {
+func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session, agentTurn *agentSessionTurnGuard) (*interactiveState, string, time.Time, func(), error) {
 	if e.ctx.Err() != nil {
 		return nil, "", time.Time{}, nil, e.ctx.Err()
 	}
@@ -2338,6 +2486,12 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to start agent session"))
 		return nil, "", time.Time{}, nil, fmt.Errorf("failed to start agent session")
+	}
+	e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
+	if agentTurn != nil {
+		if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
+			return nil, "", time.Time{}, nil, err
+		}
 	}
 
 	var stopTyping func()
@@ -2362,6 +2516,12 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 			if state.agentSession == nil {
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 				return nil, "", time.Time{}, stopTyping, fmt.Errorf("failed to restart agent session")
+			}
+			e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
+			if agentTurn != nil {
+				if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
+					return nil, "", time.Time{}, stopTyping, err
+				}
 			}
 			sendStart = time.Now()
 			if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
@@ -2492,7 +2652,7 @@ const defaultEventIdleTimeout = 2 * time.Hour
 const defaultFirstEventTimeout = 5 * time.Minute
 const defaultTurnTimeout = 45 * time.Minute
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time, agentTurn *agentSessionTurnGuard) {
 	var textParts []string
 	toolCount := 0
 	waitStart := time.Now()
@@ -2606,6 +2766,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		e.bindAgentSessionID(session, event.SessionID)
+		if agentTurn != nil {
+			if err := agentTurn.Bind(e.ctx, event.SessionID); err != nil {
+				return
+			}
+		}
 
 		state.mu.Lock()
 		p := state.platform
@@ -2720,10 +2885,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			cp.Finalize("done")
-			if event.SessionID != "" {
-				session.mu.Lock()
-				session.AgentSessionID = event.SessionID
-				session.mu.Unlock()
+			e.bindAgentSessionID(session, event.SessionID)
+			if agentTurn != nil {
+				if err := agentTurn.Bind(e.ctx, event.SessionID); err != nil {
+					return
+				}
 			}
 
 			fullResponse := event.Content
@@ -4564,8 +4730,12 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 
 	go func() {
 		defer session.Unlock()
-		unlockAgentTurn := e.lockAgentSessionTurn(session)
-		defer unlockAgentTurn()
+		agentTurn, err := e.lockAgentSessionTurn(e.ctx, session)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			return
+		}
+		defer agentTurn.Unlock()
 
 		state.mu.Lock()
 		state.platform = p
@@ -4573,6 +4743,11 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		state.mu.Unlock()
 
 		drainEvents(state.agentSession.Events())
+		e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
+		if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			return
+		}
 
 		cmd := compressor.CompressCommand()
 		if err := state.agentSession.Send(cmd, nil, nil); err != nil {
@@ -7690,19 +7865,24 @@ func splitTTSByLength(text string, maxLen int) []string {
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message string) (string, error) {
 	relaySessionKey := "relay:" + fromProject + ":" + chatID
 	session := e.sessions.GetOrCreateActive(relaySessionKey)
-	unlockAgentTurn := e.lockAgentSessionTurn(session)
-	defer unlockAgentTurn()
+	agentTurn, err := e.lockAgentSessionTurn(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	defer agentTurn.Unlock()
 
 	envVars := e.sessionEnv(relaySessionKey)
+	session.mu.Lock()
+	agentSessionID := session.AgentSessionID
+	session.mu.Unlock()
 
-	agentSession, err := e.startAgentSession(ctx, session.AgentSessionID, relaySessionKey, envVars)
+	agentSession, err := e.startAgentSession(ctx, agentSessionID, relaySessionKey, envVars)
 	if err != nil {
 		return "", fmt.Errorf("start relay session: %w", err)
 	}
-
-	if session.AgentSessionID == "" {
-		session.AgentSessionID = agentSession.CurrentSessionID()
-		e.sessions.Save()
+	e.bindAgentSessionID(session, agentSession.CurrentSessionID())
+	if err := agentTurn.Bind(ctx, agentSession.CurrentSessionID()); err != nil {
+		return "", err
 	}
 
 	if err := agentSession.Send(message, nil, nil); err != nil {
@@ -7719,14 +7899,14 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}
-			if event.SessionID != "" && session.AgentSessionID == "" {
-				session.AgentSessionID = event.SessionID
-				e.sessions.Save()
+			e.bindAgentSessionID(session, event.SessionID)
+			if err := agentTurn.Bind(ctx, event.SessionID); err != nil {
+				return "", err
 			}
 		case EventResult:
-			if event.SessionID != "" {
-				session.AgentSessionID = event.SessionID
-				e.sessions.Save()
+			e.bindAgentSessionID(session, event.SessionID)
+			if err := agentTurn.Bind(ctx, event.SessionID); err != nil {
+				return "", err
 			}
 			resp := event.Content
 			if resp == "" && len(textParts) > 0 {
