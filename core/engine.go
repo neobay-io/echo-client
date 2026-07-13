@@ -174,6 +174,8 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu      sync.Mutex
 	interactiveStates  map[string]*interactiveState // key = sessionKey
+	agentSessionTurnMu sync.Mutex
+	agentSessionTurns  map[string]*agentSessionTurnLock // key = agentName + ":" + AgentSessionID
 	promptMu           sync.Mutex
 	prompts            map[string]*pendingInteractionPrompt
 	voiceConfirmMu     sync.Mutex
@@ -214,6 +216,11 @@ type interactiveState struct {
 	fromVoice    bool // true if current turn originated from voice transcription
 	stopped      chan struct{}
 	stopOnce     sync.Once
+}
+
+type agentSessionTurnLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func newInteractiveState(agentSession AgentSession, p Platform, replyCtx any, quiet bool) *interactiveState {
@@ -297,6 +304,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:             NewSkillRegistry(),
 		aliases:            make(map[string]string),
 		interactiveStates:  make(map[string]*interactiveState),
+		agentSessionTurns:  make(map[string]*agentSessionTurnLock),
 		prompts:            make(map[string]*pendingInteractionPrompt),
 		voiceConfirms:      make(map[string]*pendingVoiceConfirmation),
 		pendingCollect:     make(map[string]*pendingCollectedBatch),
@@ -382,6 +390,55 @@ func (e *Engine) ActiveSessionKeys() []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func (e *Engine) agentSessionTurnKey(session *Session) string {
+	if session == nil {
+		return ""
+	}
+	session.mu.Lock()
+	agentSessionID := strings.TrimSpace(session.AgentSessionID)
+	session.mu.Unlock()
+	if agentSessionID == "" {
+		return ""
+	}
+	agentName := "agent"
+	if e.agent != nil && strings.TrimSpace(e.agent.Name()) != "" {
+		agentName = strings.TrimSpace(e.agent.Name())
+	}
+	return agentName + ":" + agentSessionID
+}
+
+func (e *Engine) lockAgentSessionTurn(session *Session) func() {
+	key := e.agentSessionTurnKey(session)
+	if key == "" {
+		return func() {}
+	}
+
+	e.agentSessionTurnMu.Lock()
+	if e.agentSessionTurns == nil {
+		e.agentSessionTurns = make(map[string]*agentSessionTurnLock)
+	}
+	lock := e.agentSessionTurns[key]
+	if lock == nil {
+		lock = &agentSessionTurnLock{}
+		e.agentSessionTurns[key] = lock
+	}
+	lock.refs++
+	e.agentSessionTurnMu.Unlock()
+
+	lock.mu.Lock()
+
+	return func() {
+		lock.mu.Unlock()
+
+		e.agentSessionTurnMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(e.agentSessionTurns, key)
+		}
+		e.agentSessionTurnMu.Unlock()
+	}
 }
 
 func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt, exec, workDir string) error) {
@@ -1252,6 +1309,9 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 	if state == nil || state.agentSession == nil {
 		return "", fmt.Errorf("failed to start agent session")
 	}
+
+	unlockAgentTurn := e.lockAgentSessionTurn(session)
+	defer unlockAgentTurn()
 
 	state.mu.Lock()
 	p := state.platform
@@ -2141,6 +2201,9 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 		return
 	}
 
+	unlockAgentTurn := e.lockAgentSessionTurn(session)
+	defer unlockAgentTurn()
+
 	turnStart := time.Now()
 	prompt := e.buildAgentPrompt(session, msg)
 
@@ -2217,6 +2280,7 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 
 func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, session *Session, done func(error)) {
 	go func() {
+		unlockAgentTurn := e.lockAgentSessionTurn(session)
 		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session)
 		if err != nil {
 			if done != nil {
@@ -2225,6 +2289,7 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 			if stopTyping != nil {
 				stopTyping()
 			}
+			unlockAgentTurn()
 			session.Unlock()
 			return
 		}
@@ -2233,6 +2298,7 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 			done(nil)
 		}
 		defer session.Unlock()
+		defer unlockAgentTurn()
 		if stopTyping != nil {
 			defer stopTyping()
 		}

@@ -427,6 +427,70 @@ func (s *recordingSendSession) Sends() []recordedSend {
 	return out
 }
 
+type serializedTurnAgent struct {
+	mu                sync.Mutex
+	sendCount         int
+	firstSendStarted  chan struct{}
+	secondSendStarted chan struct{}
+	releaseFirst      chan struct{}
+	firstOnce         sync.Once
+	secondOnce        sync.Once
+}
+
+func newSerializedTurnAgent() *serializedTurnAgent {
+	return &serializedTurnAgent{
+		firstSendStarted:  make(chan struct{}),
+		secondSendStarted: make(chan struct{}),
+		releaseFirst:      make(chan struct{}),
+	}
+}
+
+func (a *serializedTurnAgent) Name() string { return "serialized-turn" }
+func (a *serializedTurnAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
+	return &serializedTurnSession{
+		agent:     a,
+		sessionID: sessionID,
+		events:    make(chan Event, 8),
+	}, nil
+}
+func (a *serializedTurnAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *serializedTurnAgent) Stop() error { return nil }
+
+type serializedTurnSession struct {
+	agent     *serializedTurnAgent
+	sessionID string
+	events    chan Event
+}
+
+func (s *serializedTurnSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.agent.mu.Lock()
+	s.agent.sendCount++
+	sendCount := s.agent.sendCount
+	s.agent.mu.Unlock()
+
+	if sendCount == 1 {
+		s.agent.firstOnce.Do(func() { close(s.agent.firstSendStarted) })
+		go func() {
+			<-s.agent.releaseFirst
+			s.events <- Event{Type: EventText, Content: "first"}
+			s.events <- Event{Type: EventResult, SessionID: s.sessionID, Done: true}
+		}()
+		return nil
+	}
+
+	s.agent.secondOnce.Do(func() { close(s.agent.secondSendStarted) })
+	s.events <- Event{Type: EventText, Content: "second"}
+	s.events <- Event{Type: EventResult, SessionID: s.sessionID, Done: true}
+	return nil
+}
+func (s *serializedTurnSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *serializedTurnSession) Events() <-chan Event                                 { return s.events }
+func (s *serializedTurnSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *serializedTurnSession) Alive() bool                                          { return true }
+func (s *serializedTurnSession) Close() error                                         { close(s.events); return nil }
+
 func waitForRecordedSends(t *testing.T, agent *recordingSendAgent, want int) []recordedSend {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -2567,6 +2631,86 @@ func TestProcessInteractiveMessage_IncludesQuotedContextInPrompt(t *testing.T) {
 	history := session.GetHistory(2)
 	if len(history) < 2 || history[0].Role != "user" || history[0].Content != got {
 		t.Fatalf("history content = %#v, want enriched prompt as user entry", history)
+	}
+}
+
+func TestProcessInteractiveMessage_SerializesTurnsForSameAgentSessionID(t *testing.T) {
+	agent := newSerializedTurnAgent()
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	const sharedAgentSessionID = "shared-codex-session"
+	sessionA := e.sessions.GetOrCreateActive("feishu:chat-a")
+	sessionB := e.sessions.GetOrCreateActive("feishu:chat-b")
+	sessionA.AgentSessionID = sharedAgentSessionID
+	sessionB.AgentSessionID = sharedAgentSessionID
+
+	releaseFirst := sync.Once{}
+	release := func() {
+		releaseFirst.Do(func() { close(agent.releaseFirst) })
+	}
+	defer release()
+
+	if !sessionA.TryLock() {
+		t.Fatal("expected first session lock")
+	}
+	doneA := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-a",
+			Platform:   "feishu",
+			UserID:     "user-a",
+			UserName:   "Alice",
+			Content:    "first",
+			ReplyCtx:   "ctx-a",
+		}, sessionA)
+		close(doneA)
+	}()
+
+	select {
+	case <-agent.firstSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first send did not start")
+	}
+
+	if !sessionB.TryLock() {
+		t.Fatal("expected second session lock")
+	}
+	doneB := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-b",
+			Platform:   "feishu",
+			UserID:     "user-b",
+			UserName:   "Bob",
+			Content:    "second",
+			ReplyCtx:   "ctx-b",
+		}, sessionB)
+		close(doneB)
+	}()
+
+	select {
+	case <-agent.secondSendStarted:
+		t.Fatal("second send started before first turn completed")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case <-agent.secondSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second send did not start after first turn completed")
+	}
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not finish")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("second turn did not finish")
 	}
 }
 
