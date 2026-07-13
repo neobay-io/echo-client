@@ -458,6 +458,16 @@ func (a *serializedTurnAgent) ListSessions(_ context.Context) ([]AgentSessionInf
 }
 func (a *serializedTurnAgent) Stop() error { return nil }
 
+type serializedCompressAgent struct {
+	*serializedTurnAgent
+}
+
+func newSerializedCompressAgent() *serializedCompressAgent {
+	return &serializedCompressAgent{serializedTurnAgent: newSerializedTurnAgent()}
+}
+
+func (a *serializedCompressAgent) CompressCommand() string { return "/compact" }
+
 type serializedTurnSession struct {
 	agent     *serializedTurnAgent
 	sessionID string
@@ -2712,6 +2722,243 @@ func TestProcessInteractiveMessage_SerializesTurnsForSameAgentSessionID(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("second turn did not finish")
 	}
+}
+
+func TestProcessInteractiveMessage_BlocksKnownTurnsWhileAgentSessionIDUnknown(t *testing.T) {
+	agent := newSerializedTurnAgent()
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionA := e.sessions.GetOrCreateActive("feishu:chat-a")
+	sessionB := e.sessions.GetOrCreateActive("feishu:chat-b")
+	sessionB.AgentSessionID = "known-codex-session"
+
+	releaseFirst := sync.Once{}
+	release := func() {
+		releaseFirst.Do(func() { close(agent.releaseFirst) })
+	}
+	defer release()
+
+	if !sessionA.TryLock() {
+		t.Fatal("expected first session lock")
+	}
+	doneA := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-a",
+			Platform:   "feishu",
+			UserID:     "user-a",
+			UserName:   "Alice",
+			Content:    "first",
+			ReplyCtx:   "ctx-a",
+		}, sessionA)
+		close(doneA)
+	}()
+
+	select {
+	case <-agent.firstSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first send did not start")
+	}
+
+	if !sessionB.TryLock() {
+		t.Fatal("expected second session lock")
+	}
+	doneB := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-b",
+			Platform:   "feishu",
+			UserID:     "user-b",
+			UserName:   "Bob",
+			Content:    "second",
+			ReplyCtx:   "ctx-b",
+		}, sessionB)
+		close(doneB)
+	}()
+
+	select {
+	case <-agent.secondSendStarted:
+		t.Fatal("known-ID send started while first turn had unknown AgentSessionID")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case <-agent.secondSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("known-ID send did not start after unknown-ID turn completed")
+	}
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not finish")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("second turn did not finish")
+	}
+}
+
+func TestHandleRelay_SerializesTurnsForSameAgentSessionID(t *testing.T) {
+	agent := newSerializedTurnAgent()
+	p := &stubCardPlatform{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	const sharedAgentSessionID = "shared-codex-session"
+	session := e.sessions.GetOrCreateActive("feishu:chat-a")
+	session.AgentSessionID = sharedAgentSessionID
+	relaySession := e.sessions.GetOrCreateActive("relay:origin:chat-1")
+	relaySession.AgentSessionID = sharedAgentSessionID
+
+	releaseFirst := sync.Once{}
+	release := func() {
+		releaseFirst.Do(func() { close(agent.releaseFirst) })
+	}
+	defer release()
+
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	doneInteractive := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-a",
+			Platform:   "feishu",
+			UserID:     "user-a",
+			UserName:   "Alice",
+			Content:    "first",
+			ReplyCtx:   "ctx-a",
+		}, session)
+		close(doneInteractive)
+	}()
+
+	select {
+	case <-agent.firstSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first send did not start")
+	}
+
+	doneRelay := make(chan error, 1)
+	go func() {
+		resp, err := e.HandleRelay(context.Background(), "origin", "chat-1", "relay message")
+		if err == nil && resp != "second" {
+			err = fmt.Errorf("relay response = %q, want second", resp)
+		}
+		doneRelay <- err
+	}()
+
+	select {
+	case <-agent.secondSendStarted:
+		t.Fatal("relay send started before first turn completed")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case <-agent.secondSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("relay send did not start after first turn completed")
+	}
+	select {
+	case <-doneInteractive:
+	case <-time.After(time.Second):
+		t.Fatal("interactive turn did not finish")
+	}
+	select {
+	case err := <-doneRelay:
+		if err != nil {
+			t.Fatalf("HandleRelay: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay turn did not finish")
+	}
+}
+
+func TestCmdCompress_SerializesTurnsForSameAgentSessionID(t *testing.T) {
+	agent := newSerializedCompressAgent()
+	p := &stubCardPlatform{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	const sharedAgentSessionID = "shared-codex-session"
+	sessionA := e.sessions.GetOrCreateActive("feishu:chat-a")
+	sessionB := e.sessions.GetOrCreateActive("feishu:chat-b")
+	sessionA.AgentSessionID = sharedAgentSessionID
+	sessionB.AgentSessionID = sharedAgentSessionID
+
+	e.interactiveMu.Lock()
+	e.interactiveStates["feishu:chat-b"] = newInteractiveState(&serializedTurnSession{
+		agent:     agent.serializedTurnAgent,
+		sessionID: sharedAgentSessionID,
+		events:    make(chan Event, 8),
+	}, p, "ctx-b", false)
+	e.interactiveMu.Unlock()
+
+	releaseFirst := sync.Once{}
+	release := func() {
+		releaseFirst.Do(func() { close(agent.releaseFirst) })
+	}
+	defer release()
+
+	if !sessionA.TryLock() {
+		t.Fatal("expected first session lock")
+	}
+	doneA := make(chan struct{})
+	go func() {
+		e.processInteractiveMessage(p, &Message{
+			SessionKey: "feishu:chat-a",
+			Platform:   "feishu",
+			UserID:     "user-a",
+			UserName:   "Alice",
+			Content:    "first",
+			ReplyCtx:   "ctx-a",
+		}, sessionA)
+		close(doneA)
+	}()
+
+	select {
+	case <-agent.firstSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first send did not start")
+	}
+
+	e.cmdCompress(p, &Message{
+		SessionKey: "feishu:chat-b",
+		Platform:   "feishu",
+		UserID:     "user-b",
+		UserName:   "Bob",
+		Content:    "/compress",
+		ReplyCtx:   "ctx-b",
+	})
+
+	select {
+	case <-agent.secondSendStarted:
+		t.Fatal("compress send started before first turn completed")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case <-agent.secondSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("compress send did not start after first turn completed")
+	}
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not finish")
+	}
+	waitForCondition(t, func() bool {
+		if !sessionB.TryLock() {
+			return false
+		}
+		sessionB.Unlock()
+		return true
+	}, "compress turn to release session lock")
 }
 
 func TestProcessInteractiveEvents_StripsOptionsXMLFromDisplayedReply(t *testing.T) {

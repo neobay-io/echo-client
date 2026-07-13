@@ -174,6 +174,7 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu      sync.Mutex
 	interactiveStates  map[string]*interactiveState // key = sessionKey
+	agentSessionBindMu sync.RWMutex
 	agentSessionTurnMu sync.Mutex
 	agentSessionTurns  map[string]*agentSessionTurnLock // key = agentName + ":" + AgentSessionID
 	promptMu           sync.Mutex
@@ -392,29 +393,31 @@ func (e *Engine) ActiveSessionKeys() []string {
 	return keys
 }
 
-func (e *Engine) agentSessionTurnKey(session *Session) string {
-	if session == nil {
-		return ""
-	}
-	session.mu.Lock()
-	agentSessionID := strings.TrimSpace(session.AgentSessionID)
-	session.mu.Unlock()
-	if agentSessionID == "" {
-		return ""
-	}
+func (e *Engine) agentSessionTurnIdentity(session *Session) (string, string) {
 	agentName := "agent"
 	if e.agent != nil && strings.TrimSpace(e.agent.Name()) != "" {
 		agentName = strings.TrimSpace(e.agent.Name())
 	}
-	return agentName + ":" + agentSessionID
+	if session == nil {
+		return agentName, ""
+	}
+	session.mu.Lock()
+	agentSessionID := strings.TrimSpace(session.AgentSessionID)
+	session.mu.Unlock()
+	return agentName, agentSessionID
 }
 
 func (e *Engine) lockAgentSessionTurn(session *Session) func() {
-	key := e.agentSessionTurnKey(session)
-	if key == "" {
-		return func() {}
+	agentName, agentSessionID := e.agentSessionTurnIdentity(session)
+	if agentSessionID == "" {
+		// A fresh turn can bind to any newly-created agent session ID. While
+		// that ID is unknown, block all known-ID turns so no one can race it.
+		e.agentSessionBindMu.Lock()
+		return func() { e.agentSessionBindMu.Unlock() }
 	}
 
+	e.agentSessionBindMu.RLock()
+	key := agentName + ":" + agentSessionID
 	e.agentSessionTurnMu.Lock()
 	if e.agentSessionTurns == nil {
 		e.agentSessionTurns = make(map[string]*agentSessionTurnLock)
@@ -438,6 +441,7 @@ func (e *Engine) lockAgentSessionTurn(session *Session) func() {
 			delete(e.agentSessionTurns, key)
 		}
 		e.agentSessionTurnMu.Unlock()
+		e.agentSessionBindMu.RUnlock()
 	}
 }
 
@@ -2280,6 +2284,13 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 
 func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, session *Session, done func(error)) {
 	go func() {
+		if e.ctx.Err() != nil {
+			if done != nil {
+				done(e.ctx.Err())
+			}
+			session.Unlock()
+			return
+		}
 		unlockAgentTurn := e.lockAgentSessionTurn(session)
 		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session)
 		if err != nil {
@@ -4553,6 +4564,8 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 
 	go func() {
 		defer session.Unlock()
+		unlockAgentTurn := e.lockAgentSessionTurn(session)
+		defer unlockAgentTurn()
 
 		state.mu.Lock()
 		state.platform = p
@@ -7677,6 +7690,8 @@ func splitTTSByLength(text string, maxLen int) []string {
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message string) (string, error) {
 	relaySessionKey := "relay:" + fromProject + ":" + chatID
 	session := e.sessions.GetOrCreateActive(relaySessionKey)
+	unlockAgentTurn := e.lockAgentSessionTurn(session)
+	defer unlockAgentTurn()
 
 	envVars := e.sessionEnv(relaySessionKey)
 
