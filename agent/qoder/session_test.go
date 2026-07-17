@@ -500,6 +500,117 @@ func TestHandleResult_FallsBackWhenMessageHasNoTextItems(t *testing.T) {
 	}
 }
 
+func TestHandleResult_FallsBackToAssistantTextWhenResultIsEmpty(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	content, err := json.Marshal([]contentItem{{Type: "text", Text: "assistant text without finished status"}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	qs.handleEvent(&streamEvent{
+		Type:      "assistant",
+		SessionID: "qoder-session-result",
+		Message:   &streamMessage{Role: "assistant", Content: content},
+	})
+	qs.handleEvent(&streamEvent{
+		Type:      "result",
+		SessionID: "qoder-session-result",
+		Done:      true,
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "assistant text without finished status" {
+			t.Fatalf("event content = %q, want assistant text fallback", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result event")
+	}
+}
+
+func TestHandleResult_PrefersResultOverAssistantTextFallback(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	content, err := json.Marshal([]contentItem{{Type: "text", Text: "assistant fallback text"}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	qs.handleEvent(&streamEvent{
+		Type:    "assistant",
+		Message: &streamMessage{Role: "assistant", Content: content},
+	})
+	qs.handleEvent(&streamEvent{
+		Type:      "result",
+		SessionID: "qoder-session-result",
+		Result:    "top-level result text",
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "top-level result text" {
+			t.Fatalf("event content = %q, want top-level result", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result event")
+	}
+}
+
+func TestSend_ResetsAssistantTextFallbackBetweenTurns(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	script := `#!/bin/sh
+echo '{"type":"result","session_id":"qoder-session-reset","done":true}'
+`
+	scriptPath := filepath.Join(binDir, "qodercli")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake qodercli: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	qs, err := newQoderSession(context.Background(), workDir, nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	qs.recordAssistantText("stale assistant text")
+	if err := qs.Send("next turn", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "" {
+			t.Fatalf("event content = %q, want no stale assistant fallback", evt.Content)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for result event")
+	}
+}
+
 func TestHandleAssistant_EmitsToolUseForToolUseItemsWithoutFinishedStatus(t *testing.T) {
 	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
 	if err != nil {

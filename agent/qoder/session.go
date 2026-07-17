@@ -33,6 +33,8 @@ type qoderSession struct {
 	events    chan core.Event
 	closeOnce sync.Once
 	sessionID atomic.Value // stores string
+	textMu    sync.Mutex
+	lastText  string
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -69,6 +71,7 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 	if !qs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
+	qs.resetLastAssistantText()
 
 	args := []string{"--print", "--output-format", "stream-json"}
 	workDirKey := normalizedQoderWorkspacePath(qs.workDir)
@@ -271,6 +274,8 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 	for _, item := range items {
 		switch item.Type {
 		case "text":
+			qs.recordAssistantText(item.Text)
+
 			// Only emit finalized text chunks to avoid duplicate partial assistant content.
 			if ev.Message.Status != "finished" {
 				continue
@@ -306,6 +311,9 @@ func (qs *qoderSession) handleResult(ev *streamEvent) {
 	}
 	if strings.TrimSpace(finalText) == "" && strings.TrimSpace(ev.Result) != "" {
 		finalText = ev.Result
+	}
+	if strings.TrimSpace(finalText) == "" {
+		finalText = qs.lastAssistantText()
 	}
 
 	evt := core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}
@@ -357,6 +365,32 @@ func (qs *qoderSession) closeEvents() {
 }
 
 // ── helpers ──────────────────────────────────────────────────
+
+func (qs *qoderSession) resetLastAssistantText() {
+	qs.textMu.Lock()
+	defer qs.textMu.Unlock()
+	qs.lastText = ""
+}
+
+func (qs *qoderSession) recordAssistantText(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	qs.textMu.Lock()
+	defer qs.textMu.Unlock()
+	if strings.TrimSpace(qs.lastText) == "" {
+		qs.lastText = text
+		return
+	}
+	qs.lastText += "\n\n" + text
+}
+
+func (qs *qoderSession) lastAssistantText() string {
+	qs.textMu.Lock()
+	defer qs.textMu.Unlock()
+	return qs.lastText
+}
 
 // extractToolPreview parses the JSON input of a tool call and returns a short preview string.
 func extractToolPreview(inputJSON json.RawMessage) string {
