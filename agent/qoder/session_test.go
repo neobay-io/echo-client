@@ -536,6 +536,61 @@ func TestHandleResult_FallsBackToAssistantTextWhenResultIsEmpty(t *testing.T) {
 	}
 }
 
+func TestHandleResult_FallbackSkipsInProgressAssistantText(t *testing.T) {
+	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("newQoderSession: %v", err)
+	}
+	defer func() { _ = qs.Close() }()
+
+	partialContent, err := json.Marshal([]contentItem{{Type: "text", Text: "The answer"}})
+	if err != nil {
+		t.Fatalf("Marshal partial: %v", err)
+	}
+	finishedContent, err := json.Marshal([]contentItem{{Type: "text", Text: "The answer is 42"}})
+	if err != nil {
+		t.Fatalf("Marshal finished: %v", err)
+	}
+
+	qs.handleEvent(&streamEvent{
+		Type:    "assistant",
+		Message: &streamMessage{Role: "assistant", Status: "in_progress", Content: partialContent},
+	})
+	qs.handleEvent(&streamEvent{
+		Type:    "assistant",
+		Message: &streamMessage{Role: "assistant", Status: "finished", Content: finishedContent},
+	})
+	qs.handleEvent(&streamEvent{
+		Type:      "result",
+		SessionID: "qoder-session-result",
+		Done:      true,
+	})
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventText {
+			t.Fatalf("first event type = %v, want text", evt.Type)
+		}
+		if evt.Content != "The answer is 42" {
+			t.Fatalf("text event content = %q, want finished text", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for text event")
+	}
+
+	select {
+	case evt := <-qs.Events():
+		if evt.Type != core.EventResult {
+			t.Fatalf("event type = %v, want result", evt.Type)
+		}
+		if evt.Content != "The answer is 42" {
+			t.Fatalf("event content = %q, want only finished assistant text fallback", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result event")
+	}
+}
+
 func TestHandleResult_PrefersResultOverAssistantTextFallback(t *testing.T) {
 	qs, err := newQoderSession(context.Background(), t.TempDir(), nil, "", "", "", nil)
 	if err != nil {

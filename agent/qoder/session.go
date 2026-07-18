@@ -274,10 +274,12 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 	for _, item := range items {
 		switch item.Type {
 		case "text":
-			qs.recordAssistantText(item.Text)
+			if shouldRecordAssistantText(ev.Message.Status, item) {
+				qs.recordAssistantText(item.Text)
+			}
 
 			// Only emit finalized text chunks to avoid duplicate partial assistant content.
-			if ev.Message.Status != "finished" {
+			if !shouldEmitAssistantText(ev.Message.Status, item) {
 				continue
 			}
 			if item.Text != "" {
@@ -390,6 +392,16 @@ func (qs *qoderSession) lastAssistantText() string {
 	qs.textMu.Lock()
 	defer qs.textMu.Unlock()
 	return qs.lastText
+}
+
+func shouldRecordAssistantText(status string, item contentItem) bool {
+	status = strings.TrimSpace(status)
+	return status == "" || status == "finished" || item.Finished
+}
+
+func shouldEmitAssistantText(status string, item contentItem) bool {
+	status = strings.TrimSpace(status)
+	return status == "finished" || item.Finished
 }
 
 // extractToolPreview parses the JSON input of a tool call and returns a short preview string.
