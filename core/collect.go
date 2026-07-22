@@ -534,7 +534,7 @@ func (e *Engine) flushPendingCollection(p Platform, msg *Message, instruction st
 		ReplyCtx:   msg.ReplyCtx,
 	}
 
-	e.processInteractiveMessageAsync(p, synthesized, session, func(err error) {
+	e.processInteractiveMessageAsyncAndDrainQueue(p, synthesized, session, func(err error) {
 		if err != nil {
 			e.failPendingCollectionFlush(msg.SessionKey)
 			return

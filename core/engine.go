@@ -870,7 +870,7 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 		historyLen := session.HistoryLen()
 		// Intentionally synchronous: the scheduler waits for this turn to
 		// finish, so timeout/cancellation is enforced via ctx and cleanup.
-		e.processInteractiveMessage(targetPlatform, msg, session)
+		e.processInteractiveMessageWithQueueLifecycle(targetPlatform, msg, session)
 		e.applyLoopPausePrimitive(sessionKey, job.ID, session.LatestAssistantMessageSince(historyLen), targetPlatform, replyCtx)
 		return ctx.Err()
 	}
@@ -881,7 +881,7 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 	}
 	historyLen := session.HistoryLen()
 
-	e.processInteractiveMessage(targetPlatform, msg, session)
+	e.processInteractiveMessageWithQueueLifecycle(targetPlatform, msg, session)
 	e.applyLoopPausePrimitive(sessionKey, job.ID, session.LatestAssistantMessageSince(historyLen), targetPlatform, replyCtx)
 	return ctx.Err()
 }
@@ -1083,6 +1083,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
+	queueEligible := true
 	if content == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
 		return
 	}
@@ -1157,10 +1158,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
-		// Unrecognized slash commands are treated as commands, not queued
-		// prompts. Users can prefix with prose if they want the agent to handle
-		// literal slash-prefixed text.
-		return
+		// Preserve the historical "notify, then forward to agent" behavior for
+		// unknown slash-prefixed text when the session can start immediately,
+		// but do not enqueue it if another turn is already ahead.
+		queueEligible = false
 	}
 
 	// Permission responses bypass the session lock
@@ -1207,12 +1208,25 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
 	queueKey, agentSessionID := e.promptQueueKey(msg.SessionKey, session)
 	if !session.TryLock() {
+		if !queueEligible {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+			return
+		}
 		pos, err := e.enqueuePrompt(queueKey, agentSessionID, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.promptQueueErrorMessage(err))
 			return
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgQueueEnqueued, pos))
+		return
+	}
+	if !queueEligible {
+		if e.agentUpgradeBlocksNewTurns() {
+			session.Unlock()
+			e.reply(p, msg.ReplyCtx, e.agentUpgradeBlockedMessage())
+			return
+		}
+		go e.processInteractiveMessageWithQueueLifecycle(p, msg, session)
 		return
 	}
 	startNow, pos, err := e.beginPromptTurnOrEnqueue(queueKey, agentSessionID, msg)
@@ -1229,7 +1243,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 	if e.agentUpgradeBlocksNewTurns() {
 		session.Unlock()
-		e.completePromptTurn(queueKey, msg.SessionKey, session)
+		finalKey := e.completePromptTurn(queueKey, msg.SessionKey, session)
+		go e.drainPromptQueue(finalKey)
 		e.reply(p, msg.ReplyCtx, e.agentUpgradeBlockedMessage())
 		return
 	}
@@ -2440,13 +2455,21 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn)
 }
 
-func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, session *Session, done func(error)) {
+func (e *Engine) processInteractiveMessageAsyncWithQueueKey(p Platform, msg *Message, session *Session, queueKey string, done func(error)) {
 	go func() {
+		completeQueue := func() {
+			if queueKey == "" {
+				return
+			}
+			finalKey := e.completePromptTurn(queueKey, msg.SessionKey, session)
+			e.drainPromptQueue(finalKey)
+		}
 		if e.ctx.Err() != nil {
 			if done != nil {
 				done(e.ctx.Err())
 			}
 			session.Unlock()
+			completeQueue()
 			return
 		}
 		agentTurn, err := e.lockAgentSessionTurn(e.ctx, session)
@@ -2455,6 +2478,7 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 				done(err)
 			}
 			session.Unlock()
+			completeQueue()
 			return
 		}
 		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session, agentTurn)
@@ -2467,6 +2491,7 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 			}
 			agentTurn.Unlock()
 			session.Unlock()
+			completeQueue()
 			return
 		}
 		e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
@@ -2476,18 +2501,20 @@ func (e *Engine) processInteractiveMessageAsync(p Platform, msg *Message, sessio
 			}
 			agentTurn.Unlock()
 			session.Unlock()
+			completeQueue()
 			return
 		}
 		session.AddHistory("user", prompt)
 		if done != nil {
 			done(nil)
 		}
-		defer session.Unlock()
-		defer agentTurn.Unlock()
-		if stopTyping != nil {
-			defer stopTyping()
-		}
 		e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn)
+		if stopTyping != nil {
+			stopTyping()
+		}
+		agentTurn.Unlock()
+		session.Unlock()
+		completeQueue()
 	}()
 }
 
@@ -6357,7 +6384,7 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessage(p, msg, session)
+	go e.processInteractiveMessageWithQueueLifecycle(p, msg, session)
 }
 
 // executeShellCommand runs a shell command and sends the output to the user.
@@ -6592,7 +6619,7 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessage(p, msg, session)
+	go e.processInteractiveMessageWithQueueLifecycle(p, msg, session)
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {

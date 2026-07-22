@@ -10,7 +10,9 @@ import (
 const (
 	maxPromptQueueItems           = 20
 	maxPromptQueueAttachmentBytes = 50 * 1024 * 1024
+	maxPromptQueueEngineBytes     = 200 * 1024 * 1024
 	promptQueuePreviewRunes       = 120
+	promptQueueRetryDelay         = 250 * time.Millisecond
 )
 
 type queuedPrompt struct {
@@ -77,6 +79,17 @@ func promptQueueAttachmentBytes(msg *Message) int {
 	for _, file := range msg.Files {
 		total += len(file.Data)
 	}
+	if msg.Audio != nil {
+		total += len(msg.Audio.Data)
+	}
+	return total
+}
+
+func promptQueueItemsAttachmentBytes(items []queuedPrompt) int {
+	total := 0
+	for i := range items {
+		total += promptQueueAttachmentBytes(&items[i].Message)
+	}
 	return total
 }
 
@@ -126,10 +139,11 @@ func (e *Engine) enqueuePromptLocked(state *promptQueueState, queueKey, agentSes
 		return 0, fmt.Errorf("queue full")
 	}
 	totalBytes := promptQueueAttachmentBytes(msg)
-	for i := range state.Items {
-		totalBytes += promptQueueAttachmentBytes(&state.Items[i].Message)
-	}
+	totalBytes += promptQueueItemsAttachmentBytes(state.Items)
 	if totalBytes > maxPromptQueueAttachmentBytes {
+		return 0, fmt.Errorf("queue attachments too large")
+	}
+	if e.promptQueuesAttachmentBytesLocked()+promptQueueAttachmentBytes(msg) > maxPromptQueueEngineBytes {
 		return 0, fmt.Errorf("queue attachments too large")
 	}
 	e.promptQueueSeq++
@@ -144,6 +158,28 @@ func (e *Engine) enqueuePromptLocked(state *promptQueueState, queueKey, agentSes
 	}
 	state.Items = append(state.Items, item)
 	return len(state.Items), nil
+}
+
+func (e *Engine) promptQueuesAttachmentBytesLocked() int {
+	total := 0
+	for _, state := range e.promptQueues {
+		if state == nil {
+			continue
+		}
+		total += promptQueueItemsAttachmentBytes(state.Items)
+	}
+	return total
+}
+
+func (e *Engine) markPromptQueueRunning(queueKey string) {
+	e.promptQueueMu.Lock()
+	defer e.promptQueueMu.Unlock()
+	state := e.promptQueues[queueKey]
+	if state == nil {
+		state = &promptQueueState{}
+		e.promptQueues[queueKey] = state
+	}
+	state.Running = true
 }
 
 func (e *Engine) completePromptTurn(startKey string, sessionKey string, session *Session) string {
@@ -221,6 +257,20 @@ func (e *Engine) requeuePromptFront(item queuedPrompt) {
 	}
 	state.Running = false
 	state.Items = append([]queuedPrompt{item}, state.Items...)
+	e.schedulePromptQueueRetry(item.QueueKey)
+}
+
+func (e *Engine) schedulePromptQueueRetry(queueKey string) {
+	go func() {
+		timer := time.NewTimer(promptQueueRetryDelay)
+		defer timer.Stop()
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-timer.C:
+			e.drainPromptQueue(queueKey)
+		}
+	}()
 }
 
 func (e *Engine) failQueuedPrompt(item queuedPrompt, reason string) {
@@ -288,6 +338,18 @@ func (e *Engine) processInteractiveMessageAndDrainQueue(p Platform, msg *Message
 	e.drainPromptQueue(finalKey)
 }
 
+func (e *Engine) processInteractiveMessageWithQueueLifecycle(p Platform, msg *Message, session *Session) {
+	queueKey, _ := e.promptQueueKey(msg.SessionKey, session)
+	e.markPromptQueueRunning(queueKey)
+	e.processInteractiveMessageAndDrainQueue(p, msg, session, queueKey)
+}
+
+func (e *Engine) processInteractiveMessageAsyncAndDrainQueue(p Platform, msg *Message, session *Session, done func(error)) {
+	queueKey, _ := e.promptQueueKey(msg.SessionKey, session)
+	e.markPromptQueueRunning(queueKey)
+	e.processInteractiveMessageAsyncWithQueueKey(p, msg, session, queueKey, done)
+}
+
 func (e *Engine) queueSnapshotForSession(sessionKey string) promptQueueSnapshot {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	queueKey, _ := e.promptQueueKey(sessionKey, session)
@@ -315,8 +377,7 @@ func (e *Engine) cancelQueuedPromptsForSessionSwitch(sessionKey, newAgentSession
 		kept := state.Items[:0]
 		for _, item := range state.Items {
 			if item.OriginSessionKey == sessionKey &&
-				item.AgentSessionIDSnapshot != "" &&
-				item.AgentSessionIDSnapshot != newAgentSessionID {
+				(item.AgentSessionIDSnapshot == "" || item.AgentSessionIDSnapshot != newAgentSessionID) {
 				cancelled++
 				continue
 			}

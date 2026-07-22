@@ -783,11 +783,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "🌐 Idioma actual: **%s**\n\nUso: /lang <en|zh|zh-TW|ja|es|auto>",
 	},
 	MsgUnknownCommand: {
-		LangEnglish:            "`%s` is not an echo-client command.",
-		LangChinese:            "`%s` 不是 echo-client 命令。",
-		LangTraditionalChinese: "`%s` 不是 echo-client 命令。",
-		LangJapanese:           "`%s` は echo-client のコマンドではありません。",
-		LangSpanish:            "`%s` no es un comando de echo-client.",
+		LangEnglish:            "`%s` is not an echo-client command, forwarding to agent...",
+		LangChinese:            "`%s` 不是 echo-client 命令，已转发给 Agent 处理...",
+		LangTraditionalChinese: "`%s` 不是 echo-client 命令，已轉發給 Agent 處理...",
+		LangJapanese:           "`%s` は echo-client のコマンドではありません。エージェントに転送します...",
+		LangSpanish:            "`%s` no es un comando de echo-client, reenviando al agente...",
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +

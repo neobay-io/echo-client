@@ -2767,10 +2767,159 @@ func TestHandleMessage_SlashCommandWithAttachmentDoesNotQueue(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		return len(p.sent) > 0 && strings.Contains(p.sent[len(p.sent)-1], "not an echo-client command")
+		for _, sent := range p.sent {
+			if strings.Contains(sent, "not an echo-client command") {
+				return true
+			}
+		}
+		return false
 	}, "unknown slash command reply")
 	if text := e.renderQueueText("test:user1"); strings.Contains(text, "/quue") {
 		t.Fatalf("slash command was queued: %q", text)
+	}
+	sends := waitForSlowRecordedSends(t, agent, 1)
+	if len(sends) != 1 {
+		t.Fatalf("send count = %d, want only the first prompt", len(sends))
+	}
+}
+
+func TestHandleMessage_UnknownSlashForwardsWhenIdle(t *testing.T) {
+	agent := &recordingSendAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/tmp/foo",
+		ReplyCtx:   "ctx",
+	})
+
+	sends := waitForRecordedSends(t, agent, 1)
+	if !strings.Contains(sends[0].prompt, "/tmp/foo") {
+		t.Fatalf("unknown slash prompt was not forwarded: %q", sends[0].prompt)
+	}
+}
+
+func TestPromptQueue_RequeueRetryAfterSessionUnlock(t *testing.T) {
+	agent := &recordingSendAgent{}
+	p := &stubCardPlatform{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	session := e.sessions.GetOrCreateActive("test:user1")
+	session.AgentSessionID = "agent-session-1"
+	queueKey, agentSessionID := e.promptQueueKey("test:user1", session)
+	if _, err := e.enqueuePrompt(queueKey, agentSessionID, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "queued after lock",
+		ReplyCtx:   "ctx",
+	}); err != nil {
+		t.Fatalf("enqueuePrompt: %v", err)
+	}
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	e.drainPromptQueue(queueKey)
+	time.Sleep(promptQueueRetryDelay + 50*time.Millisecond)
+	if agent.session != nil && len(agent.session.Sends()) != 0 {
+		t.Fatalf("queued prompt sent while session was locked")
+	}
+	session.Unlock()
+
+	sends := waitForRecordedSends(t, agent, 1)
+	if !strings.Contains(sends[0].prompt, "queued after lock") {
+		t.Fatalf("queued prompt = %q", sends[0].prompt)
+	}
+}
+
+func TestExecuteCustomCommand_DrainsPromptQueueAfterCompletion(t *testing.T) {
+	agent := &slowRecordingSendAgent{delay: 150 * time.Millisecond}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.commands.Add("mycmd", "", "custom {{args}}", "", "", "config")
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/mycmd one",
+		ReplyCtx:   "ctx",
+	})
+	time.Sleep(20 * time.Millisecond)
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "queued after custom",
+		ReplyCtx:   "ctx",
+	})
+
+	sends := waitForSlowRecordedSends(t, agent, 2)
+	if !strings.Contains(sends[0].prompt, "custom one") {
+		t.Fatalf("first prompt = %q", sends[0].prompt)
+	}
+	if !strings.Contains(sends[1].prompt, "queued after custom") {
+		t.Fatalf("queued prompt = %q", sends[1].prompt)
+	}
+}
+
+func TestCmdSwitchCancelsPendingSnapshotQueuedPrompts(t *testing.T) {
+	agent := &listDeleteAgent{sessions: []AgentSessionInfo{{
+		ID:           "target-agent-session",
+		Summary:      "target",
+		MessageCount: 3,
+		ModifiedAt:   time.Now(),
+	}}}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	session := e.sessions.GetOrCreateActive("test:user1")
+	queueKey, agentSessionID := e.promptQueueKey("test:user1", session)
+	if agentSessionID != "" {
+		t.Fatalf("agentSessionID = %q, want empty pending snapshot", agentSessionID)
+	}
+	if _, err := e.enqueuePrompt(queueKey, agentSessionID, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		Content:    "pending snapshot",
+		ReplyCtx:   "ctx",
+	}); err != nil {
+		t.Fatalf("enqueuePrompt: %v", err)
+	}
+
+	e.cmdSwitch(p, &Message{SessionKey: "test:user1", Platform: "test", ReplyCtx: "ctx"}, []string{"target-agent-session"})
+
+	if snap := e.queueSnapshotForSession("test:user1"); len(snap.Items) != 0 {
+		t.Fatalf("queue items after switch = %#v, want none", snap.Items)
+	}
+	waitForCondition(t, func() bool {
+		return len(p.sent) > 0 && strings.Contains(p.sent[len(p.sent)-1], "Cancelled 1 queued")
+	}, "switch cancellation notice")
+}
+
+func TestPromptQueueRejectsOversizedAudio(t *testing.T) {
+	e := newTestEngine()
+	session := e.sessions.GetOrCreateActive("test:user1")
+	queueKey, agentSessionID := e.promptQueueKey("test:user1", session)
+
+	_, err := e.enqueuePrompt(queueKey, agentSessionID, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		Content:    "voice",
+		Audio:      &AudioAttachment{Data: make([]byte, maxPromptQueueAttachmentBytes+1)},
+		ReplyCtx:   "ctx",
+	})
+	if err == nil || err.Error() != "queue attachments too large" {
+		t.Fatalf("enqueuePrompt err = %v, want queue attachments too large", err)
 	}
 }
 

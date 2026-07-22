@@ -113,7 +113,10 @@ Rules:
 - Built-in commands execute immediately.
 - Custom commands, skill commands, and shell commands execute immediately if
   possible; if their session is busy, they keep the existing busy behavior.
-- Unknown slash commands are not queued.
+- Unknown slash commands are not queued. If the target session can start
+  immediately, keep the historical behavior and forward them to the agent after
+  sending the unknown-command notice. If the target session is busy or another
+  queued prompt is ahead, do not enqueue the unknown slash input.
 - Permission responses are not queued.
 - Pending collection and pending attachment flows keep their own existing
   semantics.
