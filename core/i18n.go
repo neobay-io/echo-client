@@ -119,66 +119,82 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
-	MsgStarting             MsgKey = "starting"
-	MsgThinking             MsgKey = "thinking"
-	MsgTool                 MsgKey = "tool"
-	MsgExecutionStopped     MsgKey = "execution_stopped"
-	MsgNoExecution          MsgKey = "no_execution"
-	MsgPreviousProcessing   MsgKey = "previous_processing"
-	MsgNoToolsAllowed       MsgKey = "no_tools_allowed"
-	MsgCurrentTools         MsgKey = "current_tools"
-	MsgCurrentSession       MsgKey = "current_session"
-	MsgToolAuthNotSupported MsgKey = "tool_auth_not_supported"
-	MsgToolAllowFailed      MsgKey = "tool_allow_failed"
-	MsgToolAllowedNew       MsgKey = "tool_allowed_new"
-	MsgError                MsgKey = "error"
-	MsgEmptyResponse        MsgKey = "empty_response"
-	MsgPermissionPrompt     MsgKey = "permission_prompt"
-	MsgPermissionAllowed    MsgKey = "permission_allowed"
-	MsgPermissionApproveAll MsgKey = "permission_approve_all"
-	MsgPermissionDenied     MsgKey = "permission_denied_msg"
-	MsgPermissionHint       MsgKey = "permission_hint"
-	MsgQuietOn              MsgKey = "quiet_on"
-	MsgQuietOff             MsgKey = "quiet_off"
-	MsgQuietGlobalOn        MsgKey = "quiet_global_on"
-	MsgQuietGlobalOff       MsgKey = "quiet_global_off"
-	MsgModeChanged          MsgKey = "mode_changed"
-	MsgModeNotSupported     MsgKey = "mode_not_supported"
-	MsgEffortChanged        MsgKey = "effort_changed"
-	MsgEffortNotSupported   MsgKey = "effort_not_supported"
-	MsgEffortUseModel       MsgKey = "effort_use_model"
-	MsgSessionRestarting    MsgKey = "session_restarting"
-	MsgSessionNotStarted    MsgKey = "session_not_started"
-	MsgLangChanged          MsgKey = "lang_changed"
-	MsgLangInvalid          MsgKey = "lang_invalid"
-	MsgLangCurrent          MsgKey = "lang_current"
-	MsgUnknownCommand       MsgKey = "unknown_command"
-	MsgHelp                 MsgKey = "message_help" // change from "help", which is used now for builtin command help
-	MsgListTitle            MsgKey = "list_title"
-	MsgListTitlePaged       MsgKey = "list_title_paged"
-	MsgListEmpty            MsgKey = "list_empty"
-	MsgListMore             MsgKey = "list_more"
-	MsgListPageHint         MsgKey = "list_page_hint"
-	MsgListSwitchHint       MsgKey = "list_switch_hint"
-	MsgListError            MsgKey = "list_error"
-	MsgHistoryEmpty         MsgKey = "history_empty"
-	MsgNameUsage            MsgKey = "name_usage"
-	MsgNameSet              MsgKey = "name_set"
-	MsgNameNoSession        MsgKey = "name_no_session"
-	MsgProviderNotSupported MsgKey = "provider_not_supported"
-	MsgProviderNone         MsgKey = "provider_none"
-	MsgProviderCurrent      MsgKey = "provider_current"
-	MsgProviderListTitle    MsgKey = "provider_list_title"
-	MsgProviderListEmpty    MsgKey = "provider_list_empty"
-	MsgProviderSwitchHint   MsgKey = "provider_switch_hint"
-	MsgProviderNotFound     MsgKey = "provider_not_found"
-	MsgProviderSwitched     MsgKey = "provider_switched"
-	MsgProviderCleared      MsgKey = "provider_cleared"
-	MsgProviderAdded        MsgKey = "provider_added"
-	MsgProviderAddUsage     MsgKey = "provider_add_usage"
-	MsgProviderAddFailed    MsgKey = "provider_add_failed"
-	MsgProviderRemoved      MsgKey = "provider_removed"
-	MsgProviderRemoveFailed MsgKey = "provider_remove_failed"
+	MsgStarting                   MsgKey = "starting"
+	MsgThinking                   MsgKey = "thinking"
+	MsgTool                       MsgKey = "tool"
+	MsgExecutionStopped           MsgKey = "execution_stopped"
+	MsgNoExecution                MsgKey = "no_execution"
+	MsgPreviousProcessing         MsgKey = "previous_processing"
+	MsgQueueEnqueued              MsgKey = "queue_enqueued"
+	MsgQueueFull                  MsgKey = "queue_full"
+	MsgQueueAttachmentsTooLarge   MsgKey = "queue_attachments_too_large"
+	MsgQueueEmpty                 MsgKey = "queue_empty"
+	MsgQueueNoWaiting             MsgKey = "queue_no_waiting"
+	MsgQueueRunning               MsgKey = "queue_running"
+	MsgQueueTitle                 MsgKey = "queue_title"
+	MsgQueueManageHint            MsgKey = "queue_manage_hint"
+	MsgQueueUsage                 MsgKey = "queue_usage"
+	MsgQueueCleared               MsgKey = "queue_cleared"
+	MsgQueueDeleted               MsgKey = "queue_deleted"
+	MsgQueueMoved                 MsgKey = "queue_moved"
+	MsgQueueItemNotFound          MsgKey = "queue_item_not_found"
+	MsgQueueSkipped               MsgKey = "queue_skipped"
+	MsgQueueSkippedSessionChanged MsgKey = "queue_skipped_session_changed"
+	MsgQueueCancelledOnSwitch     MsgKey = "queue_cancelled_on_switch"
+	MsgNoToolsAllowed             MsgKey = "no_tools_allowed"
+	MsgCurrentTools               MsgKey = "current_tools"
+	MsgCurrentSession             MsgKey = "current_session"
+	MsgToolAuthNotSupported       MsgKey = "tool_auth_not_supported"
+	MsgToolAllowFailed            MsgKey = "tool_allow_failed"
+	MsgToolAllowedNew             MsgKey = "tool_allowed_new"
+	MsgError                      MsgKey = "error"
+	MsgEmptyResponse              MsgKey = "empty_response"
+	MsgPermissionPrompt           MsgKey = "permission_prompt"
+	MsgPermissionAllowed          MsgKey = "permission_allowed"
+	MsgPermissionApproveAll       MsgKey = "permission_approve_all"
+	MsgPermissionDenied           MsgKey = "permission_denied_msg"
+	MsgPermissionHint             MsgKey = "permission_hint"
+	MsgQuietOn                    MsgKey = "quiet_on"
+	MsgQuietOff                   MsgKey = "quiet_off"
+	MsgQuietGlobalOn              MsgKey = "quiet_global_on"
+	MsgQuietGlobalOff             MsgKey = "quiet_global_off"
+	MsgModeChanged                MsgKey = "mode_changed"
+	MsgModeNotSupported           MsgKey = "mode_not_supported"
+	MsgEffortChanged              MsgKey = "effort_changed"
+	MsgEffortNotSupported         MsgKey = "effort_not_supported"
+	MsgEffortUseModel             MsgKey = "effort_use_model"
+	MsgSessionRestarting          MsgKey = "session_restarting"
+	MsgSessionNotStarted          MsgKey = "session_not_started"
+	MsgLangChanged                MsgKey = "lang_changed"
+	MsgLangInvalid                MsgKey = "lang_invalid"
+	MsgLangCurrent                MsgKey = "lang_current"
+	MsgUnknownCommand             MsgKey = "unknown_command"
+	MsgHelp                       MsgKey = "message_help" // change from "help", which is used now for builtin command help
+	MsgListTitle                  MsgKey = "list_title"
+	MsgListTitlePaged             MsgKey = "list_title_paged"
+	MsgListEmpty                  MsgKey = "list_empty"
+	MsgListMore                   MsgKey = "list_more"
+	MsgListPageHint               MsgKey = "list_page_hint"
+	MsgListSwitchHint             MsgKey = "list_switch_hint"
+	MsgListError                  MsgKey = "list_error"
+	MsgHistoryEmpty               MsgKey = "history_empty"
+	MsgNameUsage                  MsgKey = "name_usage"
+	MsgNameSet                    MsgKey = "name_set"
+	MsgNameNoSession              MsgKey = "name_no_session"
+	MsgProviderNotSupported       MsgKey = "provider_not_supported"
+	MsgProviderNone               MsgKey = "provider_none"
+	MsgProviderCurrent            MsgKey = "provider_current"
+	MsgProviderListTitle          MsgKey = "provider_list_title"
+	MsgProviderListEmpty          MsgKey = "provider_list_empty"
+	MsgProviderSwitchHint         MsgKey = "provider_switch_hint"
+	MsgProviderNotFound           MsgKey = "provider_not_found"
+	MsgProviderSwitched           MsgKey = "provider_switched"
+	MsgProviderCleared            MsgKey = "provider_cleared"
+	MsgProviderAdded              MsgKey = "provider_added"
+	MsgProviderAddUsage           MsgKey = "provider_add_usage"
+	MsgProviderAddFailed          MsgKey = "provider_add_failed"
+	MsgProviderRemoved            MsgKey = "provider_removed"
+	MsgProviderRemoveFailed       MsgKey = "provider_remove_failed"
 
 	MsgVoiceNotEnabled            MsgKey = "voice_not_enabled"
 	MsgVoiceNoFFmpeg              MsgKey = "voice_no_ffmpeg"
@@ -400,6 +416,7 @@ const (
 	MsgBuiltinCmdQuiet        MsgKey = "quiet"
 	MsgBuiltinCmdCompress     MsgKey = "compress"
 	MsgBuiltinCmdCollect      MsgKey = "collect"
+	MsgBuiltinCmdQueue        MsgKey = "queue"
 	MsgBuiltinCmdStop         MsgKey = "stop"
 	MsgBuiltinCmdCron         MsgKey = "cron"
 	MsgBuiltinCmdCommands     MsgKey = "commands"
@@ -463,6 +480,118 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 上一個請求仍在處理中，請稍候...",
 		LangJapanese:           "⏳ 前のリクエストを処理中です。お待ちください...",
 		LangSpanish:            "⏳ La solicitud anterior aún se está procesando, por favor espere...",
+	},
+	MsgQueueEnqueued: {
+		LangEnglish:            "🧾 Queued. Position: %d. Use /queue to view or reorder.",
+		LangChinese:            "🧾 已加入队列，第 %d 位。发送 /queue 查看或调整。",
+		LangTraditionalChinese: "🧾 已加入佇列，第 %d 位。傳送 /queue 查看或調整。",
+		LangJapanese:           "🧾 キューに追加しました。位置: %d。/queue で確認または並べ替えできます。",
+		LangSpanish:            "🧾 En cola. Posición: %d. Usa /queue para ver o reordenar.",
+	},
+	MsgQueueFull: {
+		LangEnglish:            "Queue is full. Maximum queued prompts: %d.",
+		LangChinese:            "队列已满，最多可等待 %d 条 prompt。",
+		LangTraditionalChinese: "佇列已滿，最多可等待 %d 條 prompt。",
+		LangJapanese:           "キューがいっぱいです。最大待機プロンプト数: %d。",
+		LangSpanish:            "La cola está llena. Máximo de prompts en cola: %d.",
+	},
+	MsgQueueAttachmentsTooLarge: {
+		LangEnglish:            "Queued attachments are too large. Please wait for the current turn or send smaller files.",
+		LangChinese:            "队列里的附件总量过大，请等待当前任务完成，或发送更小的文件。",
+		LangTraditionalChinese: "佇列裡的附件總量過大，請等待目前任務完成，或傳送更小的檔案。",
+		LangJapanese:           "キュー内の添付ファイルが大きすぎます。現在のターン完了を待つか、小さいファイルを送ってください。",
+		LangSpanish:            "Los adjuntos en cola son demasiado grandes. Espera el turno actual o envía archivos más pequeños.",
+	},
+	MsgQueueEmpty: {
+		LangEnglish:            "Queue is empty.",
+		LangChinese:            "队列为空。",
+		LangTraditionalChinese: "佇列是空的。",
+		LangJapanese:           "キューは空です。",
+		LangSpanish:            "La cola está vacía.",
+	},
+	MsgQueueNoWaiting: {
+		LangEnglish:            "A turn is running. No waiting prompts.",
+		LangChinese:            "当前有任务正在执行，没有等待中的 prompt。",
+		LangTraditionalChinese: "目前有任務正在執行，沒有等待中的 prompt。",
+		LangJapanese:           "ターンが実行中です。待機中のプロンプトはありません。",
+		LangSpanish:            "Hay un turno en ejecución. No hay prompts esperando.",
+	},
+	MsgQueueRunning: {
+		LangEnglish:            "Current turn is running. Waiting prompts below will run in order.",
+		LangChinese:            "当前任务正在执行。下面等待中的 prompt 会按顺序执行。",
+		LangTraditionalChinese: "目前任務正在執行。下面等待中的 prompt 會依序執行。",
+		LangJapanese:           "現在のターンが実行中です。下の待機プロンプトは順番に実行されます。",
+		LangSpanish:            "El turno actual está en ejecución. Los prompts en espera se ejecutarán en orden.",
+	},
+	MsgQueueTitle: {
+		LangEnglish:            "Prompt queue (%d waiting)",
+		LangChinese:            "Prompt 队列（%d 条等待中）",
+		LangTraditionalChinese: "Prompt 佇列（%d 條等待中）",
+		LangJapanese:           "プロンプトキュー（%d 件待機中）",
+		LangSpanish:            "Cola de prompts (%d en espera)",
+	},
+	MsgQueueManageHint: {
+		LangEnglish:            "Manage: /queue delete <id>, /queue up <id>, /queue down <id>, /queue clear",
+		LangChinese:            "管理：/queue delete <id>、/queue up <id>、/queue down <id>、/queue clear",
+		LangTraditionalChinese: "管理：/queue delete <id>、/queue up <id>、/queue down <id>、/queue clear",
+		LangJapanese:           "管理: /queue delete <id>, /queue up <id>, /queue down <id>, /queue clear",
+		LangSpanish:            "Gestiona: /queue delete <id>, /queue up <id>, /queue down <id>, /queue clear",
+	},
+	MsgQueueUsage: {
+		LangEnglish:            "Usage: /queue [list|delete <id>|up <id>|down <id>|clear]",
+		LangChinese:            "用法：/queue [list|delete <id>|up <id>|down <id>|clear]",
+		LangTraditionalChinese: "用法：/queue [list|delete <id>|up <id>|down <id>|clear]",
+		LangJapanese:           "使い方: /queue [list|delete <id>|up <id>|down <id>|clear]",
+		LangSpanish:            "Uso: /queue [list|delete <id>|up <id>|down <id>|clear]",
+	},
+	MsgQueueCleared: {
+		LangEnglish:            "Cleared %d queued prompt(s).",
+		LangChinese:            "已清空 %d 条等待中的 prompt。",
+		LangTraditionalChinese: "已清空 %d 條等待中的 prompt。",
+		LangJapanese:           "%d 件の待機プロンプトをクリアしました。",
+		LangSpanish:            "Se borraron %d prompt(s) en cola.",
+	},
+	MsgQueueDeleted: {
+		LangEnglish:            "Deleted queued prompt.",
+		LangChinese:            "已删除等待中的 prompt。",
+		LangTraditionalChinese: "已刪除等待中的 prompt。",
+		LangJapanese:           "待機プロンプトを削除しました。",
+		LangSpanish:            "Prompt en cola eliminado.",
+	},
+	MsgQueueMoved: {
+		LangEnglish:            "Queue order updated.",
+		LangChinese:            "队列顺序已更新。",
+		LangTraditionalChinese: "佇列順序已更新。",
+		LangJapanese:           "キュー順序を更新しました。",
+		LangSpanish:            "Orden de cola actualizado.",
+	},
+	MsgQueueItemNotFound: {
+		LangEnglish:            "Queued prompt not found.",
+		LangChinese:            "没有找到这条等待中的 prompt。",
+		LangTraditionalChinese: "找不到這條等待中的 prompt。",
+		LangJapanese:           "待機プロンプトが見つかりません。",
+		LangSpanish:            "Prompt en cola no encontrado.",
+	},
+	MsgQueueSkipped: {
+		LangEnglish:            "Skipped queued prompt: %v",
+		LangChinese:            "已跳过等待中的 prompt：%v",
+		LangTraditionalChinese: "已跳過等待中的 prompt：%v",
+		LangJapanese:           "待機プロンプトをスキップしました: %v",
+		LangSpanish:            "Prompt en cola omitido: %v",
+	},
+	MsgQueueSkippedSessionChanged: {
+		LangEnglish:            "Skipped a queued prompt because this chat switched to a different agent session.",
+		LangChinese:            "已跳过一条等待中的 prompt，因为这个聊天已经切换到其他 agent session。",
+		LangTraditionalChinese: "已跳過一條等待中的 prompt，因為這個聊天已切換到其他 agent session。",
+		LangJapanese:           "このチャットが別のエージェントセッションへ切り替わったため、待機プロンプトをスキップしました。",
+		LangSpanish:            "Se omitió un prompt en cola porque este chat cambió a otra sesión de agente.",
+	},
+	MsgQueueCancelledOnSwitch: {
+		LangEnglish:            "\nCancelled %d queued prompt(s) from the previous agent session.",
+		LangChinese:            "\n已取消旧 agent session 下 %d 条等待中的 prompt。",
+		LangTraditionalChinese: "\n已取消舊 agent session 下 %d 條等待中的 prompt。",
+		LangJapanese:           "\n以前のエージェントセッションの待機プロンプト %d 件をキャンセルしました。",
+		LangSpanish:            "\nSe cancelaron %d prompt(s) en cola de la sesión de agente anterior.",
 	},
 	MsgNoToolsAllowed: {
 		LangEnglish:            "No tools pre-allowed.\nUsage: `/allow <tool_name>`\nExample: `/allow Bash`",
@@ -654,11 +783,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "🌐 Idioma actual: **%s**\n\nUso: /lang <en|zh|zh-TW|ja|es|auto>",
 	},
 	MsgUnknownCommand: {
-		LangEnglish:            "`%s` is not a cc-connect command, forwarding to agent...",
-		LangChinese:            "`%s` 不是 cc-connect 命令，已转发给 Agent 处理...",
-		LangTraditionalChinese: "`%s` 不是 cc-connect 命令，已轉發給 Agent 處理...",
-		LangJapanese:           "`%s` は cc-connect のコマンドではありません。エージェントに転送します...",
-		LangSpanish:            "`%s` no es un comando de cc-connect, reenviando al agente...",
+		LangEnglish:            "`%s` is not an echo-client command.",
+		LangChinese:            "`%s` 不是 echo-client 命令。",
+		LangTraditionalChinese: "`%s` 不是 echo-client 命令。",
+		LangJapanese:           "`%s` は echo-client のコマンドではありません。",
+		LangSpanish:            "`%s` no es un comando de echo-client.",
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
@@ -680,6 +809,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/quiet [global]\n  Toggle thinking/tool progress (global = all sessions)\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
 			"/collect [start|status|send|cancel]\n  Buffer messages and process them later\n\n" +
+			"/queue [list|delete|up|down|clear]\n  View and manage queued prompts\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
 			"/stop\n  Stop current execution\n\n" +
@@ -720,6 +850,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/quiet [global]\n  开关思考和工具进度消息（global = 全部会话）\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
 			"/collect [start|status|send|cancel]\n  先缓冲消息，最后统一处理\n\n" +
+			"/queue [list|delete|up|down|clear]\n  查看和管理等待中的 prompt\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
 			"/stop\n  停止当前执行\n\n" +
@@ -2418,6 +2549,13 @@ var messages = map[MsgKey]map[Language]string{
 	MsgBuiltinCmdCollect: {
 		LangEnglish: "Buffer messages and process them later, arg: [start|status|send|cancel]",
 		LangChinese: "先缓冲消息再统一处理，参数: [start|status|send|cancel]",
+	},
+	MsgBuiltinCmdQueue: {
+		LangEnglish:            "View and manage queued prompts",
+		LangChinese:            "查看和管理等待中的 prompt",
+		LangTraditionalChinese: "查看和管理等待中的 prompt",
+		LangJapanese:           "待機中のプロンプトを表示/管理",
+		LangSpanish:            "Ver y gestionar prompts en cola",
 	},
 	MsgBuiltinCmdStop: {
 		LangEnglish:            "Stop current execution",

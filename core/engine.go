@@ -177,6 +177,9 @@ type Engine struct {
 	agentSessionBindMu sync.RWMutex
 	agentSessionTurnMu sync.Mutex
 	agentSessionTurns  map[string]*agentSessionTurnLock // key = agentName + ":" + AgentSessionID
+	promptQueueMu      sync.Mutex
+	promptQueues       map[string]*promptQueueState
+	promptQueueSeq     uint64
 	promptMu           sync.Mutex
 	prompts            map[string]*pendingInteractionPrompt
 	voiceConfirmMu     sync.Mutex
@@ -314,6 +317,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		aliases:            make(map[string]string),
 		interactiveStates:  make(map[string]*interactiveState),
 		agentSessionTurns:  make(map[string]*agentSessionTurnLock),
+		promptQueues:       make(map[string]*promptQueueState),
 		prompts:            make(map[string]*pendingInteractionPrompt),
 		voiceConfirms:      make(map[string]*pendingVoiceConfirmation),
 		pendingCollect:     make(map[string]*pendingCollectedBatch),
@@ -1149,11 +1153,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
-	if len(msg.Images) == 0 && len(msg.Files) == 0 && strings.HasPrefix(content, "/") {
+	if strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
-		// Unrecognized slash command — fall through to agent as normal message
+		// Unrecognized slash commands are treated as commands, not queued
+		// prompts. Users can prefix with prose if they want the agent to handle
+		// literal slash-prefixed text.
+		return
 	}
 
 	// Permission responses bypass the session lock
@@ -1198,12 +1205,31 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	queueKey, agentSessionID := e.promptQueueKey(msg.SessionKey, session)
 	if !session.TryLock() {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+		pos, err := e.enqueuePrompt(queueKey, agentSessionID, msg)
+		if err != nil {
+			e.reply(p, msg.ReplyCtx, e.promptQueueErrorMessage(err))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgQueueEnqueued, pos))
+		return
+	}
+	startNow, pos, err := e.beginPromptTurnOrEnqueue(queueKey, agentSessionID, msg)
+	if err != nil {
+		session.Unlock()
+		e.reply(p, msg.ReplyCtx, e.promptQueueErrorMessage(err))
+		return
+	}
+	if !startNow {
+		session.Unlock()
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgQueueEnqueued, pos))
+		go e.drainPromptQueue(queueKey)
 		return
 	}
 	if e.agentUpgradeBlocksNewTurns() {
 		session.Unlock()
+		e.completePromptTurn(queueKey, msg.SessionKey, session)
 		e.reply(p, msg.ReplyCtx, e.agentUpgradeBlockedMessage())
 		return
 	}
@@ -1217,7 +1243,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessage(p, msg, session)
+	go e.processInteractiveMessageAndDrainQueue(p, msg, session, queueKey)
 }
 
 func (e *Engine) storePendingAttachments(sessionKey string, images []ImageAttachment, files []FileAttachment) {
@@ -3117,6 +3143,7 @@ var builtinCommands = []struct {
 	{[]string{"loop"}, "loop"},
 	{[]string{"compress", "compact"}, "compress"},
 	{[]string{"collect"}, "collect"},
+	{[]string{"queue"}, "queue"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -3239,6 +3266,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCompress(p, msg)
 	case "collect":
 		e.cmdCollect(p, msg, args)
+	case "queue":
+		e.cmdQueue(p, msg, args)
 	case "stop":
 		e.cmdStop(p, msg)
 	case "help":
@@ -3532,6 +3561,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	session.Name = matched.Summary
 	session.ClearHistory()
 	e.sessions.Save()
+	cancelled := e.cancelQueuedPromptsForSessionSwitch(msg.SessionKey, matched.ID)
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -3541,8 +3571,11 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if displayName == "" {
 		displayName = matched.Summary
 	}
-	e.reply(p, msg.ReplyCtx,
-		e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount))
+	reply := e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount)
+	if cancelled > 0 {
+		reply += e.i18n.Tf(MsgQueueCancelledOnSwitch, cancelled)
+	}
+	e.reply(p, msg.ReplyCtx, reply)
 }
 
 func (e *Engine) switchSessionByID(sessionKey, id string) string {
@@ -3569,6 +3602,7 @@ func (e *Engine) switchSessionByID(sessionKey, id string) string {
 	session.Name = matched.Summary
 	session.ClearHistory()
 	e.sessions.Save()
+	cancelled := e.cancelQueuedPromptsForSessionSwitch(sessionKey, matched.ID)
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -3578,7 +3612,11 @@ func (e *Engine) switchSessionByID(sessionKey, id string) string {
 	if displayName == "" {
 		displayName = matched.Summary
 	}
-	return e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount)
+	reply := e.i18n.Tf(MsgSwitchSuccess, displayName, shortID, matched.MessageCount)
+	if cancelled > 0 {
+		reply += e.i18n.Tf(MsgQueueCancelledOnSwitch, cancelled)
+	}
+	return reply
 }
 
 // matchSession resolves a user query to an agent session. Priority:
@@ -4129,6 +4167,36 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
 }
 
+func (e *Engine) cmdQueue(p Platform, msg *Message, args []string) {
+	notice := ""
+	if len(args) > 0 {
+		notice = e.queueAction(msg.SessionKey, strings.Join(args, " "))
+	}
+	if supportsCards(p) {
+		e.replyWithCard(p, msg.ReplyCtx, e.renderQueueCard(msg.SessionKey, notice))
+		return
+	}
+	text := e.renderQueueText(msg.SessionKey)
+	if notice != "" {
+		text = notice + "\n\n" + text
+	}
+	e.reply(p, msg.ReplyCtx, text)
+}
+
+func (e *Engine) promptQueueErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch err.Error() {
+	case "queue full":
+		return e.i18n.Tf(MsgQueueFull, maxPromptQueueItems)
+	case "queue attachments too large":
+		return e.i18n.T(MsgQueueAttachmentsTooLarge)
+	default:
+		return fmt.Sprintf(e.i18n.T(MsgError), err)
+	}
+}
+
 func supportsCards(p Platform) bool {
 	if p == nil {
 		return false
@@ -4169,12 +4237,93 @@ func (e *Engine) simpleCard(title, color, content string) *Card {
 	return NewCard().Title(title, color).Markdown(content).Buttons(e.cardBackButton()).Build()
 }
 
+func (e *Engine) renderQueueText(sessionKey string) string {
+	snap := e.queueSnapshotForSession(sessionKey)
+	if !snap.Running && len(snap.Items) == 0 {
+		return e.i18n.T(MsgQueueEmpty)
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, e.i18n.T(MsgQueueTitle), len(snap.Items))
+	if snap.Running {
+		sb.WriteString("\n")
+		sb.WriteString(e.i18n.T(MsgQueueRunning))
+	}
+	for i, item := range snap.Items {
+		fmt.Fprintf(&sb, "\n%d. `%s` %s", i+1, item.ID, promptQueuePreview(item.Message.Content))
+		if len(item.Message.Images) > 0 || len(item.Message.Files) > 0 {
+			fmt.Fprintf(&sb, " (%s)", e.promptQueueAttachmentSummary(item.Message))
+		}
+	}
+	if len(snap.Items) > 0 {
+		sb.WriteString("\n\n")
+		sb.WriteString(e.i18n.T(MsgQueueManageHint))
+	}
+	return sb.String()
+}
+
+func (e *Engine) renderQueueCard(sessionKey, notice string) *Card {
+	snap := e.queueSnapshotForSession(sessionKey)
+	cb := NewCard().Title("Prompt Queue", "blue")
+	if strings.TrimSpace(notice) != "" {
+		cb.Note(notice)
+	}
+	if snap.Running {
+		cb.Markdown(e.i18n.T(MsgQueueRunning))
+	}
+	if len(snap.Items) == 0 {
+		if !snap.Running {
+			cb.Markdown(e.i18n.T(MsgQueueEmpty))
+		} else {
+			cb.Markdown(e.i18n.T(MsgQueueNoWaiting))
+		}
+		cb.ButtonsEqual(DefaultBtn("Refresh", "nav:/queue"), e.cardBackButton())
+		return cb.Build()
+	}
+
+	for i, item := range snap.Items {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "**%d.** `%s` · %s", i+1, item.ID, promptQueuePreview(item.Message.Content))
+		if len(item.Message.Images) > 0 || len(item.Message.Files) > 0 {
+			fmt.Fprintf(&sb, "\n%s", e.promptQueueAttachmentSummary(item.Message))
+		}
+		if !item.CreatedAt.IsZero() {
+			fmt.Fprintf(&sb, "\n%s", item.CreatedAt.Format("01-02 15:04"))
+		}
+		cb.Markdown(sb.String())
+
+		var btns []CardButton
+		if i > 0 {
+			btns = append(btns, DefaultBtn("Up", fmt.Sprintf("act:/queue up %s", item.ID)))
+		}
+		if i < len(snap.Items)-1 {
+			btns = append(btns, DefaultBtn("Down", fmt.Sprintf("act:/queue down %s", item.ID)))
+		}
+		btns = append(btns, DangerBtn("Delete", fmt.Sprintf("act:/queue delete %s", item.ID)))
+		cb.ButtonsEqual(btns...)
+	}
+	cb.Divider()
+	cb.ButtonsEqual(DefaultBtn("Refresh", "nav:/queue"), DangerBtn("Clear", "act:/queue clear"), e.cardBackButton())
+	return cb.Build()
+}
+
+func (e *Engine) promptQueueAttachmentSummary(msg Message) string {
+	parts := make([]string, 0, 2)
+	if len(msg.Images) > 0 {
+		parts = append(parts, fmt.Sprintf("%d image(s)", len(msg.Images)))
+	}
+	if len(msg.Files) > 0 {
+		parts = append(parts, fmt.Sprintf("%d file(s)", len(msg.Files)))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (e *Engine) renderHelpCard() *Card {
 	return NewCard().
 		Title("Help", "blue").
 		Markdown(e.i18n.T(MsgHelp)).
 		ButtonsEqual(
 			DefaultBtn("/cron", "nav:/cron"),
+			DefaultBtn("/queue", "nav:/queue"),
 		).
 		Build()
 }
@@ -5412,6 +5561,8 @@ func (e *Engine) handleCardNav(action, sessionKey string) *Card {
 		return e.renderCronCard(sessionKey, notice)
 	case "/loop":
 		return e.renderLoopCard(sessionKey, notice)
+	case "/queue":
+		return e.renderQueueCard(sessionKey, notice)
 	case "/sessions":
 		return e.renderSessionCard(sessionKey, parseSessionCardPage(args), notice)
 	case "/review":
@@ -5425,6 +5576,8 @@ func (e *Engine) handleCardNav(action, sessionKey string) *Card {
 
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) string {
 	switch cmd {
+	case "/queue":
+		return e.queueAction(sessionKey, args)
 	case "/cron":
 		if e.cronScheduler == nil {
 			return ""

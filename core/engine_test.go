@@ -281,6 +281,26 @@ func (s *slowRecordingSendSession) Sends() []recordedSend {
 	return out
 }
 
+func waitForSlowRecordedSends(t *testing.T, agent *slowRecordingSendAgent, want int) []recordedSend {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if agent.session != nil {
+			sends := agent.session.Sends()
+			if len(sends) >= want {
+				return sends
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if agent.session == nil {
+		t.Fatalf("expected agent session to start")
+	}
+	sends := agent.session.Sends()
+	t.Fatalf("send count = %d, want at least %d", len(sends), want)
+	return nil
+}
+
 type eventfulStubAgentSession struct {
 	events chan Event
 }
@@ -2644,6 +2664,148 @@ func TestProcessInteractiveMessage_IncludesQuotedContextInPrompt(t *testing.T) {
 	history := session.GetHistory(2)
 	if len(history) < 2 || history[0].Role != "user" || history[0].Content != got {
 		t.Fatalf("history content = %#v, want enriched prompt as user entry", history)
+	}
+}
+
+func TestHandleMessage_QueuesBusyPromptAndDrains(t *testing.T) {
+	agent := &slowRecordingSendAgent{delay: 150 * time.Millisecond}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "first",
+		ReplyCtx:   "ctx",
+	})
+	time.Sleep(20 * time.Millisecond)
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "second",
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool {
+		return len(p.sent) > 0 && strings.Contains(p.sent[len(p.sent)-1], "Queued")
+	}, "queued notice")
+	sends := waitForSlowRecordedSends(t, agent, 2)
+	if !strings.Contains(sends[0].prompt, "first") {
+		t.Fatalf("first prompt = %q", sends[0].prompt)
+	}
+	if !strings.Contains(sends[1].prompt, "second") {
+		t.Fatalf("second prompt = %q", sends[1].prompt)
+	}
+}
+
+func TestHandleMessage_QueuesBySharedAgentSessionID(t *testing.T) {
+	agent := &slowRecordingSendAgent{delay: 150 * time.Millisecond}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	const sharedID = "shared-agent-session"
+	sessionA := e.sessions.GetOrCreateActive("test:chat-a")
+	sessionB := e.sessions.GetOrCreateActive("test:chat-b")
+	sessionA.AgentSessionID = sharedID
+	sessionB.AgentSessionID = sharedID
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:chat-a",
+		Platform:   "test",
+		UserID:     "user-a",
+		UserName:   "Alice",
+		Content:    "from a",
+		ReplyCtx:   "ctx-a",
+	})
+	time.Sleep(20 * time.Millisecond)
+	e.handleMessage(p, &Message{
+		SessionKey: "test:chat-b",
+		Platform:   "test",
+		UserID:     "user-b",
+		UserName:   "Bob",
+		Content:    "from b",
+		ReplyCtx:   "ctx-b",
+	})
+
+	waitForCondition(t, func() bool {
+		return strings.Contains(e.renderQueueText("test:chat-a"), "from b") &&
+			strings.Contains(e.renderQueueText("test:chat-b"), "from b")
+	}, "shared queue to show queued prompt from both chats")
+
+	sends := waitForSlowRecordedSends(t, agent, 2)
+	if !strings.Contains(sends[0].prompt, "from a") || !strings.Contains(sends[1].prompt, "from b") {
+		t.Fatalf("unexpected send order: %#v", sends)
+	}
+}
+
+func TestHandleMessage_SlashCommandWithAttachmentDoesNotQueue(t *testing.T) {
+	agent := &slowRecordingSendAgent{delay: 150 * time.Millisecond}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "first",
+		ReplyCtx:   "ctx",
+	})
+	time.Sleep(20 * time.Millisecond)
+	e.handleMessage(p, &Message{
+		SessionKey: "test:user1",
+		Platform:   "test",
+		UserID:     "user1",
+		UserName:   "Alice",
+		Content:    "/quue",
+		Images:     []ImageAttachment{{MimeType: "image/png", Data: []byte("img")}},
+		ReplyCtx:   "ctx",
+	})
+
+	waitForCondition(t, func() bool {
+		return len(p.sent) > 0 && strings.Contains(p.sent[len(p.sent)-1], "not an echo-client command")
+	}, "unknown slash command reply")
+	if text := e.renderQueueText("test:user1"); strings.Contains(text, "/quue") {
+		t.Fatalf("slash command was queued: %q", text)
+	}
+}
+
+func TestQueueActionReordersAndDeletes(t *testing.T) {
+	agent := &slowRecordingSendAgent{delay: 150 * time.Millisecond}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.handleMessage(p, &Message{SessionKey: "test:user1", Platform: "test", UserID: "user1", Content: "first", ReplyCtx: "ctx"})
+	time.Sleep(20 * time.Millisecond)
+	e.handleMessage(p, &Message{SessionKey: "test:user1", Platform: "test", UserID: "user1", Content: "second", ReplyCtx: "ctx"})
+	e.handleMessage(p, &Message{SessionKey: "test:user1", Platform: "test", UserID: "user1", Content: "third", ReplyCtx: "ctx"})
+
+	waitForCondition(t, func() bool {
+		snap := e.queueSnapshotForSession("test:user1")
+		return len(snap.Items) == 2
+	}, "two queued items")
+
+	snap := e.queueSnapshotForSession("test:user1")
+	thirdID := snap.Items[1].ID
+	if notice := e.queueAction("test:user1", "up "+thirdID); notice != e.i18n.T(MsgQueueMoved) {
+		t.Fatalf("move notice = %q", notice)
+	}
+	snap = e.queueSnapshotForSession("test:user1")
+	if !strings.Contains(snap.Items[0].Message.Content, "third") {
+		t.Fatalf("queue was not reordered: %#v", snap.Items)
+	}
+	if notice := e.queueAction("test:user1", "delete "+thirdID); notice != e.i18n.T(MsgQueueDeleted) {
+		t.Fatalf("delete notice = %q", notice)
+	}
+	snap = e.queueSnapshotForSession("test:user1")
+	for _, item := range snap.Items {
+		if item.ID == thirdID {
+			t.Fatalf("deleted item still present: %#v", snap.Items)
+		}
 	}
 }
 
