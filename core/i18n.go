@@ -366,9 +366,22 @@ const (
 	MsgDeleteActiveDenied MsgKey = "delete_active_denied"
 	MsgDeleteNotSupported MsgKey = "delete_not_supported"
 
-	MsgSwitchSuccess   MsgKey = "switch_success"
-	MsgSwitchNoMatch   MsgKey = "switch_no_match"
-	MsgSwitchNoSession MsgKey = "switch_no_session"
+	MsgSwitchSuccess MsgKey = "switch_success"
+	MsgSwitchNoMatch MsgKey = "switch_no_match"
+
+	MsgAttachNotSupported   MsgKey = "attach_not_supported"
+	MsgAttachTitle          MsgKey = "attach_title"
+	MsgAttachBtnCurrent     MsgKey = "attach_btn_current"
+	MsgAttachBtnJoin        MsgKey = "attach_btn_join"
+	MsgAttachBtnCloseJoin   MsgKey = "attach_btn_close_join"
+	MsgAttachBtnForceGUI    MsgKey = "attach_btn_force_gui"
+	MsgAttachNoWorkDir      MsgKey = "attach_no_workdir"
+	MsgAttachAlreadyCurrent MsgKey = "attach_already_current"
+	MsgAttachGUIHeld        MsgKey = "attach_gui_held"
+	MsgAttachKillFailed     MsgKey = "attach_kill_failed"
+	MsgAttachSuccess        MsgKey = "attach_success"
+	MsgAttachRecentHeader   MsgKey = "attach_recent_header"
+	MsgSwitchNoSession      MsgKey = "switch_no_session"
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
@@ -2253,6 +2266,90 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 已切換到：%s（%s，%d 則訊息）",
 		LangJapanese:           "✅ 切り替え：%s（%s、%d件）",
 		LangSpanish:            "✅ Cambiado a: %s (%s, %d mensajes)",
+	},
+	MsgAttachNotSupported: {
+		LangEnglish:            "❌ This agent doesn't support cross-directory attach.",
+		LangChinese:            "❌ 当前 agent 不支持跨目录接入。",
+		LangTraditionalChinese: "❌ 當前 agent 不支援跨目錄接入。",
+		LangJapanese:           "❌ このエージェントはディレクトリ横断のアタッチに対応していません。",
+		LangSpanish:            "❌ Este agente no admite adjuntar entre directorios.",
+	},
+	MsgAttachTitle: {
+		LangEnglish:            "🔗 Attach Session",
+		LangChinese:            "🔗 接入会话",
+		LangTraditionalChinese: "🔗 接入會話",
+		LangJapanese:           "🔗 セッションをアタッチ",
+		LangSpanish:            "🔗 Adjuntar sesión",
+	},
+	MsgAttachBtnCurrent: {
+		LangEnglish:            "Current",
+		LangChinese:            "当前",
+		LangTraditionalChinese: "當前",
+		LangJapanese:           "現在",
+		LangSpanish:            "Actual",
+	},
+	MsgAttachBtnJoin: {
+		LangEnglish:            "Attach",
+		LangChinese:            "接入",
+		LangTraditionalChinese: "接入",
+		LangJapanese:           "アタッチ",
+		LangSpanish:            "Adjuntar",
+	},
+	MsgAttachBtnCloseJoin: {
+		LangEnglish:            "Close & Attach",
+		LangChinese:            "关闭并接入",
+		LangTraditionalChinese: "關閉並接入",
+		LangJapanese:           "閉じてアタッチ",
+		LangSpanish:            "Cerrar y adjuntar",
+	},
+	MsgAttachBtnForceGUI: {
+		LangEnglish:            "Force-close GUI",
+		LangChinese:            "强制关GUI并接入",
+		LangTraditionalChinese: "強制關GUI並接入",
+		LangJapanese:           "GUIを強制終了",
+		LangSpanish:            "Forzar cierre GUI",
+	},
+	MsgAttachNoWorkDir: {
+		LangEnglish:            "❌ Cannot determine the working directory of session %s.",
+		LangChinese:            "❌ 无法确定会话 %s 的工作目录。",
+		LangTraditionalChinese: "❌ 無法確定會話 %s 的工作目錄。",
+		LangJapanese:           "❌ セッション %s の作業ディレクトリを特定できません。",
+		LangSpanish:            "❌ No se puede determinar el directorio de trabajo de la sesión %s.",
+	},
+	MsgAttachAlreadyCurrent: {
+		LangEnglish:            "ℹ️ This is already the active session here.",
+		LangChinese:            "ℹ️ 这已经是当前会话了。",
+		LangTraditionalChinese: "ℹ️ 這已經是當前會話了。",
+		LangJapanese:           "ℹ️ これはすでに現在のセッションです。",
+		LangSpanish:            "ℹ️ Esta ya es la sesión activa aquí.",
+	},
+	MsgAttachGUIHeld: {
+		LangEnglish:            "⚠️ Session is held by the desktop GUI (PID %d: %s). If you can't close it manually (e.g. remote), tap [Force-close GUI].",
+		LangChinese:            "⚠️ 该会话正被桌面 GUI 占用（PID %d：%s）。若无法手动关闭（如远程），请点 [强制关GUI并接入]。",
+		LangTraditionalChinese: "⚠️ 該會話正被桌面 GUI 佔用（PID %d：%s）。若無法手動關閉（如遠端），請點 [強制關GUI並接入]。",
+		LangJapanese:           "⚠️ このセッションはデスクトップGUI（PID %d：%s）が使用中です。手動で閉じられない場合（リモート等）は [GUIを強制終了] を押してください。",
+		LangSpanish:            "⚠️ La sesión está en uso por la GUI de escritorio (PID %d: %s). Si no puedes cerrarla manualmente (p. ej. remoto), pulsa [Forzar cierre GUI].",
+	},
+	MsgAttachKillFailed: {
+		LangEnglish:            "❌ Failed to close process %d: %v",
+		LangChinese:            "❌ 关闭进程 %d 失败：%v",
+		LangTraditionalChinese: "❌ 關閉進程 %d 失敗：%v",
+		LangJapanese:           "❌ プロセス %d の終了に失敗しました：%v",
+		LangSpanish:            "❌ Error al cerrar el proceso %d: %v",
+	},
+	MsgAttachSuccess: {
+		LangEnglish:            "✅ Attached: %s (%s)\n📂 work_dir → %s",
+		LangChinese:            "✅ 已接入：%s（%s）\n📂 工作目录 → %s",
+		LangTraditionalChinese: "✅ 已接入：%s（%s）\n📂 工作目錄 → %s",
+		LangJapanese:           "✅ アタッチしました：%s（%s）\n📂 作業ディレクトリ → %s",
+		LangSpanish:            "✅ Adjuntado: %s (%s)\n📂 work_dir → %s",
+	},
+	MsgAttachRecentHeader: {
+		LangEnglish:            "🕘 Recent context:",
+		LangChinese:            "🕘 最近上下文：",
+		LangTraditionalChinese: "🕘 最近上下文：",
+		LangJapanese:           "🕘 最近のコンテキスト：",
+		LangSpanish:            "🕘 Contexto reciente:",
 	},
 	MsgSwitchNoMatch: {
 		LangEnglish:            "❌ No session matching %q",

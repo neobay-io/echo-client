@@ -254,7 +254,10 @@ type HistoryEntry struct {
 type AgentSessionInfo struct {
 	ID           string
 	Summary      string
+	Title        string // custom-title recorded in the transcript, if any
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string
+	WorkDir      string // absolute cwd this session belongs to (read from transcript)
+	Path         string // absolute path to the transcript .jsonl (set by ListAllSessions)
 }

@@ -3154,6 +3154,7 @@ var builtinCommands = []struct {
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
+	{[]string{"attach"}, "attach"},
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
@@ -3327,6 +3328,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdShell(p, msg, raw)
 	case "dir":
 		e.cmdDir(p, msg, args)
+	case "attach":
+		e.cmdAttach(p, msg, args)
 	case "tts":
 		e.cmdTTS(p, msg, args)
 	default:
@@ -3557,6 +3560,311 @@ func (e *Engine) renderSessionCard(sessionKey string, page int, notice string) *
 	}
 	cb.Buttons(backBtn)
 	return cb.Build()
+}
+
+// cmdAttach lists local Claude Code sessions across all directories and lets the
+// user take one over. With no args it renders a picker (card on Feishu, text
+// elsewhere); "/attach <id-prefix> [force]" attaches directly by id.
+func (e *Engine) cmdAttach(p Platform, msg *Message, args []string) {
+	if _, ok := e.agent.(AllSessionsLister); !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAttachNotSupported))
+		return
+	}
+
+	// Direct attach when the first arg is a non-numeric id/prefix/keyword.
+	if len(args) > 0 {
+		if _, err := strconv.Atoi(args[0]); err != nil {
+			force := len(args) > 1 && strings.EqualFold(args[len(args)-1], "force")
+			id := e.resolveAttachID(args[0])
+			if id == "" {
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), args[0]))
+				return
+			}
+			e.reply(p, msg.ReplyCtx, e.attachSessionByID(msg.SessionKey, id, force))
+			return
+		}
+	}
+
+	// Otherwise an optional numeric arg is the page number.
+	page := 1
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+			page = n
+		}
+	}
+	card := e.renderAttachCard(msg.SessionKey, page, "")
+	if supportsCards(p) {
+		e.replyWithCard(p, msg.ReplyCtx, card)
+		return
+	}
+	e.reply(p, msg.ReplyCtx, card.RenderText())
+}
+
+// resolveAttachID maps a user query (id prefix, name, or summary substring) to a
+// full session id across all directories, or "" if none matched.
+func (e *Engine) resolveAttachID(query string) string {
+	lister, ok := e.agent.(AllSessionsLister)
+	if !ok {
+		return ""
+	}
+	all, err := lister.ListAllSessions(e.ctx)
+	if err != nil {
+		return ""
+	}
+	if m := e.matchSession(all, query); m != nil {
+		return m.ID
+	}
+	return ""
+}
+
+// renderAttachCard renders the cross-directory session picker with per-row
+// status (free / held by CLI / held by GUI / current) and the matching buttons.
+func (e *Engine) renderAttachCard(sessionKey string, page int, notice string) *Card {
+	lister, ok := e.agent.(AllSessionsLister)
+	if !ok {
+		return e.simpleCard("Attach", "orange", e.i18n.T(MsgAttachNotSupported))
+	}
+	allSessions, err := lister.ListAllSessions(e.ctx)
+	if err != nil {
+		return e.simpleCard("Attach", "orange", fmt.Sprintf(e.i18n.T(MsgListError), err))
+	}
+	if len(allSessions) == 0 {
+		return e.simpleCard("Attach", "blue", e.i18n.T(MsgListEmpty))
+	}
+
+	total := len(allSessions)
+	totalPages := (total + listPageSize - 1) / listPageSize
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * listPageSize
+	end := start + listPageSize
+	if end > total {
+		end = total
+	}
+
+	activeAgentID := e.sessions.GetOrCreateActive(sessionKey).AgentSessionID
+	holders := scanActiveHolders()
+
+	title := e.i18n.T(MsgAttachTitle)
+	if totalPages > 1 {
+		title = fmt.Sprintf("%s (%d/%d)", title, page, totalPages)
+	}
+	cb := NewCard().Title(title, "blue")
+	if notice != "" {
+		cb.Note(notice)
+	}
+
+	for i := start; i < end; i++ {
+		s := allSessions[i]
+		holder, held := holders[s.ID]
+		marker, btns := e.attachRow(s, activeAgentID, holder, held, page)
+		cb.Markdown(fmt.Sprintf("%s **%d.** %s\n`%s` · %s · %s",
+			marker, i+1, attachDisplayName(s), shortID(s.ID), shortenHome(s.WorkDir),
+			s.ModifiedAt.Format("01-02 15:04")))
+		if len(btns) > 0 {
+			cb.ButtonsEqual(btns...)
+		}
+	}
+
+	if totalPages > 1 {
+		var nav []CardButton
+		if page > 1 {
+			nav = append(nav, DefaultBtn("Prev", fmt.Sprintf("nav:/attach %d", page-1)))
+		}
+		if page < totalPages {
+			nav = append(nav, DefaultBtn("Next", fmt.Sprintf("nav:/attach %d", page+1)))
+		}
+		if len(nav) > 0 {
+			cb.ButtonsEqual(nav...)
+		}
+	}
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
+}
+
+// attachRow picks the status marker and buttons for one session row.
+func (e *Engine) attachRow(s AgentSessionInfo, activeAgentID string, holder sessionHolder, held bool, page int) (string, []CardButton) {
+	switch {
+	case s.ID == activeAgentID:
+		return "▶", []CardButton{PrimaryBtn(e.i18n.T(MsgAttachBtnCurrent), fmt.Sprintf("nav:/attach %d", page))}
+	case held && holder.IsGUI:
+		return "🔴", []CardButton{
+			DefaultBtn(e.i18n.T(MsgAttachBtnJoin), fmt.Sprintf("act:/attach do %s %d", s.ID, page)),
+			DangerBtn(e.i18n.T(MsgAttachBtnForceGUI), fmt.Sprintf("act:/attach force %s %d", s.ID, page)),
+		}
+	case held:
+		return "🟡", []CardButton{DefaultBtn(e.i18n.T(MsgAttachBtnCloseJoin), fmt.Sprintf("act:/attach do %s %d", s.ID, page))}
+	default:
+		return "🟢", []CardButton{PrimaryBtn(e.i18n.T(MsgAttachBtnJoin), fmt.Sprintf("act:/attach do %s %d", s.ID, page))}
+	}
+}
+
+// attachSessionByID takes over a session: handle any live holder (kill a single
+// process; warn on the GUI unless force), point work_dir at the session's cwd,
+// bind the session, and surface the last exchange for context.
+func (e *Engine) attachSessionByID(sessionKey, id string, force bool) string {
+	lister, ok := e.agent.(AllSessionsLister)
+	if !ok {
+		return e.i18n.T(MsgAttachNotSupported)
+	}
+	switcher, ok := e.agent.(WorkDirSwitcher)
+	if !ok {
+		return e.i18n.T(MsgDirNotSupported)
+	}
+	all, err := lister.ListAllSessions(e.ctx)
+	if err != nil {
+		return fmt.Sprintf(e.i18n.T(MsgListError), err)
+	}
+	var target *AgentSessionInfo
+	for i := range all {
+		if all[i].ID == id {
+			target = &all[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), id)
+	}
+	if target.WorkDir == "" {
+		return e.i18n.Tf(MsgAttachNoWorkDir, shortID(id))
+	}
+	if e.sessions.GetOrCreateActive(sessionKey).AgentSessionID == id {
+		return e.i18n.T(MsgAttachAlreadyCurrent)
+	}
+
+	// Resolve any live process holding this transcript and act per policy.
+	if holder := holderForSession(id, target.Path, scanActiveHolders()); holder != nil {
+		if holder.IsGUI && !force {
+			return e.i18n.Tf(MsgAttachGUIHeld, holder.PID, procShort(holder.Command))
+		}
+		if err := killHolder(*holder, force); err != nil {
+			return e.i18n.Tf(MsgAttachKillFailed, holder.PID, err)
+		}
+		waitProcessGone(holder.PID, 2*time.Second)
+	}
+
+	// Take over: this bot's work_dir moves to the session's cwd (project-global).
+	switcher.SetWorkDir(target.WorkDir)
+	e.cleanupInteractiveState(sessionKey)
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	session.AgentSessionID = id
+	session.Name = attachDisplayName(*target)
+	session.ClearHistory()
+	e.sessions.Save()
+
+	reply := e.i18n.Tf(MsgAttachSuccess, attachDisplayName(*target), shortID(id), shortenHome(target.WorkDir))
+	if recent := e.recentContext(id); recent != "" {
+		reply += "\n\n" + recent
+	}
+	return reply
+}
+
+// recentContext returns the last user question and assistant reply of a session,
+// best-effort. Call after SetWorkDir so the history provider looks in the right dir.
+func (e *Engine) recentContext(id string) string {
+	hp, ok := e.agent.(HistoryProvider)
+	if !ok {
+		return ""
+	}
+	entries, err := hp.GetSessionHistory(e.ctx, id, 8)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	var lastUser, lastAsst string
+	for _, en := range entries {
+		switch en.Role {
+		case "user":
+			lastUser = en.Content
+		case "assistant":
+			lastAsst = en.Content
+		}
+	}
+	var b strings.Builder
+	b.WriteString(e.i18n.T(MsgAttachRecentHeader))
+	if lastUser != "" {
+		b.WriteString("\n**Q:** " + truncateLine(lastUser, 200))
+	}
+	if lastAsst != "" {
+		b.WriteString("\n**A:** " + truncateLine(lastAsst, 200))
+	}
+	return b.String()
+}
+
+// attachDisplayName prefers the session's custom title, then its summary.
+func attachDisplayName(s AgentSessionInfo) string {
+	name := s.Title
+	if name == "" {
+		name = s.Summary
+	}
+	name = strings.Join(strings.Fields(strings.ReplaceAll(name, "\n", " ")), " ")
+	if name == "" {
+		name = "(empty)"
+	}
+	if len([]rune(name)) > 44 {
+		name = string([]rune(name)[:44]) + "…"
+	}
+	return name
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+func shortenHome(path string) string {
+	if path == "" {
+		return "?"
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(path, home) {
+		return "~" + path[len(home):]
+	}
+	return path
+}
+
+func procShort(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return "?"
+	}
+	if len([]rune(cmd)) > 60 {
+		return string([]rune(cmd)[:60]) + "…"
+	}
+	return cmd
+}
+
+func truncateLine(s string, max int) string {
+	s = strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ")), " ")
+	if len([]rune(s)) > max {
+		return string([]rune(s)[:max]) + "…"
+	}
+	return s
+}
+
+// parseAttachCardPage extracts the page number from an attach card action,
+// accepting "<page>" as well as "do <id> <page>" / "force <id> <page>".
+func parseAttachCardPage(args string) int {
+	fields := strings.Fields(strings.TrimSpace(args))
+	if len(fields) == 0 {
+		return 1
+	}
+	if len(fields) == 1 {
+		if n, err := strconv.Atoi(fields[0]); err == nil && n > 0 {
+			return n
+		}
+		return 1
+	}
+	if len(fields) >= 3 {
+		if n, err := strconv.Atoi(fields[2]); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
 }
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
@@ -5592,6 +5900,8 @@ func (e *Engine) handleCardNav(action, sessionKey string) *Card {
 		return e.renderQueueCard(sessionKey, notice)
 	case "/sessions":
 		return e.renderSessionCard(sessionKey, parseSessionCardPage(args), notice)
+	case "/attach":
+		return e.renderAttachCard(sessionKey, parseAttachCardPage(args), notice)
 	case "/review":
 		if strings.HasPrefix(strings.TrimSpace(args), "start ") {
 			return e.simpleCard(e.i18n.T(MsgReviewActionsTitle), "blue", notice)
@@ -5758,6 +6068,18 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) string {
 			return e.switchSessionByID(sessionKey, id)
 		case "delete":
 			return e.deleteSessionByID(sessionKey, id)
+		}
+	case "/attach":
+		fields := strings.Fields(args)
+		if len(fields) < 2 {
+			return ""
+		}
+		sub, id := fields[0], fields[1]
+		switch sub {
+		case "do":
+			return e.attachSessionByID(sessionKey, id, false)
+		case "force":
+			return e.attachSessionByID(sessionKey, id, true)
 		}
 	}
 	return ""

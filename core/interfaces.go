@@ -257,6 +257,13 @@ type HistoryProvider interface {
 	GetSessionHistory(ctx context.Context, sessionID string, limit int) ([]HistoryEntry, error)
 }
 
+// AllSessionsLister is an optional interface for agents that can enumerate
+// sessions across all working directories, not just the current work_dir.
+// Used by /attach to surface local sessions started elsewhere (GUI, CLI, SDK).
+type AllSessionsLister interface {
+	ListAllSessions(ctx context.Context) ([]AgentSessionInfo, error)
+}
+
 // ProviderConfig holds API provider settings for an agent.
 type ProviderConfig struct {
 	Name     string

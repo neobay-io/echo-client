@@ -346,6 +346,63 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 	return sessions, nil
 }
 
+// ListAllSessions enumerates Claude Code sessions across every project
+// directory under ~/.claude/projects, not just the current work_dir. Each
+// session's real cwd is read from the transcript (directory names are a lossy
+// encoding and cannot be reversed reliably). Implements core.AllSessionsLister.
+func (a *Agent) ListAllSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
+	}
+	projectsRoot := filepath.Join(homeDir, ".claude", "projects")
+	dirs, err := os.ReadDir(projectsRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("claudecode: read projects root: %w", err)
+	}
+
+	var sessions []core.AgentSessionInfo
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		projectDir := filepath.Join(projectsRoot, d.Name())
+		entries, err := os.ReadDir(projectDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			path := filepath.Join(projectDir, name)
+			cwd, title, summary, count := scanSessionDetail(path)
+			sessions = append(sessions, core.AgentSessionInfo{
+				ID:           strings.TrimSuffix(name, ".jsonl"),
+				Summary:      summary,
+				Title:        title,
+				MessageCount: count,
+				ModifiedAt:   info.ModTime(),
+				WorkDir:      cwd,
+				Path:         path,
+			})
+		}
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
+	})
+	return sessions, nil
+}
+
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -404,6 +461,66 @@ func scanSessionMeta(path string) (string, int) {
 		summary = string([]rune(summary)[:40]) + "..."
 	}
 	return summary, count
+}
+
+// scanSessionDetail reads a single transcript to extract the session's cwd,
+// custom title (if the user set one), a summary (first real user message), and
+// the user/assistant message count. Uses a bufio.Reader so transcript lines
+// larger than a Scanner token limit (e.g. embedded images) don't truncate the scan.
+func scanSessionDetail(path string) (cwd, title, summary string, count int) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	reader := bufio.NewReader(f)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			var raw struct {
+				Type        string `json:"type"`
+				Cwd         string `json:"cwd"`
+				CustomTitle string `json:"customTitle"`
+				Message     struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(line, &raw) == nil {
+				if cwd == "" && raw.Cwd != "" {
+					cwd = raw.Cwd
+				}
+				if raw.Type == "custom-title" && raw.CustomTitle != "" {
+					title = raw.CustomTitle // last title wins
+				}
+				if raw.Type == "user" || raw.Type == "assistant" {
+					count++
+					if summary == "" && raw.Type == "user" {
+						if t := strings.TrimSpace(stripXMLTags(extractTextContent(raw.Message.Content))); t != "" {
+							summary = t
+						}
+					}
+				}
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	summary = truncateRunes(summary, 40)
+	title = truncateRunes(title, 60)
+	return
+}
+
+// truncateRunes trims s and caps it to max runes, appending an ellipsis if cut.
+func truncateRunes(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) > max {
+		return string([]rune(s)[:max]) + "..."
+	}
+	return s
 }
 
 var xmlTagRe = regexp.MustCompile(`<[^>]+>`)
