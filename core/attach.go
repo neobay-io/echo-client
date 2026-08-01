@@ -111,6 +111,16 @@ func killHolder(h sessionHolder, force bool) error {
 	return p.Signal(syscall.SIGTERM)
 }
 
+// forceKill sends SIGKILL to pid, used to escalate when a SIGTERM'd holder
+// refuses to exit within the grace period.
+func forceKill(pid int) error {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return p.Signal(syscall.SIGKILL)
+}
+
 // processAlive reports whether pid refers to a live process (signal 0 probe).
 func processAlive(pid int) bool {
 	if pid <= 0 {

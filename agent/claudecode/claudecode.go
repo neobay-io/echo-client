@@ -350,7 +350,7 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 // directory under ~/.claude/projects, not just the current work_dir. Each
 // session's real cwd is read from the transcript (directory names are a lossy
 // encoding and cannot be reversed reliably). Implements core.AllSessionsLister.
-func (a *Agent) ListAllSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
+func (a *Agent) ListAllSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: cannot determine home dir: %w", err)
@@ -366,6 +366,9 @@ func (a *Agent) ListAllSessions(_ context.Context) ([]core.AgentSessionInfo, err
 
 	var sessions []core.AgentSessionInfo
 	for _, d := range dirs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !d.IsDir() {
 			continue
 		}
@@ -384,7 +387,7 @@ func (a *Agent) ListAllSessions(_ context.Context) ([]core.AgentSessionInfo, err
 				continue
 			}
 			path := filepath.Join(projectDir, name)
-			cwd, title, summary, count := scanSessionDetail(path)
+			cwd, title, summary, count := scanSessionDetail(ctx, path)
 			sessions = append(sessions, core.AgentSessionInfo{
 				ID:           strings.TrimSuffix(name, ".jsonl"),
 				Summary:      summary,
@@ -467,7 +470,7 @@ func scanSessionMeta(path string) (string, int) {
 // custom title (if the user set one), a summary (first real user message), and
 // the user/assistant message count. Uses a bufio.Reader so transcript lines
 // larger than a Scanner token limit (e.g. embedded images) don't truncate the scan.
-func scanSessionDetail(path string) (cwd, title, summary string, count int) {
+func scanSessionDetail(ctx context.Context, path string) (cwd, title, summary string, count int) {
 	f, err := os.Open(path)
 	if err != nil {
 		return
@@ -476,9 +479,17 @@ func scanSessionDetail(path string) (cwd, title, summary string, count int) {
 		_ = f.Close()
 	}()
 
+	// Cap how much of a transcript we read: cwd, custom-title and the first user
+	// message all appear early, so a few MiB is plenty, while huge image-heavy or
+	// very long transcripts no longer block the picker. count is approximate past
+	// the cap, which is fine for a session list.
+	const maxScanBytes = 4 << 20
 	reader := bufio.NewReader(f)
+	var read, lineNo int
 	for {
 		line, readErr := reader.ReadBytes('\n')
+		read += len(line)
+		lineNo++
 		if len(line) > 0 {
 			var raw struct {
 				Type        string `json:"type"`
@@ -506,6 +517,12 @@ func scanSessionDetail(path string) (cwd, title, summary string, count int) {
 			}
 		}
 		if readErr != nil {
+			break
+		}
+		if read >= maxScanBytes {
+			break
+		}
+		if lineNo%512 == 0 && ctx.Err() != nil {
 			break
 		}
 	}

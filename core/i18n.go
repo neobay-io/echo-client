@@ -381,6 +381,9 @@ const (
 	MsgAttachKillFailed     MsgKey = "attach_kill_failed"
 	MsgAttachSuccess        MsgKey = "attach_success"
 	MsgAttachRecentHeader   MsgKey = "attach_recent_header"
+	MsgAttachHeldByChat     MsgKey = "attach_held_by_chat"
+	MsgAttachHolderAlive    MsgKey = "attach_holder_alive"
+	MsgAttachAmbiguous      MsgKey = "attach_ambiguous"
 	MsgSwitchNoSession      MsgKey = "switch_no_session"
 
 	MsgCommandTimeout MsgKey = "command_timeout"
@@ -2350,6 +2353,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🕘 最近上下文：",
 		LangJapanese:           "🕘 最近のコンテキスト：",
 		LangSpanish:            "🕘 Contexto reciente:",
+	},
+	MsgAttachHeldByChat: {
+		LangEnglish:            "❌ Session %s is in use by another chat in this bot; refusing to take it over (that would break the other chat).",
+		LangChinese:            "❌ 会话 %s 正被本机器人的另一个对话使用，拒绝接管（否则会打断那个对话）。",
+		LangTraditionalChinese: "❌ 會話 %s 正被本機器人的另一個對話使用，拒絕接管（否則會打斷那個對話）。",
+		LangJapanese:           "❌ セッション %s は同じBotの別のチャットで使用中です。乗っ取りを拒否しました（そのチャットが壊れるため）。",
+		LangSpanish:            "❌ La sesión %s está en uso por otro chat de este bot; no se toma el control (rompería ese chat).",
+	},
+	MsgAttachHolderAlive: {
+		LangEnglish:            "❌ Process %d didn't exit after the close signal; aborting attach to avoid corrupting the transcript. Close it manually and retry, or use force.",
+		LangChinese:            "❌ 进程 %d 在关闭信号后仍未退出；为避免损坏会话记录，已中止接入。请手动关闭后重试，或加 force。",
+		LangTraditionalChinese: "❌ 進程 %d 在關閉信號後仍未退出；為避免損壞會話記錄，已中止接入。請手動關閉後重試，或加 force。",
+		LangJapanese:           "❌ プロセス %d は終了シグナル後も終了しませんでした。記録の破損を避けるためアタッチを中止しました。手動で終了して再試行するか、force を使用してください。",
+		LangSpanish:            "❌ El proceso %d no terminó tras la señal de cierre; se cancela el adjuntado para no corromper la transcripción. Ciérralo manualmente y reintenta, o usa force.",
+	},
+	MsgAttachAmbiguous: {
+		LangEnglish:            "❌ %q matches multiple sessions; use a longer id prefix (attach won't guess when it might kill a process).",
+		LangChinese:            "❌ %q 匹配到多个会话；请用更长的 id 前缀（接入可能会杀进程，故不做猜测）。",
+		LangTraditionalChinese: "❌ %q 匹配到多個會話；請用更長的 id 前綴（接入可能會殺進程，故不做猜測）。",
+		LangJapanese:           "❌ %q は複数のセッションに一致します。より長いID接頭辞を指定してください（アタッチはプロセスを終了する可能性があるため推測しません）。",
+		LangSpanish:            "❌ %q coincide con varias sesiones; usa un prefijo de id más largo (attach no adivina cuando podría matar un proceso).",
 	},
 	MsgSwitchNoMatch: {
 		LangEnglish:            "❌ No session matching %q",

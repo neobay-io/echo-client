@@ -3571,21 +3571,27 @@ func (e *Engine) cmdAttach(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	// Direct attach when the first arg is a non-numeric id/prefix/keyword.
+	// Try the first arg as an id / prefix / name — including numeric prefixes —
+	// before falling back to treating a bare number as a page.
 	if len(args) > 0 {
-		if _, err := strconv.Atoi(args[0]); err != nil {
+		id, ambiguous := e.resolveAttachID(args[0])
+		if ambiguous {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAttachAmbiguous, args[0]))
+			return
+		}
+		if id != "" {
 			force := len(args) > 1 && strings.EqualFold(args[len(args)-1], "force")
-			id := e.resolveAttachID(args[0])
-			if id == "" {
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), args[0]))
-				return
-			}
 			e.reply(p, msg.ReplyCtx, e.attachSessionByID(msg.SessionKey, id, force))
+			return
+		}
+		// A non-numeric query that matched nothing is an error, not a page.
+		if _, err := strconv.Atoi(args[0]); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), args[0]))
 			return
 		}
 	}
 
-	// Otherwise an optional numeric arg is the page number.
+	// A bare number that isn't an id prefix is the page number.
 	page := 1
 	if len(args) > 0 {
 		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
@@ -3602,19 +3608,43 @@ func (e *Engine) cmdAttach(p Platform, msg *Message, args []string) {
 
 // resolveAttachID maps a user query (id prefix, name, or summary substring) to a
 // full session id across all directories, or "" if none matched.
-func (e *Engine) resolveAttachID(query string) string {
+// resolveAttachID maps a user query to a full session id across all directories.
+// It returns (id, ambiguous). Because attach is destructive (it may kill the
+// holder of the target transcript), an id prefix that matches more than one
+// session is reported as ambiguous and rejected instead of silently picking one.
+func (e *Engine) resolveAttachID(query string) (id string, ambiguous bool) {
 	lister, ok := e.agent.(AllSessionsLister)
 	if !ok {
-		return ""
+		return "", false
 	}
 	all, err := lister.ListAllSessions(e.ctx)
 	if err != nil {
-		return ""
+		return "", false
 	}
+	// Exact id wins outright.
+	for i := range all {
+		if all[i].ID == query {
+			return all[i].ID, false
+		}
+	}
+	// An id prefix must be unique to be usable.
+	hit, n := "", 0
+	for i := range all {
+		if strings.HasPrefix(all[i].ID, query) {
+			hit, n = all[i].ID, n+1
+		}
+	}
+	if n == 1 {
+		return hit, false
+	}
+	if n > 1 {
+		return "", true
+	}
+	// Fall back to name / summary match (the user's explicit label, not a prefix).
 	if m := e.matchSession(all, query); m != nil {
-		return m.ID
+		return m.ID, false
 	}
-	return ""
+	return "", false
 }
 
 // renderAttachCard renders the cross-directory session picker with per-row
@@ -3736,7 +3766,13 @@ func (e *Engine) attachSessionByID(sessionKey, id string, force bool) string {
 		return e.i18n.T(MsgAttachAlreadyCurrent)
 	}
 
-	// Resolve any live process holding this transcript and act per policy.
+	// High1: never take over a transcript that another live chat in THIS bot is
+	// actively using — killing its holder would break that chat's running turn.
+	if e.otherChatHolding(id, sessionKey) != "" {
+		return e.i18n.Tf(MsgAttachHeldByChat, shortID(id))
+	}
+
+	// Resolve any external live process holding this transcript and act per policy.
 	if holder := holderForSession(id, target.Path, scanActiveHolders()); holder != nil {
 		if holder.IsGUI && !force {
 			return e.i18n.Tf(MsgAttachGUIHeld, holder.PID, procShort(holder.Command))
@@ -3744,7 +3780,17 @@ func (e *Engine) attachSessionByID(sessionKey, id string, force bool) string {
 		if err := killHolder(*holder, force); err != nil {
 			return e.i18n.Tf(MsgAttachKillFailed, holder.PID, err)
 		}
-		waitProcessGone(holder.PID, 2*time.Second)
+		// High2: don't take over until the holder actually released the transcript,
+		// or two processes could write the same jsonl concurrently.
+		if !waitProcessGone(holder.PID, 3*time.Second) {
+			if !force {
+				return e.i18n.Tf(MsgAttachHolderAlive, holder.PID)
+			}
+			_ = forceKill(holder.PID) // force: escalate to SIGKILL, then wait once more
+			if !waitProcessGone(holder.PID, 2*time.Second) {
+				return e.i18n.Tf(MsgAttachHolderAlive, holder.PID)
+			}
+		}
 	}
 
 	// Take over: this bot's work_dir moves to the session's cwd (project-global).
@@ -3761,6 +3807,27 @@ func (e *Engine) attachSessionByID(sessionKey, id string, force bool) string {
 		reply += "\n\n" + recent
 	}
 	return reply
+}
+
+// otherChatHolding reports the sessionKey of another live interactive chat in
+// this engine whose agent session currently is agentSessionID, or "" if none.
+// Attach uses it to refuse taking over (and killing the holder of) a transcript
+// that another chat in this same bot is actively using.
+func (e *Engine) otherChatHolding(agentSessionID, exceptKey string) string {
+	if agentSessionID == "" {
+		return ""
+	}
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	for key, st := range e.interactiveStates {
+		if key == exceptKey || st == nil || st.agentSession == nil {
+			continue
+		}
+		if st.agentSession.Alive() && st.agentSession.CurrentSessionID() == agentSessionID {
+			return key
+		}
+	}
+	return ""
 }
 
 // recentContext returns the last user question and assistant reply of a session,

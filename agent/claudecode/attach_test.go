@@ -22,7 +22,7 @@ func TestScanSessionDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cwd, title, summary, count := scanSessionDetail(path)
+	cwd, title, summary, count := scanSessionDetail(context.Background(), path)
 	if cwd != "/Users/e/Projects/foo" {
 		t.Errorf("cwd = %q, want /Users/e/Projects/foo", cwd)
 	}
@@ -45,7 +45,7 @@ func TestScanSessionDetailArrayContentSummary(t *testing.T) {
 	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, summary, _ := scanSessionDetail(path)
+	_, _, summary, _ := scanSessionDetail(context.Background(), path)
 	if summary != "array question" {
 		t.Errorf("summary = %q, want array question", summary)
 	}
@@ -108,5 +108,26 @@ func TestListAllSessionsNoProjectsDir(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %d sessions, want 0", len(got))
+	}
+}
+
+// Medium5: a cancelled context must abort the (potentially slow) scan instead of
+// walking every project dir and reading every transcript.
+func TestListAllSessionsRespectsCancel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, ".claude", "projects", "-Users-e-Projects-foo")
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"user","cwd":"/w","message":{"role":"user","content":"hi"}}`
+	if err := os.WriteFile(filepath.Join(p, "aaaa1111-0000-0000-0000-000000000000.jsonl"), []byte(body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before the walk starts
+	a := &Agent{workDir: "/tmp"}
+	if _, err := a.ListAllSessions(ctx); err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
 	}
 }

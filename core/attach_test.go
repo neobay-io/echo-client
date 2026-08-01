@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // attachTestAgent implements Agent plus the optional AllSessionsLister,
@@ -191,5 +192,97 @@ func TestShortID(t *testing.T) {
 	}
 	if got := shortID("short"); got != "short" {
 		t.Errorf("got %q, want short", got)
+	}
+}
+
+// heldSession is a minimal AgentSession whose liveness and session id are
+// configurable, for testing attach's self-exclusion (High1).
+type heldSession struct {
+	sid   string
+	alive bool
+}
+
+func (h *heldSession) Send(string, []ImageAttachment, []FileAttachment) error { return nil }
+func (h *heldSession) RespondPermission(string, PermissionResult) error       { return nil }
+func (h *heldSession) Events() <-chan Event                                   { return nil }
+func (h *heldSession) CurrentSessionID() string                               { return h.sid }
+func (h *heldSession) Alive() bool                                            { return h.alive }
+func (h *heldSession) Close() error                                           { return nil }
+
+// High1: otherChatHolding must find a live sibling chat on the same session,
+// skip the querying chat, dead sessions, and the empty id.
+func TestOtherChatHolding(t *testing.T) {
+	e := newAttachEngine(t, &attachTestAgent{})
+	e.interactiveStates["other:chat"] = &interactiveState{agentSession: &heldSession{sid: "target-id", alive: true}}
+	e.interactiveStates["dead:chat"] = &interactiveState{agentSession: &heldSession{sid: "dead-id", alive: false}}
+
+	if got := e.otherChatHolding("target-id", "me:chat"); got != "other:chat" {
+		t.Errorf("otherChatHolding = %q, want other:chat", got)
+	}
+	if got := e.otherChatHolding("target-id", "other:chat"); got != "" {
+		t.Errorf("otherChatHolding must exclude exceptKey, got %q", got)
+	}
+	if got := e.otherChatHolding("dead-id", "me:chat"); got != "" {
+		t.Errorf("dead (not Alive) session must not hold, got %q", got)
+	}
+	if got := e.otherChatHolding("", "me:chat"); got != "" {
+		t.Errorf("empty id must not hold, got %q", got)
+	}
+}
+
+// High1: attach must refuse (and not switch work_dir / bind) when another live
+// chat in this bot is using the target session.
+func TestAttachSessionByID_HeldByOtherChat(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	wd := t.TempDir()
+	a := &attachTestAgent{all: []AgentSessionInfo{{ID: "id1", WorkDir: wd, Path: filepath.Join(t.TempDir(), "nope.jsonl")}}}
+	e := newAttachEngine(t, a)
+	e.interactiveStates["other:u"] = &interactiveState{agentSession: &heldSession{sid: "id1", alive: true}}
+
+	got := e.attachSessionByID("test:u", "id1", false)
+	if !strings.Contains(got, "another chat") {
+		t.Errorf("expected held-by-chat refusal, got %q", got)
+	}
+	if a.GetWorkDir() == wd {
+		t.Error("work_dir must not switch when attach is refused")
+	}
+	if bound := e.sessions.GetOrCreateActive("test:u").AgentSessionID; bound == "id1" {
+		t.Error("session must not bind when attach is refused")
+	}
+}
+
+// High2: waitProcessGone reports a dead pid gone at once and a live pid still
+// present after the timeout.
+func TestWaitProcessGone(t *testing.T) {
+	if !waitProcessGone(999999999, 500*time.Millisecond) {
+		t.Error("nonexistent pid should be reported gone")
+	}
+	if waitProcessGone(os.Getpid(), 200*time.Millisecond) {
+		t.Error("live process should not be reported gone within timeout")
+	}
+}
+
+// Medium4: an id prefix matching more than one session is ambiguous and refused;
+// a unique prefix or exact id resolves; no match is empty (not ambiguous).
+func TestResolveAttachID(t *testing.T) {
+	a := &attachTestAgent{all: []AgentSessionInfo{
+		{ID: "abc11111-0000-0000-0000-000000000000"},
+		{ID: "abc22222-0000-0000-0000-000000000000"},
+		{ID: "xyz99999-0000-0000-0000-000000000000"},
+	}}
+	e := newAttachEngine(t, a)
+
+	if id, ambiguous := e.resolveAttachID("abc"); !ambiguous || id != "" {
+		t.Errorf("resolveAttachID(abc) = (%q,%v), want ambiguous", id, ambiguous)
+	}
+	if id, ambiguous := e.resolveAttachID("xyz"); ambiguous || id != "xyz99999-0000-0000-0000-000000000000" {
+		t.Errorf("resolveAttachID(xyz) = (%q,%v), want unique xyz", id, ambiguous)
+	}
+	full := "abc11111-0000-0000-0000-000000000000"
+	if id, ambiguous := e.resolveAttachID(full); ambiguous || id != full {
+		t.Errorf("resolveAttachID(exact) = (%q,%v), want exact", id, ambiguous)
+	}
+	if id, ambiguous := e.resolveAttachID("zzz"); ambiguous || id != "" {
+		t.Errorf("resolveAttachID(zzz) = (%q,%v), want empty", id, ambiguous)
 	}
 }
