@@ -883,6 +883,23 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 // records the real result).
 var errCronEnqueued = fmt.Errorf("cron run enqueued")
 
+// isResumeFailure reports whether err looks like a failed attempt to resume a
+// stale/deleted agent session (as opposed to a transient runtime error), so a
+// cron job can drop its bound id and start fresh next run instead of failing
+// forever.
+func isResumeFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "resolve rollout") ||
+		strings.Contains(s, "rollout path") ||
+		strings.Contains(s, "does not exist") ||
+		strings.Contains(s, "no conversation found") ||
+		strings.Contains(s, "session not found") ||
+		strings.Contains(s, "failed to resume")
+}
+
 // runCronIsolatedTurn runs one cron turn on the job's OWN isolated agent session
 // — never the user's active session or live process. It resumes the job's
 // accumulated agent_session_id (unless new_per_run), persists the forked id so
@@ -922,11 +939,31 @@ func (e *Engine) runCronIsolatedTurn(ctx context.Context, jobID string, job *Cro
 		prompt = appendLoopPausePrimitive(prompt)
 	}
 
+	// Fix1: serialize on the resumed agent session id, same as the interactive
+	// path (lockAgentSessionTurn). Without this two cron runs (or a cron and an
+	// attached chat) bound to the same id could concurrently resume/write the
+	// same backend transcript.
+	if resumeID != "" {
+		key, lock := e.retainAgentSessionTurnLock(e.agent.Name(), resumeID)
+		release, lockErr := e.waitAgentSessionTurnLock(ctx, key, lock)
+		if lockErr != nil {
+			return lockErr
+		}
+		defer release()
+	}
+
 	finalID, output, runErr := e.runIsolatedCronTurn(ctx, syntheticKey, resumeID, prompt, e.sessionEnv(syntheticKey))
 
-	// Persist the forked id so the cron's private context lineage accumulates.
-	if !job.UsesNewSessionPerRun() && strings.TrimSpace(finalID) != "" && e.cronScheduler != nil {
-		e.cronScheduler.Store().Update(jobID, "agent_session_id", finalID)
+	if !job.UsesNewSessionPerRun() && e.cronScheduler != nil {
+		if runErr != nil && resumeID != "" && isResumeFailure(runErr) {
+			// Fix4: the bound session is stale/deleted — drop the id so the next
+			// run starts fresh instead of failing on every schedule.
+			e.cronScheduler.Store().Update(jobID, "agent_session_id", "")
+			slog.Warn("cron: dropped stale agent_session_id after resume failure", "job_id", jobID, "stale_id", resumeID)
+		} else if strings.TrimSpace(finalID) != "" {
+			// Persist the forked id so the cron's private context accumulates.
+			e.cronScheduler.Store().Update(jobID, "agent_session_id", finalID)
+		}
 	}
 
 	if runErr != nil {
@@ -3414,6 +3451,10 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		name = strings.Join(args, " ")
 	}
 	s := e.sessions.NewSession(msg.SessionKey, name)
+	// Fix3: the new session must not inherit prompts queued against the old one.
+	// With the stable group queue key, items enqueued before the first agent id
+	// bound keep an empty snapshot and would otherwise run in this new session.
+	e.cancelQueuedPromptsForSessionSwitch(msg.SessionKey, s.AgentSessionID)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
@@ -5272,6 +5313,14 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		// continue chatting.
 		session := e.sessions.GetOrCreateActive(msg.SessionKey)
 		if !session.TryLock() {
+			// Fix2: busy without an interactive state can also be an isolated
+			// cron run legitimately holding the lock — don't force-unlock that,
+			// it would break per-chat serialization and let user work overlap
+			// the running cron turn.
+			if e.groupQueueRunning(msg.SessionKey) {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+				return
+			}
 			slog.Warn("cmdStop: stale busy session without interactive state; forcing unlock", "session_key", msg.SessionKey, "session", session.ID)
 			session.Unlock()
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))

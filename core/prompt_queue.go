@@ -423,6 +423,18 @@ func (e *Engine) processInteractiveMessageAsyncAndDrainQueue(p Platform, msg *Me
 	e.processInteractiveMessageAsyncWithQueueKey(p, msg, session, queueKey, done)
 }
 
+// groupQueueRunning reports whether the chat's group queue currently has a turn
+// running (user or cron). /stop uses it to avoid force-unlocking a session that
+// an isolated cron run legitimately holds without an interactiveState.
+func (e *Engine) groupQueueRunning(sessionKey string) bool {
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	queueKey, _ := e.promptQueueKey(sessionKey, session)
+	e.promptQueueMu.Lock()
+	defer e.promptQueueMu.Unlock()
+	state := e.promptQueues[queueKey]
+	return state != nil && state.Running
+}
+
 func (e *Engine) queueSnapshotForSession(sessionKey string) promptQueueSnapshot {
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	queueKey, _ := e.promptQueueKey(sessionKey, session)

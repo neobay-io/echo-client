@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -185,6 +186,121 @@ func TestRunCronIsolatedTurnAccumulatesAndKeepsActive(t *testing.T) {
 	}
 	if got := store.Get("job-1").AgentSessionID; got != "fork-2" {
 		t.Fatalf("run2 persisted id = %q, want fork-2", got)
+	}
+}
+
+// erroringCronAgent's session emits an EventError with a configurable message,
+// to exercise cron resume-failure handling.
+type erroringCronAgent struct{ errMsg string }
+
+func (a *erroringCronAgent) Name() string { return "err-cron" }
+func (a *erroringCronAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	return &erroringCronSession{errMsg: a.errMsg, events: make(chan Event, 1)}, nil
+}
+func (a *erroringCronAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *erroringCronAgent) Stop() error { return nil }
+
+type erroringCronSession struct {
+	errMsg string
+	events chan Event
+	once   sync.Once
+}
+
+func (s *erroringCronSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.events <- Event{Type: EventError, Error: fmt.Errorf("%s", s.errMsg)}
+	return nil
+}
+func (s *erroringCronSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *erroringCronSession) Events() <-chan Event                                 { return s.events }
+func (s *erroringCronSession) CurrentSessionID() string                             { return "" }
+func (s *erroringCronSession) Alive() bool                                          { return true }
+func (s *erroringCronSession) Close() error {
+	s.once.Do(func() { close(s.events) })
+	return nil
+}
+
+// Fix4: a resume failure on a stale/deleted bound id must drop the id so the
+// next run starts fresh instead of failing forever.
+func TestRunCronIsolatedTurnDropsStaleSessionID(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	agent := &erroringCronAgent{errMsg: "thread/resume: failed to resolve rollout path /x/y.jsonl: file does not exist"}
+	p := &cronReplyPlatform{stubPlatformEngine{n: "test"}}
+	engine := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	engine.SetCronScheduler(scheduler)
+	scheduler.RegisterEngine("test", engine)
+
+	job := &CronJob{
+		ID: "job-1", Project: "test", SessionKey: "test:chat",
+		CronExpr: "* * * * *", Prompt: "hi", Enabled: true,
+		AgentSessionID: "stale-id", CreatedAt: time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add: %v", err)
+	}
+	if err := engine.runCronIsolatedTurn(context.Background(), "job-1", job, p, "ctx"); err == nil {
+		t.Fatal("expected a resume error")
+	}
+	if got := store.Get("job-1").AgentSessionID; got != "" {
+		t.Fatalf("stale agent_session_id not dropped: %q", got)
+	}
+}
+
+func TestIsResumeFailure(t *testing.T) {
+	cases := map[string]bool{
+		"thread/resume: failed to resolve rollout path /x: file does not exist": true,
+		"failed to resume session":        true,
+		"no conversation found":           true,
+		"transient api error: status 500": false,
+		"context deadline exceeded":       false,
+	}
+	for msg, want := range cases {
+		if got := isResumeFailure(fmt.Errorf("%s", msg)); got != want {
+			t.Errorf("isResumeFailure(%q) = %v, want %v", msg, got, want)
+		}
+	}
+	if isResumeFailure(nil) {
+		t.Error("isResumeFailure(nil) should be false")
+	}
+}
+
+// Fix3: /new (and any switch to a new active session) must cancel prompts queued
+// against the old session, including ones with an empty agent-session snapshot.
+func TestCancelQueuedPromptsCancelsEmptySnapshot(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	session := e.sessions.GetOrCreateActive("test:chat")
+	queueKey, _ := e.promptQueueKey("test:chat", session)
+	e.promptQueueMu.Lock()
+	e.promptQueues[queueKey] = &promptQueueState{Running: true, Items: []queuedPrompt{
+		{ID: "q1", QueueKey: queueKey, OriginSessionKey: "test:chat", AgentSessionIDSnapshot: ""},
+		{ID: "q2", QueueKey: queueKey, OriginSessionKey: "test:chat", AgentSessionIDSnapshot: "old-id"},
+	}}
+	e.promptQueueMu.Unlock()
+
+	if n := e.cancelQueuedPromptsForSessionSwitch("test:chat", ""); n != 2 {
+		t.Fatalf("cancelled = %d, want 2 (both empty and old snapshots)", n)
+	}
+}
+
+// Fix2: /stop must not force-unlock a session an isolated cron run holds; that
+// is detected via the group queue Running gate.
+func TestGroupQueueRunning(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	if e.groupQueueRunning("test:chat") {
+		t.Fatal("group queue should not be running initially")
+	}
+	session := e.sessions.GetOrCreateActive("test:chat")
+	queueKey, _ := e.promptQueueKey("test:chat", session)
+	e.promptQueueMu.Lock()
+	e.promptQueues[queueKey] = &promptQueueState{Running: true}
+	e.promptQueueMu.Unlock()
+	if !e.groupQueueRunning("test:chat") {
+		t.Fatal("group queue should be running when Running gate is set")
 	}
 }
 
