@@ -34,7 +34,9 @@ type CronJob struct {
 	Mute               bool      `json:"mute,omitempty"`   // suppress all outbound messages for this job
 	AutoPausePrimitive bool      `json:"auto_pause_primitive,omitempty"`
 	SessionMode        string    `json:"session_mode,omitempty"`
-	TimeoutMins        *int      `json:"timeout_mins,omitempty"` // nil=30m, 0=unlimited, >0=minutes
+	AgentSessionID     string    `json:"agent_session_id,omitempty"` // cron's own agent session lineage; resumed each run, updated to the forked id
+	SessionLabel       string    `json:"session_label,omitempty"`    // display label for the associated session
+	TimeoutMins        *int      `json:"timeout_mins,omitempty"`     // nil=30m, 0=unlimited, >0=minutes
 	CreatedAt          time.Time `json:"created_at"`
 	LastRun            time.Time `json:"last_run,omitempty"`
 	LastError          string    `json:"last_error,omitempty"`
@@ -362,6 +364,16 @@ func updateCronJobField(job *CronJob, field string, value any) error {
 			job.SessionMode = NormalizeCronSessionMode(v)
 			return nil
 		}
+	case "agent_session_id":
+		if v, ok := value.(string); ok {
+			job.AgentSessionID = v
+			return nil
+		}
+	case "session_label":
+		if v, ok := value.(string); ok {
+			job.SessionLabel = v
+			return nil
+		}
 	case "timeout_mins":
 		switch v := value.(type) {
 		case int:
@@ -631,6 +643,12 @@ func (cs *CronScheduler) executeJob(jobID string) {
 	}()
 
 	err := <-done
+	if err == errCronEnqueued {
+		// Chat was busy: the run was queued and a later drain will execute it
+		// (and MarkRun the real result). Don't record it as completed now.
+		slog.Info("cron: enqueued (chat busy), will run on drain", "id", jobID)
+		return
+	}
 	if timeout > 0 && err == context.DeadlineExceeded {
 		err = fmt.Errorf("job timed out after %v", timeout)
 	}

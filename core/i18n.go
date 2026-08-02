@@ -247,21 +247,25 @@ const (
 	MsgReviewPromptTooLong       MsgKey = "review_prompt_too_long"
 	MsgSetupNative               MsgKey = "setup_native"
 
-	MsgCronNotAvailable MsgKey = "cron_not_available"
-	MsgCronUsage        MsgKey = "cron_usage"
-	MsgCronAddUsage     MsgKey = "cron_add_usage"
-	MsgCronAdded        MsgKey = "cron_added"
-	MsgCronAddedExec    MsgKey = "cron_added_exec"
-	MsgCronAddExecUsage MsgKey = "cron_addexec_usage"
-	MsgCronSetupOK      MsgKey = "cron_setup_ok"
-	MsgCronEmpty        MsgKey = "cron_empty"
-	MsgCronListTitle    MsgKey = "cron_list_title"
-	MsgCronListFooter   MsgKey = "cron_list_footer"
-	MsgCronDelUsage     MsgKey = "cron_del_usage"
-	MsgCronDeleted      MsgKey = "cron_deleted"
-	MsgCronNotFound     MsgKey = "cron_not_found"
-	MsgCronEnabled      MsgKey = "cron_enabled"
-	MsgCronDisabled     MsgKey = "cron_disabled"
+	MsgCronNotAvailable   MsgKey = "cron_not_available"
+	MsgCronUsage          MsgKey = "cron_usage"
+	MsgCronAddUsage       MsgKey = "cron_add_usage"
+	MsgCronSessionUsage   MsgKey = "cron_session_usage"
+	MsgCronSessionCurrent MsgKey = "cron_session_current"
+	MsgCronSessionNone    MsgKey = "cron_session_none"
+	MsgCronSessionSet     MsgKey = "cron_session_set"
+	MsgCronAdded          MsgKey = "cron_added"
+	MsgCronAddedExec      MsgKey = "cron_added_exec"
+	MsgCronAddExecUsage   MsgKey = "cron_addexec_usage"
+	MsgCronSetupOK        MsgKey = "cron_setup_ok"
+	MsgCronEmpty          MsgKey = "cron_empty"
+	MsgCronListTitle      MsgKey = "cron_list_title"
+	MsgCronListFooter     MsgKey = "cron_list_footer"
+	MsgCronDelUsage       MsgKey = "cron_del_usage"
+	MsgCronDeleted        MsgKey = "cron_deleted"
+	MsgCronNotFound       MsgKey = "cron_not_found"
+	MsgCronEnabled        MsgKey = "cron_enabled"
+	MsgCronDisabled       MsgKey = "cron_disabled"
 
 	MsgStatusTitle MsgKey = "status_title"
 
@@ -1497,6 +1501,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 當前 agent 已原生支援 cc-connect 指令，無需額外配置。",
 		LangJapanese:           "✅ このエージェントは cc-connect の指示をネイティブサポートしています。追加設定は不要です。",
 		LangSpanish:            "✅ Este agente ya soporta las instrucciones de cc-connect de forma nativa. No se necesita configuración extra.",
+	},
+	MsgCronSessionUsage: {
+		LangEnglish:            "Usage: /cron session <jobId> [session id-prefix | name | #n]",
+		LangChinese:            "用法：/cron session <任务ID> [会话 id前缀 | 名字 | #序号]",
+		LangTraditionalChinese: "用法：/cron session <任務ID> [會話 id前綴 | 名字 | #序號]",
+		LangJapanese:           "使い方：/cron session <ジョブID> [セッションID接頭辞 | 名前 | #番号]",
+		LangSpanish:            "Uso: /cron session <jobId> [prefijo-id de sesión | nombre | #n]",
+	},
+	MsgCronSessionCurrent: {
+		LangEnglish:            "⏰ cron `%s` is bound to session %s",
+		LangChinese:            "⏰ 定时任务 `%s` 关联的会话：%s",
+		LangTraditionalChinese: "⏰ 定時任務 `%s` 關聯的會話：%s",
+		LangJapanese:           "⏰ cron `%s` に紐付くセッション：%s",
+		LangSpanish:            "⏰ cron `%s` está vinculado a la sesión %s",
+	},
+	MsgCronSessionNone: {
+		LangEnglish:            "(none; will snapshot the chat session on first run)",
+		LangChinese:            "（无；首次运行时快照当前对话会话）",
+		LangTraditionalChinese: "（無；首次執行時快照當前對話會話）",
+		LangJapanese:           "（なし；初回実行時にチャットのセッションをスナップショット）",
+		LangSpanish:            "(ninguna; tomará la sesión del chat en la primera ejecución)",
+	},
+	MsgCronSessionSet: {
+		LangEnglish:            "✅ cron `%s` now bound to session %s",
+		LangChinese:            "✅ 定时任务 `%s` 已关联会话 %s",
+		LangTraditionalChinese: "✅ 定時任務 `%s` 已關聯會話 %s",
+		LangJapanese:           "✅ cron `%s` をセッション %s に紐付けました",
+		LangSpanish:            "✅ cron `%s` ahora vinculado a la sesión %s",
 	},
 	MsgCronNotAvailable: {
 		LangEnglish:            "Cron scheduler is not available.",

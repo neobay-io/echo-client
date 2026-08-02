@@ -74,6 +74,120 @@ func (s *blockingCronSession) Close() error {
 	return nil
 }
 
+// recordingCronAgent records each StartSession resume id and returns a session
+// that immediately emits an EventResult carrying a (forked) session id.
+type recordingCronAgent struct {
+	mu      sync.Mutex
+	resumes []string
+	forkID  string
+}
+
+func (a *recordingCronAgent) Name() string { return "rec-cron" }
+func (a *recordingCronAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
+	a.mu.Lock()
+	a.resumes = append(a.resumes, sessionID)
+	fork := a.forkID
+	a.mu.Unlock()
+	return newRecordingCronSession(fork), nil
+}
+func (a *recordingCronAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *recordingCronAgent) Stop() error { return nil }
+func (a *recordingCronAgent) lastResume() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.resumes) == 0 {
+		return ""
+	}
+	return a.resumes[len(a.resumes)-1]
+}
+
+type recordingCronSession struct {
+	fork   string
+	events chan Event
+	once   sync.Once
+}
+
+func newRecordingCronSession(fork string) *recordingCronSession {
+	return &recordingCronSession{fork: fork, events: make(chan Event, 2)}
+}
+
+func (s *recordingCronSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.events <- Event{Type: EventResult, Content: "done", SessionID: s.fork}
+	return nil
+}
+func (s *recordingCronSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *recordingCronSession) Events() <-chan Event                                 { return s.events }
+func (s *recordingCronSession) CurrentSessionID() string                             { return s.fork }
+func (s *recordingCronSession) Alive() bool                                          { return true }
+func (s *recordingCronSession) Close() error {
+	s.once.Do(func() { close(s.events) })
+	return nil
+}
+
+// TestRunCronIsolatedTurnAccumulatesAndKeepsActive verifies the core of the
+// cron/session redesign: a cron turn resumes the job's own lineage, persists the
+// forked id so context accumulates across runs, and never touches the user's
+// active session or creates an interactiveState for the chat.
+func TestRunCronIsolatedTurnAccumulatesAndKeepsActive(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	agent := &recordingCronAgent{forkID: "fork-1"}
+	p := &cronReplyPlatform{stubPlatformEngine{n: "test"}}
+	engine := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	engine.SetCronScheduler(scheduler)
+	scheduler.RegisterEngine("test", engine)
+
+	// The user's active session in this chat — cron must leave it untouched.
+	userSess := engine.sessions.GetOrCreateActive("test:chat")
+	userSess.AgentSessionID = "user-active-id"
+
+	job := &CronJob{
+		ID: "job-1", Project: "test", SessionKey: "test:chat",
+		CronExpr: "* * * * *", Prompt: "hi", Enabled: true,
+		AgentSessionID: "cron-seed", CreatedAt: time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("store.Add: %v", err)
+	}
+
+	// Run 1: resumes the seed, forks to fork-1.
+	if err := engine.runCronIsolatedTurn(context.Background(), "job-1", job, p, "ctx"); err != nil {
+		t.Fatalf("run1: %v", err)
+	}
+	if got := agent.lastResume(); got != "cron-seed" {
+		t.Fatalf("run1 resumed %q, want cron-seed", got)
+	}
+	if got := store.Get("job-1").AgentSessionID; got != "fork-1" {
+		t.Fatalf("run1 persisted id = %q, want fork-1 (accumulated)", got)
+	}
+	if got := engine.sessions.GetOrCreateActive("test:chat").AgentSessionID; got != "user-active-id" {
+		t.Fatalf("cron changed the user's active session to %q", got)
+	}
+	engine.interactiveMu.Lock()
+	_, hasState := engine.interactiveStates["test:chat"]
+	engine.interactiveMu.Unlock()
+	if hasState {
+		t.Fatal("cron created an interactiveState for the user's chat")
+	}
+
+	// Run 2: now resumes fork-1 (accumulated lineage), forks to fork-2.
+	agent.forkID = "fork-2"
+	if err := engine.runCronIsolatedTurn(context.Background(), "job-1", store.Get("job-1"), p, "ctx"); err != nil {
+		t.Fatalf("run2: %v", err)
+	}
+	if got := agent.lastResume(); got != "fork-1" {
+		t.Fatalf("run2 resumed %q, want fork-1 (accumulated lineage)", got)
+	}
+	if got := store.Get("job-1").AgentSessionID; got != "fork-2" {
+		t.Fatalf("run2 persisted id = %q, want fork-2", got)
+	}
+}
+
 func TestAPIServerHandleCronAddRequiresSessionKey(t *testing.T) {
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {

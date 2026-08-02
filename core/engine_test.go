@@ -2702,39 +2702,36 @@ func TestHandleMessage_QueuesBusyPromptAndDrains(t *testing.T) {
 	}
 }
 
-func TestHandleMessage_QueuesBySharedAgentSessionID(t *testing.T) {
+// Queues are now serialized per chat entry (sessionKey): a second prompt in the
+// same chat while the first runs must queue behind it (group FIFO). (Cross-chat
+// sharing of one queue by agent-session id was dropped; concurrent turns on the
+// same agent session are still serialized by the agentSessionTurns lock.)
+func TestHandleMessage_QueuesSameChatSerially(t *testing.T) {
 	agent := &slowRecordingSendAgent{delay: 150 * time.Millisecond}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
-	const sharedID = "shared-agent-session"
-	sessionA := e.sessions.GetOrCreateActive("test:chat-a")
-	sessionB := e.sessions.GetOrCreateActive("test:chat-b")
-	sessionA.AgentSessionID = sharedID
-	sessionB.AgentSessionID = sharedID
-
 	e.handleMessage(p, &Message{
-		SessionKey: "test:chat-a",
+		SessionKey: "test:chat",
 		Platform:   "test",
-		UserID:     "user-a",
+		UserID:     "user",
 		UserName:   "Alice",
 		Content:    "from a",
-		ReplyCtx:   "ctx-a",
+		ReplyCtx:   "ctx",
 	})
 	time.Sleep(20 * time.Millisecond)
 	e.handleMessage(p, &Message{
-		SessionKey: "test:chat-b",
+		SessionKey: "test:chat",
 		Platform:   "test",
-		UserID:     "user-b",
-		UserName:   "Bob",
+		UserID:     "user",
+		UserName:   "Alice",
 		Content:    "from b",
-		ReplyCtx:   "ctx-b",
+		ReplyCtx:   "ctx",
 	})
 
 	waitForCondition(t, func() bool {
-		return strings.Contains(e.renderQueueText("test:chat-a"), "from b") &&
-			strings.Contains(e.renderQueueText("test:chat-b"), "from b")
-	}, "shared queue to show queued prompt from both chats")
+		return strings.Contains(e.renderQueueText("test:chat"), "from b")
+	}, "second prompt queued in same chat")
 
 	sends := waitForSlowRecordedSends(t, agent, 2)
 	if !strings.Contains(sends[0].prompt, "from a") || !strings.Contains(sends[1].prompt, "from b") {

@@ -21,9 +21,13 @@ type queuedPrompt struct {
 	OriginSessionKey       string
 	OriginPlatform         string
 	AgentSessionIDSnapshot string
+	Source                 string // "" / "user" = interactive; "cron" = scheduled job
+	JobID                  string // cron job id when Source == "cron"
 	Message                Message
 	CreatedAt              time.Time
 }
+
+func (q queuedPrompt) isCron() bool { return q.Source == "cron" }
 
 type promptQueueState struct {
 	Running bool
@@ -36,21 +40,19 @@ type promptQueueSnapshot struct {
 	Items    []queuedPrompt
 }
 
+// promptQueueKey returns (queueKey, agentSessionIDSnapshot).
+//
+// The queue is serialized per chat entry (sessionKey): a cron turn and a user
+// turn in the same chat share one FIFO and one Running gate, so they run one at
+// a time (needed so cron and user prompts interleave serially even though they
+// use different agent sessions). The key stays stable across a turn's lifetime,
+// so completePromptTurn's key-migration branch is a no-op.
+//
+// The second value is still the agent session id, used only as a snapshot guard
+// (startQueuedPrompt skips a queued item if the active session's id changed).
 func (e *Engine) promptQueueKey(sessionKey string, session *Session) (string, string) {
-	agentName, agentSessionID := e.agentSessionTurnIdentity(session)
-	if strings.TrimSpace(agentSessionID) != "" {
-		return agentName + ":" + strings.TrimSpace(agentSessionID), strings.TrimSpace(agentSessionID)
-	}
-	localSessionID := ""
-	if session != nil {
-		session.mu.Lock()
-		localSessionID = strings.TrimSpace(session.ID)
-		session.mu.Unlock()
-	}
-	if localSessionID == "" {
-		localSessionID = "default"
-	}
-	return "pending:" + sessionKey + ":" + localSessionID, ""
+	_, agentSessionID := e.agentSessionTurnIdentity(session)
+	return "grp:" + sessionKey, strings.TrimSpace(agentSessionID)
 }
 
 func cloneQueuedMessage(msg *Message) Message {
@@ -115,7 +117,7 @@ func (e *Engine) beginPromptTurnOrEnqueue(queueKey, agentSessionID string, msg *
 		e.promptQueues[queueKey] = state
 	}
 	if state.Running || len(state.Items) > 0 {
-		pos, err := e.enqueuePromptLocked(state, queueKey, agentSessionID, msg)
+		pos, err := e.enqueuePromptLocked(state, queueKey, agentSessionID, "user", "", msg)
 		return false, pos, err
 	}
 	state.Running = true
@@ -131,10 +133,10 @@ func (e *Engine) enqueuePrompt(queueKey, agentSessionID string, msg *Message) (i
 		state = &promptQueueState{}
 		e.promptQueues[queueKey] = state
 	}
-	return e.enqueuePromptLocked(state, queueKey, agentSessionID, msg)
+	return e.enqueuePromptLocked(state, queueKey, agentSessionID, "user", "", msg)
 }
 
-func (e *Engine) enqueuePromptLocked(state *promptQueueState, queueKey, agentSessionID string, msg *Message) (int, error) {
+func (e *Engine) enqueuePromptLocked(state *promptQueueState, queueKey, agentSessionID, source, jobID string, msg *Message) (int, error) {
 	if len(state.Items) >= maxPromptQueueItems {
 		return 0, fmt.Errorf("queue full")
 	}
@@ -146,6 +148,9 @@ func (e *Engine) enqueuePromptLocked(state *promptQueueState, queueKey, agentSes
 	if e.promptQueuesAttachmentBytesLocked()+promptQueueAttachmentBytes(msg) > maxPromptQueueEngineBytes {
 		return 0, fmt.Errorf("queue attachments too large")
 	}
+	if source == "" {
+		source = "user"
+	}
 	e.promptQueueSeq++
 	item := queuedPrompt{
 		ID:                     fmt.Sprintf("q%d", e.promptQueueSeq),
@@ -153,6 +158,8 @@ func (e *Engine) enqueuePromptLocked(state *promptQueueState, queueKey, agentSes
 		OriginSessionKey:       msg.SessionKey,
 		OriginPlatform:         msg.Platform,
 		AgentSessionIDSnapshot: strings.TrimSpace(agentSessionID),
+		Source:                 source,
+		JobID:                  jobID,
 		Message:                cloneQueuedMessage(msg),
 		CreatedAt:              time.Now(),
 	}
@@ -226,6 +233,10 @@ func (e *Engine) completePromptTurn(startKey string, sessionKey string, session 
 func (e *Engine) drainPromptQueue(queueKey string) {
 	item, ok := e.popNextQueuedPrompt(queueKey)
 	if !ok {
+		return
+	}
+	if item.isCron() {
+		_ = e.startQueuedCronRun(item)
 		return
 	}
 	_ = e.startQueuedPrompt(item)
@@ -314,6 +325,68 @@ func (e *Engine) startQueuedPrompt(item queuedPrompt) bool {
 	msg.ReplyCtx = replyCtx
 	go e.processInteractiveMessageAndDrainQueue(p, &msg, session, item.QueueKey)
 	return true
+}
+
+// startQueuedCronRun runs a dequeued cron item as an isolated turn while holding
+// the chat's active-session busy lock, so a concurrent user turn (including the
+// non-queue direct path in handleMessage) waits. It never reads or mutates the
+// active session's agent id or history; the cron turn runs on the job's own
+// agent session via runCronIsolatedTurn.
+func (e *Engine) startQueuedCronRun(item queuedPrompt) bool {
+	if e.cronScheduler == nil {
+		e.failQueuedPrompt(item, "")
+		return true
+	}
+	job := e.cronScheduler.Store().Get(item.JobID)
+	if job == nil || !job.Enabled {
+		e.failQueuedPrompt(item, "")
+		return true
+	}
+	session := e.sessions.GetOrCreateActive(item.OriginSessionKey)
+	if !session.TryLock() {
+		e.requeuePromptFront(item)
+		return false
+	}
+	p, replyCtx, err := e.platformAndReplyContextForQueuedPrompt(item)
+	if err != nil {
+		session.Unlock()
+		e.failQueuedPrompt(item, "")
+		return true
+	}
+	go func() {
+		defer func() {
+			session.Unlock()
+			finalKey := e.completePromptTurn(item.QueueKey, item.OriginSessionKey, session)
+			e.drainPromptQueue(finalKey)
+		}()
+		runErr := e.runCronIsolatedTurn(e.ctx, item.JobID, job, p, replyCtx)
+		if e.cronScheduler != nil {
+			e.cronScheduler.Store().MarkRun(item.JobID, runErr)
+		}
+	}()
+	return true
+}
+
+// beginCronTurnOrEnqueue mirrors beginPromptTurnOrEnqueue for cron: if the chat's
+// group queue is idle it claims Running and returns true (caller runs inline);
+// otherwise it enqueues a cron item and returns false so a later drain runs it.
+func (e *Engine) beginCronTurnOrEnqueue(job *CronJob, sessionKey string, msg *Message) (bool, error) {
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	queueKey, agentSessionID := e.promptQueueKey(sessionKey, session)
+
+	e.promptQueueMu.Lock()
+	defer e.promptQueueMu.Unlock()
+	state := e.promptQueues[queueKey]
+	if state == nil {
+		state = &promptQueueState{}
+		e.promptQueues[queueKey] = state
+	}
+	if state.Running || len(state.Items) > 0 {
+		_, err := e.enqueuePromptLocked(state, queueKey, agentSessionID, "cron", job.ID, msg)
+		return false, err
+	}
+	state.Running = true
+	return true, nil
 }
 
 func (e *Engine) platformAndReplyContextForQueuedPrompt(item queuedPrompt) (Platform, any, error) {

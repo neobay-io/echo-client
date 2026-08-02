@@ -269,6 +269,79 @@ func (e *Engine) startAgentSession(
 	return e.agent.StartSession(ctx, sessionID)
 }
 
+// runIsolatedCronTurn starts a one-shot isolated agent session resuming
+// agentSessionID (empty = fresh), sends one prompt, drains events to the final
+// result, then closes the session. Like the job runner it never touches
+// interactiveStates or activeSession, so it runs safely alongside a user's live
+// interactive session. Returns the final (possibly forked) agent session id and
+// the output text. Batch mode: no streaming callback; permission requests fail
+// fast (cron relies on the project running in bypass/yolo mode).
+func (e *Engine) runIsolatedCronTurn(
+	ctx context.Context,
+	syntheticKey string,
+	agentSessionID string,
+	prompt string,
+	env []string,
+) (finalSessionID string, output string, err error) {
+	agentSession, err := e.startAgentSession(ctx, agentSessionID, syntheticKey, env)
+	if err != nil {
+		return "", "", fmt.Errorf("start isolated cron session: %w", err)
+	}
+	defer func() {
+		_ = agentSession.Close()
+	}()
+
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- agentSession.Send(prompt, nil, nil) }()
+	select {
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	case err := <-sendErr:
+		if err != nil {
+			return "", "", fmt.Errorf("send cron prompt: %w", err)
+		}
+	}
+
+	sessionID := agentSession.CurrentSessionID()
+	var buf jobTextBuffer
+	for {
+		select {
+		case <-ctx.Done():
+			return sessionID, buf.String(), ctx.Err()
+		case event, ok := <-agentSession.Events():
+			if !ok {
+				return sessionID, buf.String(), nil
+			}
+			if event.SessionID != "" {
+				sessionID = event.SessionID
+			}
+			switch event.Type {
+			case EventText:
+				if event.Content != "" {
+					buf.Append(event.Content)
+				}
+			case EventResult:
+				out := event.Content
+				if out == "" {
+					out = buf.String()
+				}
+				return sessionID, out, nil
+			case EventError:
+				evErr := event.Error
+				if evErr == nil {
+					evErr = fmt.Errorf("cron session received agent error event")
+				}
+				return sessionID, buf.String(), evErr
+			case EventPermissionRequest:
+				return sessionID, buf.String(), fmt.Errorf(
+					"cron session hit a permission request for tool %q; run the project in bypass/yolo mode for unattended cron",
+					event.ToolName,
+				)
+			}
+		}
+	}
+}
+
 func (e *Engine) StartJobSession(
 	ctx context.Context,
 	req JobRequest,

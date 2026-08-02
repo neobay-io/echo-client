@@ -834,56 +834,113 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 		return e.executeCronShell(targetPlatform, replyCtx, job)
 	}
 
-	buildPrompt := func() string {
-		if job.IsLoopJob() && job.AutoPausePrimitive {
-			return appendLoopPausePrimitive(job.Prompt)
-		}
-		return job.Prompt
-	}
-
 	msg := &Message{
 		SessionKey: sessionKey,
 		Platform:   platformName,
 		UserID:     "cron",
 		UserName:   "cron",
-		Content:    buildPrompt(),
+		Content:    job.Prompt, // real prompt (incl. loop primitive) is built in runCronIsolatedTurn
 		ReplyCtx:   replyCtx,
 	}
 
-	cancelDone := make(chan struct{})
-	defer close(cancelDone)
-	go func() {
-		select {
-		case <-ctx.Done():
-			slog.Warn("cron: cancelling interactive job", "project", e.name, "session", sessionKey, "error", ctx.Err())
-			e.cleanupInteractiveState(sessionKey)
-		case <-cancelDone:
-		}
-	}()
-
-	if job.UsesNewSessionPerRun() {
-		e.cleanupInteractiveState(sessionKey)
-		session := e.sessions.NewSession(sessionKey, "cron-"+job.ID)
-		if !session.TryLock() {
-			return fmt.Errorf("session %q is busy", sessionKey)
-		}
-		historyLen := session.HistoryLen()
-		// Intentionally synchronous: the scheduler waits for this turn to
-		// finish, so timeout/cancellation is enforced via ctx and cleanup.
-		e.processInteractiveMessageWithQueueLifecycle(targetPlatform, msg, session)
-		e.applyLoopPausePrimitive(sessionKey, job.ID, session.LatestAssistantMessageSince(historyLen), targetPlatform, replyCtx)
-		return ctx.Err()
+	// Enter the chat's serial group queue: run inline if idle, else enqueue a
+	// cron item that a later drain will run (fixes "cron dropped when busy").
+	inline, cronErr := e.beginCronTurnOrEnqueue(job, sessionKey, msg)
+	if cronErr != nil {
+		return fmt.Errorf("enqueue cron: %w", cronErr)
+	}
+	if !inline {
+		return errCronEnqueued
 	}
 
+	// Idle: we hold the group Running gate. Also hold the chat's session busy so
+	// the non-queue direct path (unknown /commands) waits, then run the isolated
+	// turn synchronously so the scheduler's timeout/MarkRun still apply.
 	session := e.sessions.GetOrCreateActive(sessionKey)
+	queueKey, _ := e.promptQueueKey(sessionKey, session)
 	if !session.TryLock() {
-		return fmt.Errorf("session %q is busy", sessionKey)
+		// A direct-path turn slipped in between the gate check and here; convert
+		// to a queued cron item and let a retry drain run it.
+		e.promptQueueMu.Lock()
+		if state := e.promptQueues[queueKey]; state != nil {
+			state.Running = false
+			_, _ = e.enqueuePromptLocked(state, queueKey, "", "cron", job.ID, msg)
+		}
+		e.promptQueueMu.Unlock()
+		e.schedulePromptQueueRetry(queueKey)
+		return errCronEnqueued
 	}
-	historyLen := session.HistoryLen()
+	defer func() {
+		session.Unlock()
+		e.completePromptTurn(queueKey, sessionKey, session)
+		e.drainPromptQueue(queueKey)
+	}()
+	return e.runCronIsolatedTurn(ctx, job.ID, job, targetPlatform, replyCtx)
+}
 
-	e.processInteractiveMessageWithQueueLifecycle(targetPlatform, msg, session)
-	e.applyLoopPausePrimitive(sessionKey, job.ID, session.LatestAssistantMessageSince(historyLen), targetPlatform, replyCtx)
-	return ctx.Err()
+// errCronEnqueued signals a cron run was queued (chat busy) rather than run
+// inline; the scheduler treats it as success and skips MarkRun (the later drain
+// records the real result).
+var errCronEnqueued = fmt.Errorf("cron run enqueued")
+
+// runCronIsolatedTurn runs one cron turn on the job's OWN isolated agent session
+// — never the user's active session or live process. It resumes the job's
+// accumulated agent_session_id (unless new_per_run), persists the forked id so
+// context accumulates across runs, sends output back to the chat (unless muted),
+// and applies the loop auto-pause primitive. Returns the run error but does NOT
+// MarkRun; the caller records the run (scheduler for inline, startQueuedCronRun
+// for queued). Caller holds the group Running gate + the chat's session busy.
+func (e *Engine) runCronIsolatedTurn(ctx context.Context, jobID string, job *CronJob, p Platform, replyCtx any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Bound by the job timeout unless the caller already set a deadline.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		if to := job.ExecutionTimeout(); to > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, to)
+			defer cancel()
+		}
+	}
+
+	sessionKey := job.SessionKey
+	syntheticKey := "cron-" + jobID
+
+	resumeID := ""
+	if !job.UsesNewSessionPerRun() {
+		resumeID = strings.TrimSpace(job.AgentSessionID)
+		if resumeID == "" {
+			// Lazy snapshot: inherit the chat's current active session on first run.
+			if s := e.sessions.GetOrCreateActive(sessionKey); s != nil {
+				resumeID = strings.TrimSpace(s.AgentSessionID)
+			}
+		}
+	}
+
+	prompt := job.Prompt
+	if job.IsLoopJob() && job.AutoPausePrimitive {
+		prompt = appendLoopPausePrimitive(prompt)
+	}
+
+	finalID, output, runErr := e.runIsolatedCronTurn(ctx, syntheticKey, resumeID, prompt, e.sessionEnv(syntheticKey))
+
+	// Persist the forked id so the cron's private context lineage accumulates.
+	if !job.UsesNewSessionPerRun() && strings.TrimSpace(finalID) != "" && e.cronScheduler != nil {
+		e.cronScheduler.Store().Update(jobID, "agent_session_id", finalID)
+	}
+
+	if runErr != nil {
+		slog.Error("cron: isolated turn failed", "job_id", jobID, "session_key", sessionKey, "error", runErr)
+		if !job.Mute {
+			e.send(p, replyCtx, fmt.Sprintf("⏰ cron `%s` failed: %v", jobID, runErr))
+		}
+		return runErr
+	}
+	if !job.Mute && strings.TrimSpace(output) != "" {
+		e.send(p, replyCtx, output)
+	}
+	e.applyLoopPausePrimitive(sessionKey, jobID, output, p, replyCtx)
+	return nil
 }
 
 func (e *Engine) applyLoopPausePrimitive(sessionKey, jobID, assistantReply string, p Platform, replyCtx any) {
@@ -6349,9 +6406,11 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 	}
 
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "setup",
+		"add", "addexec", "list", "del", "delete", "rm", "remove", "enable", "disable", "setup", "session",
 	})
 	switch sub {
+	case "session":
+		e.cmdCronSession(p, msg, args[1:])
 	case "add":
 		e.cmdCronAdd(p, msg, args[1:])
 	case "addexec":
@@ -6369,6 +6428,50 @@ func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
 	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronUsage))
 	}
+}
+
+// cmdCronSession shows or changes the session a cron job is bound to.
+//
+//	/cron session <jobId>            → show current binding
+//	/cron session <jobId> <query>    → bind to matched session (id prefix/name/#n)
+func (e *Engine) cmdCronSession(p Platform, msg *Message, args []string) {
+	if e.cronScheduler == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronNotAvailable))
+		return
+	}
+	if len(args) < 1 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronSessionUsage))
+		return
+	}
+	jobID := args[0]
+	job := e.cronScheduler.Store().Get(jobID)
+	if job == nil || job.SessionKey != msg.SessionKey {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), jobID))
+		return
+	}
+	if len(args) < 2 {
+		cur := strings.TrimSpace(job.AgentSessionID)
+		if cur == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCronSessionCurrent, jobID, e.i18n.T(MsgCronSessionNone)))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCronSessionCurrent, jobID, shortID(cur)))
+		return
+	}
+	query := strings.Join(args[1:], " ")
+	sessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
+		return
+	}
+	matched := e.matchSession(sessions, query)
+	if matched == nil {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
+		return
+	}
+	e.cronScheduler.Store().Update(jobID, "agent_session_id", matched.ID)
+	e.cronScheduler.Store().Update(jobID, "session_label", matched.Summary)
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCronSessionSet, jobID, shortID(matched.ID)))
 }
 
 func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {
@@ -6389,6 +6492,12 @@ func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {
 		Prompt:     prompt,
 		Enabled:    true,
 		CreatedAt:  time.Now(),
+	}
+	// Snapshot the chat's current session so the cron reuses it and keeps its
+	// context (default per the design; changeable later via /cron session).
+	if s := e.sessions.GetOrCreateActive(msg.SessionKey); s != nil {
+		job.AgentSessionID = strings.TrimSpace(s.AgentSessionID)
+		job.SessionLabel = s.Name
 	}
 
 	if err := e.cronScheduler.AddJob(job); err != nil {
