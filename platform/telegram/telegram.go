@@ -44,6 +44,43 @@ type Platform struct {
 	cancel                context.CancelFunc
 	lastSentMu            sync.Mutex
 	lastSentMessageIDs    map[int64]int
+	cardNavHandler        core.CardNavigationHandler
+}
+
+// SetCardNavigationHandler implements core.CardNavigable so the engine can route
+// act:/nav: card button callbacks back for in-place card updates.
+func (p *Platform) SetCardNavigationHandler(fn core.CardNavigationHandler) {
+	p.cardNavHandler = fn
+}
+
+// editMessageWithCard re-renders a card into the existing message (text + inline
+// keyboard), used to update a card in place after a button callback.
+func (p *Platform) editMessageWithCard(chatID int64, msgID int, card *core.Card) {
+	edit := tgbotapi.NewEditMessageText(chatID, msgID, core.MarkdownToTelegramHTML(card.RenderText()))
+	edit.ParseMode = tgbotapi.ModeHTML
+	if card.HasButtons() {
+		var rows [][]tgbotapi.InlineKeyboardButton
+		for _, row := range card.CollectButtons() {
+			var btns []tgbotapi.InlineKeyboardButton
+			for _, b := range row {
+				btns = append(btns, tgbotapi.NewInlineKeyboardButtonData(b.Text, b.Data))
+			}
+			rows = append(rows, btns)
+		}
+		markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
+		edit.ReplyMarkup = &markup
+	}
+	if _, err := p.bot.Send(edit); err != nil {
+		if strings.Contains(err.Error(), "can't parse") {
+			edit.Text = card.RenderText()
+			edit.ParseMode = ""
+			if _, err2 := p.bot.Send(edit); err2 != nil {
+				slog.Debug("telegram: edit card message failed", "error", err2)
+			}
+			return
+		}
+		slog.Debug("telegram: edit card message failed", "error", err)
+	}
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -454,6 +491,16 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		sessionKey = fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
 	}
 	rctx := replyContext{chatID: chatID, messageID: msgID}
+
+	// Card navigation callbacks (act:/nav: prefixes) — update the card in place.
+	if strings.HasPrefix(data, "act:") || strings.HasPrefix(data, "nav:") {
+		if p.cardNavHandler != nil {
+			if card := p.cardNavHandler(data, sessionKey); card != nil {
+				p.editMessageWithCard(chatID, msgID, card)
+			}
+		}
+		return
+	}
 
 	// Command callbacks (cmd:/lang en, cmd:/mode yolo, etc.)
 	if strings.HasPrefix(data, "cmd:") {

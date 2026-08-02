@@ -304,6 +304,72 @@ func TestGroupQueueRunning(t *testing.T) {
 	}
 }
 
+// TestCronSessionPickerFlow covers the shared card path (both Feishu and
+// Telegram route button callbacks through handleCardNav): the Session button
+// opens the picker sub-card, and a pick binds the job to the chosen session.
+func TestCronSessionPickerFlow(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	agent := &attachTestAgent{all: []AgentSessionInfo{
+		{ID: "abc12345-0000-0000-0000-000000000000", Summary: "S1"},
+		{ID: "xyz99999-0000-0000-0000-000000000000", Summary: "S2"},
+	}}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.SetCronScheduler(scheduler)
+	scheduler.RegisterEngine("test", e)
+	if err := store.Add(&CronJob{
+		ID: "job-1", Project: "test", SessionKey: "test:chat",
+		CronExpr: "* * * * *", Prompt: "hi", Enabled: true,
+	}); err != nil {
+		t.Fatalf("store.Add: %v", err)
+	}
+
+	// Session button opens the picker sub-card.
+	if card := e.handleCardNav("act:/cron session job-1", "test:chat"); card == nil {
+		t.Fatal("expected a session picker card")
+	}
+	// Picking a session (short-prefix callback data) binds it.
+	e.handleCardNav("act:/cron setsession job-1 abc12345", "test:chat")
+	if got := store.Get("job-1").AgentSessionID; got != "abc12345-0000-0000-0000-000000000000" {
+		t.Fatalf("setsession bind = %q, want full id", got)
+	}
+}
+
+func TestSetCronSessionByPrefix(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewCronStore: %v", err)
+	}
+	scheduler := NewCronScheduler(store)
+	agent := &attachTestAgent{all: []AgentSessionInfo{
+		{ID: "abc12345-0000-0000-0000-000000000000", Summary: "S1"},
+		{ID: "abc99999-0000-0000-0000-000000000000", Summary: "S2"},
+	}}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.SetCronScheduler(scheduler)
+	scheduler.RegisterEngine("test", e)
+	store.Add(&CronJob{ID: "job-1", Project: "test", SessionKey: "test:chat", CronExpr: "* * * * *", Prompt: "hi", Enabled: true})
+
+	// Unique prefix binds.
+	if m := e.setCronSessionByPrefix("test:chat", "job-1", "abc12345"); !strings.Contains(m, "job-1") {
+		t.Fatalf("unexpected reply: %q", m)
+	}
+	if got := store.Get("job-1").AgentSessionID; got != "abc12345-0000-0000-0000-000000000000" {
+		t.Fatalf("bind = %q", got)
+	}
+	// Ambiguous prefix is rejected.
+	if m := e.setCronSessionByPrefix("test:chat", "job-1", "abc"); !strings.Contains(m, "abc") {
+		t.Errorf("expected ambiguous/no-match reply, got %q", m)
+	}
+	// No match.
+	if m := e.setCronSessionByPrefix("test:chat", "job-1", "zzz"); !strings.Contains(m, "zzz") {
+		t.Errorf("expected no-match reply, got %q", m)
+	}
+}
+
 func TestAPIServerHandleCronAddRequiresSessionKey(t *testing.T) {
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {

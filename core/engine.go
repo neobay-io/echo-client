@@ -6066,6 +6066,9 @@ func (e *Engine) handleCardNav(action, sessionKey string) *Card {
 	case "/help":
 		return e.renderHelpCard()
 	case "/cron":
+		if strings.HasPrefix(args, "session ") {
+			return e.renderCronSessionPickerCard(sessionKey, strings.TrimSpace(strings.TrimPrefix(args, "session")), notice)
+		}
 		return e.renderCronCard(sessionKey, notice)
 	case "/loop":
 		return e.renderLoopCard(sessionKey, notice)
@@ -6102,6 +6105,13 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) string {
 			return "Cron job not found for this session."
 		}
 		switch sub {
+		case "session":
+			return "" // no-op; handleCardNav renders the session picker sub-card
+		case "setsession":
+			if len(fields) < 3 {
+				return ""
+			}
+			return e.setCronSessionByPrefix(sessionKey, id, fields[2])
 		case "enable":
 			if err := e.cronScheduler.EnableJob(id); err != nil {
 				return fmt.Sprintf("Failed to enable `%s`: %v", id, err)
@@ -6317,6 +6327,9 @@ func (e *Engine) renderCronCard(sessionKey string, notice string) *Card {
 
 		var btns []CardButton
 		btns = append(btns, DefaultBtn("Edit Prompt", fmt.Sprintf("act:/cron editprompt %s", j.ID)))
+		if !j.IsShellJob() {
+			btns = append(btns, DefaultBtn("Session", fmt.Sprintf("act:/cron session %s", j.ID)))
+		}
 		if j.Enabled {
 			btns = append(btns, DefaultBtn("Disable", fmt.Sprintf("act:/cron disable %s", j.ID)))
 		} else {
@@ -6521,6 +6534,89 @@ func (e *Engine) cmdCronSession(p Platform, msg *Message, args []string) {
 	e.cronScheduler.Store().Update(jobID, "agent_session_id", matched.ID)
 	e.cronScheduler.Store().Update(jobID, "session_label", matched.Summary)
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgCronSessionSet, jobID, shortID(matched.ID)))
+}
+
+// renderCronSessionPickerCard lists candidate sessions (current work_dir) with a
+// pick button per row, for choosing which session a cron job is bound to.
+func (e *Engine) renderCronSessionPickerCard(sessionKey, jobID, notice string) *Card {
+	if e.cronScheduler == nil {
+		return e.simpleCard("Cron Session", "orange", e.i18n.T(MsgCronNotAvailable))
+	}
+	job := e.cronScheduler.Store().Get(jobID)
+	if job == nil || job.SessionKey != sessionKey {
+		return e.simpleCard("Cron Session", "orange", fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), jobID))
+	}
+	sessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return e.simpleCard("Cron Session", "orange", fmt.Sprintf(e.i18n.T(MsgListError), err))
+	}
+
+	cur := strings.TrimSpace(job.AgentSessionID)
+	cb := NewCard().Title("Cron Session", "blue")
+	if strings.TrimSpace(notice) != "" {
+		cb.Note(notice)
+	}
+	curLabel := e.i18n.T(MsgCronSessionNone)
+	if cur != "" {
+		curLabel = shortID(cur)
+	}
+	cb.Markdown(e.i18n.Tf(MsgCronSessionCurrent, jobID, curLabel))
+	if len(sessions) == 0 {
+		cb.Markdown(e.i18n.T(MsgListEmpty))
+		return cb.Build()
+	}
+
+	limit := len(sessions)
+	if limit > listPageSize {
+		limit = listPageSize
+	}
+	for i := 0; i < limit; i++ {
+		s := sessions[i]
+		marker := "◻"
+		if s.ID == cur {
+			marker = "▶"
+		}
+		cb.Markdown(fmt.Sprintf("%s **%d.** %s · %d msgs · %s",
+			marker, i+1, sessionDisplayName(e.sessions, s), s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
+		if s.ID != cur {
+			// short id keeps callback data under Telegram's 64-byte limit
+			cb.ButtonsEqual(PrimaryBtn(e.i18n.T(MsgCronSessionPick), fmt.Sprintf("act:/cron setsession %s %s", jobID, shortID(s.ID))))
+		}
+	}
+	return cb.Build()
+}
+
+// setCronSessionByPrefix binds a cron job to the session whose id matches the
+// (possibly shortened) prefix from a picker button.
+func (e *Engine) setCronSessionByPrefix(sessionKey, jobID, shortSID string) string {
+	if e.cronScheduler == nil {
+		return ""
+	}
+	job := e.cronScheduler.Store().Get(jobID)
+	if job == nil || job.SessionKey != sessionKey {
+		return fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), jobID)
+	}
+	sessions, err := e.agent.ListSessions(e.ctx)
+	if err != nil {
+		return fmt.Sprintf(e.i18n.T(MsgListError), err)
+	}
+	var matched *AgentSessionInfo
+	n := 0
+	for i := range sessions {
+		if sessions[i].ID == shortSID || strings.HasPrefix(sessions[i].ID, shortSID) {
+			matched = &sessions[i]
+			n++
+		}
+	}
+	if n == 0 {
+		return fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), shortSID)
+	}
+	if n > 1 {
+		return e.i18n.Tf(MsgAttachAmbiguous, shortSID)
+	}
+	e.cronScheduler.Store().Update(jobID, "agent_session_id", matched.ID)
+	e.cronScheduler.Store().Update(jobID, "session_label", matched.Summary)
+	return e.i18n.Tf(MsgCronSessionSet, jobID, shortID(matched.ID))
 }
 
 func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {

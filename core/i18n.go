@@ -254,6 +254,7 @@ const (
 	MsgCronSessionCurrent MsgKey = "cron_session_current"
 	MsgCronSessionNone    MsgKey = "cron_session_none"
 	MsgCronSessionSet     MsgKey = "cron_session_set"
+	MsgCronSessionPick    MsgKey = "cron_session_pick"
 	MsgCronAdded          MsgKey = "cron_added"
 	MsgCronAddedExec      MsgKey = "cron_added_exec"
 	MsgCronAddExecUsage   MsgKey = "cron_addexec_usage"
@@ -1529,6 +1530,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 定時任務 `%s` 已關聯會話 %s",
 		LangJapanese:           "✅ cron `%s` をセッション %s に紐付けました",
 		LangSpanish:            "✅ cron `%s` ahora vinculado a la sesión %s",
+	},
+	MsgCronSessionPick: {
+		LangEnglish:            "Use",
+		LangChinese:            "选此会话",
+		LangTraditionalChinese: "選此會話",
+		LangJapanese:           "選択",
+		LangSpanish:            "Usar",
 	},
 	MsgCronNotAvailable: {
 		LangEnglish:            "Cron scheduler is not available.",
