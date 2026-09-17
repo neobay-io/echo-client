@@ -142,6 +142,7 @@ func main() {
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	var agentUpgradeMgr *core.AgentUpgradeManager
+	var agentAuthMgr *core.AgentAuthManager
 
 	for _, proj := range cfg.Projects {
 		agent, err := core.CreateAgent(proj.Agent.Type, proj.Agent.Options)
@@ -476,12 +477,22 @@ func main() {
 		capturedEngine := engine
 		capturedProjName := projName
 		engine.SetConfigReloadFunc(func() (*core.ConfigReloadResult, error) {
-			return reloadConfig(configPath, capturedProjName, capturedEngine, agentUpgradeMgr)
+			return reloadConfig(configPath, capturedProjName, capturedEngine, agentUpgradeMgr, agentAuthMgr)
 		})
 
 		engines = append(engines, engine)
 	}
 
+	agentAuthMgr = core.NewAgentAuthManager(buildAgentAuthConfig(cfg.AgentAuth), func() {
+		for _, engine := range engines {
+			if engine.GetAgent().Name() == "claudecode" {
+				engine.RefreshInteractiveAuth()
+			}
+		}
+	})
+	for _, engine := range engines {
+		engine.SetAgentAuthManager(agentAuthMgr)
+	}
 	agentUpgradeMgr = core.NewAgentUpgradeManager(buildAgentUpgradeConfig(cfg.AgentUpdates))
 	agentUpgradeMgr.SetBusyCountFunc(func(agentName string) int {
 		count := 0
@@ -847,7 +858,7 @@ func setupLogger(level string, w io.Writer) {
 
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
 // (display, providers, commands) to the given engine.
-func reloadConfig(configPath, projName string, engine *core.Engine, agentUpgradeMgr *core.AgentUpgradeManager) (*core.ConfigReloadResult, error) {
+func reloadConfig(configPath, projName string, engine *core.Engine, agentUpgradeMgr *core.AgentUpgradeManager, agentAuthMgr *core.AgentAuthManager) (*core.ConfigReloadResult, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("reload config: %w", err)
@@ -855,6 +866,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine, agentUpgrade
 
 	if agentUpgradeMgr != nil {
 		agentUpgradeMgr.ApplyConfig(buildAgentUpgradeConfig(cfg.AgentUpdates))
+	}
+	if agentAuthMgr != nil {
+		agentAuthMgr.ApplyConfig(buildAgentAuthConfig(cfg.AgentAuth))
 	}
 
 	result := &core.ConfigReloadResult{}
@@ -949,6 +963,14 @@ func resolveProjectSkillDirs(proj config.ProjectConfig, ag core.Agent) []string 
 		}
 	}
 	return dedupeTrimmedStrings(dirs)
+}
+
+func buildAgentAuthConfig(cfg config.AgentAuthConfig) core.AgentAuthConfig {
+	return core.AgentAuthConfig{
+		Enabled:        cfg.Enabled,
+		AllowedUserIDs: cfg.AllowedUserIDs,
+		Timeout:        time.Duration(cfg.TimeoutSecs) * time.Second,
+	}
 }
 
 func buildAgentUpgradeConfig(cfg config.AgentUpdatesConfig) core.AgentUpgradeConfig {

@@ -794,6 +794,39 @@ Each user gets an independent session with full conversation context. Manage ses
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all** (auto-approve all remaining requests this session).
 
+## Remote Claude Login
+
+Enable remote login explicitly and list the administrators' platform user IDs:
+
+```toml
+[agent_auth]
+enabled = true
+allowed_user_ids = ["ou_your_feishu_user_id", "your_telegram_user_id"]
+timeout_secs = 600
+```
+
+In a **private chat** with a Claude Code bot, send `/auth login`. Open the official
+Claude authorization link on your phone or another computer, authorize, and submit
+the **one-time authorization code** with `/auth code <code>`. Use `/auth status` to
+check credentials or `/auth cancel` to stop the login. A pending login consumes
+ordinary messages from its initiating chat without forwarding them to the Agent.
+
+The official `claude auth login --claudeai` CLI owns the OAuth flow and credential
+storage. Authorization codes are not logged, stored in cc-connect history, or sent
+to the Agent, but your chat platform may retain submitted messages. **Do not paste
+long-lived tokens.** The daemon permits one login at a time and binds it to the
+initiating project, administrator, and chat. Unknown/group/forwarded/quoted contexts
+are rejected. This feature requires a CLI version supporting `claude auth login`
+with a manual code prompt and PTY support (verified with Claude Code 2.1.273).
+
+After successful login, this daemon marks its cached Claude interactive processes
+for replacement before their next turn, allowing running replies to finish.
+The next turn starts a new process without clearing local history or
+session bindings. Credentials are shared with other Claude programs using the
+same OS account/configuration directory; other daemons may need to refresh their
+processes separately. Environment/settings token overrides must be removed
+separately. Login does not recover a missing backend transcript.
+
 ## Multi-Bot Relay
 
 cc-connect supports cross-platform bot communication, enabling multiple AI agents to collaborate in a single group chat.

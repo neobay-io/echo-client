@@ -150,6 +150,13 @@ level = "info" # debug, info, warn, error
 # - gemini: 默认 observe-only（提供 npm 命令，但默认不执行）
 # - qoder: builtin（`qodercli update`）
 
+# Remote Claude login: disabled by default, explicit administrators + private chats only.
+# Uses the official CLI and accepts one-time authorization codes, NOT persistent tokens.
+# [agent_auth]
+# enabled = true
+# allowed_user_ids = ["ou_xxx", "7394290413"]
+# timeout_secs = 600           # maximum 1800; 0 uses the 600-second default
+
 # [agent_updates]
 # enabled = true
 # run_enabled = false          # gates only chat-triggered `/agent-upgrade run`; scheduler still follows policy below

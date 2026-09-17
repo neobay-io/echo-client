@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestAuthPrivateChatMetadata(t *testing.T) {
+	p := &Platform{}
+	if !p.IsPrivateChat(replyContext{private: true}) {
+		t.Fatal("explicit private chat rejected")
+	}
+	for _, ctx := range []any{replyContext{chatID: "group"}, replyContext{}, nil, "private"} {
+		if p.IsPrivateChat(ctx) {
+			t.Fatalf("unverified context accepted: %#v", ctx)
+		}
+	}
+}
+
 func TestExtractPostParts_TextOnly(t *testing.T) {
 	p := &Platform{}
 	post := &postLang{

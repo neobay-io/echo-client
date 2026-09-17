@@ -24,6 +24,12 @@ func init() {
 type replyContext struct {
 	chatID    int64
 	messageID int
+	private   bool
+}
+
+func (p *Platform) IsPrivateChat(ctx any) bool {
+	rctx, ok := ctx.(replyContext)
+	return ok && rctx.private
 }
 
 type quotedMessage struct {
@@ -159,7 +165,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30
-	updates := bot.GetUpdatesChan(u)
+	updates := pollUpdates(ctx, bot, u)
 
 	go func() {
 		for {
@@ -206,13 +212,13 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 				// In group chats, filter messages not directed at this bot (unless group_reply_all)
 				if isGroup && !p.groupReplyAll {
-					slog.Debug("telegram: checking group message", "bot", p.bot.Self.UserName, "text", msg.Text, "is_command", msg.IsCommand())
+					slog.Debug("telegram: checking group message", "bot", p.bot.Self.UserName, "is_command", msg.IsCommand())
 					if !p.isDirectedAtBot(msg) {
 						continue
 					}
 				}
 
-				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID}
+				rctx := replyContext{chatID: msg.Chat.ID, messageID: msg.MessageID, private: msg.Chat.Type == "private"}
 				quoted := extractQuotedMessage(msg.ReplyToMessage)
 
 				// Handle photo messages
@@ -676,10 +682,10 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 		}
 		if atIdx > 0 && atIdx < cmdEnd {
 			target := msg.Text[atIdx+1 : cmdEnd]
-			slog.Debug("telegram: command with @suffix", "bot", botName, "target", target, "match", strings.EqualFold(target, botName))
+			slog.Debug("telegram: command with @suffix", "bot", botName, "match", strings.EqualFold(target, botName))
 			return strings.EqualFold(target, botName)
 		}
-		slog.Debug("telegram: command without @suffix, accepting", "bot", botName, "text", msg.Text)
+		slog.Debug("telegram: command without @suffix, accepting", "bot", botName)
 		return true // /cmd without @suffix — accept
 	}
 
@@ -688,7 +694,7 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 		for _, e := range msg.Entities {
 			if e.Type == "mention" && e.Offset+e.Length <= len(msg.Text) {
 				mention := msg.Text[e.Offset : e.Offset+e.Length]
-				slog.Debug("telegram: checking mention", "bot", botName, "mention", mention, "match", strings.EqualFold(mention, "@"+botName))
+				slog.Debug("telegram: checking mention", "bot", botName, "match", strings.EqualFold(mention, "@"+botName))
 				if strings.EqualFold(mention, "@"+botName) {
 					return true
 				}
@@ -716,7 +722,7 @@ func (p *Platform) isDirectedAtBot(msg *tgbotapi.Message) bool {
 		}
 	}
 
-	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName, "text", msg.Text, "entities", msg.Entities)
+	slog.Debug("telegram: ignoring group message not directed at bot", "chat", msg.Chat.ID, "bot", botName)
 	return false
 }
 

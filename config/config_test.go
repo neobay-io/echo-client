@@ -6,6 +6,50 @@ import (
 	"testing"
 )
 
+func TestLoadAgentAuthConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := minimalConfigTOML + "\n[agent_auth]\nenabled = true\nallowed_user_ids = [\"admin\"]\ntimeout_secs = 120\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AgentAuth.Enabled || cfg.AgentAuth.TimeoutSecs != 120 ||
+		len(cfg.AgentAuth.AllowedUserIDs) != 1 || cfg.AgentAuth.AllowedUserIDs[0] != "admin" {
+		t.Fatalf("auth config = %#v", cfg.AgentAuth)
+	}
+}
+
+func TestAgentAuthConfigValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  AgentAuthConfig
+		bad  bool
+	}{
+		{"default", AgentAuthConfig{}, false},
+		{"explicit", AgentAuthConfig{Enabled: true, AllowedUserIDs: []string{"admin"}}, false},
+		{"no-users", AgentAuthConfig{Enabled: true}, true},
+		{"blank", AgentAuthConfig{Enabled: true, AllowedUserIDs: []string{" "}}, true},
+		{"wildcard", AgentAuthConfig{Enabled: true, AllowedUserIDs: []string{"*"}}, true},
+		{"negative-timeout", AgentAuthConfig{TimeoutSecs: -1}, true},
+		{"large-timeout", AgentAuthConfig{TimeoutSecs: 1801}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				AgentAuth: tc.cfg,
+				Projects: []ProjectConfig{{
+					Name: "test", Role: "reviewer", Agent: AgentConfig{Type: "claudecode"},
+				}},
+			}
+			if err := cfg.validate(); (err != nil) != tc.bad {
+				t.Fatalf("validate error = %v, want invalid=%v", err, tc.bad)
+			}
+		})
+	}
+}
+
 func TestResolveDefaultHomeDataDirPrefersEchoClient(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	dir := t.TempDir()

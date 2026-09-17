@@ -146,6 +146,7 @@ type Engine struct {
 	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 	agentUpgradeMgr  *AgentUpgradeManager
+	agentAuthMgr     *AgentAuthManager
 
 	cronScheduler *CronScheduler
 
@@ -212,6 +213,7 @@ type Engine struct {
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession AgentSession
+	authStale    bool // guarded by Engine.interactiveMu; retire before the next turn
 	platform     Platform
 	replyCtx     any
 	mu           sync.Mutex
@@ -1163,6 +1165,10 @@ func (e *Engine) resolveAlias(content string) string {
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	// Consume credential commands before pending edits, aliases, or Agent routing.
+	if e.handleAuthMessage(p, msg) {
+		return
+	}
 	slog.Info("message received",
 		"platform", msg.Platform, "msg_id", msg.MessageID,
 		"session", msg.SessionKey, "user", msg.UserName,
@@ -2726,15 +2732,24 @@ func (e *Engine) agentUpgradeBlockedMessage() string {
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
 	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
-
+	quietMode := e.defaultQuiet
 	state, ok := e.interactiveStates[sessionKey]
+	if ok && state.authStale {
+		state.mu.Lock()
+		quietMode = state.quiet
+		state.mu.Unlock()
+		delete(e.interactiveStates, sessionKey)
+		e.interactiveMu.Unlock()
+		e.closeInteractiveState(state)
+		e.interactiveMu.Lock()
+		state, ok = e.interactiveStates[sessionKey]
+	}
+	defer e.interactiveMu.Unlock()
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		return state
 	}
 
 	// Preserve quiet setting from existing state (e.g. set via /quiet before session started)
-	quietMode := e.defaultQuiet
 	if ok && state != nil {
 		state.mu.Lock()
 		quietMode = state.quiet
@@ -2789,9 +2804,15 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
 
-	if ok && state != nil && state.agentSession != nil {
+	if ok {
+		e.closeInteractiveState(state)
+	}
+}
+
+func (e *Engine) closeInteractiveState(state *interactiveState) {
+	if state != nil && state.agentSession != nil {
 		state.stop()
-		slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
+		slog.Debug("closing interactive agent session")
 		closeStart := time.Now()
 
 		done := make(chan struct{})
@@ -2803,10 +2824,10 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 		select {
 		case <-done:
 			if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
-				slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
+				slog.Warn("slow agent session close", "elapsed", elapsed)
 			}
 		case <-time.After(10 * time.Second):
-			slog.Error("agent session close timed out (10s), abandoning", "session", sessionKey)
+			slog.Error("agent session close timed out (10s), abandoning")
 		}
 	}
 }
@@ -3265,6 +3286,7 @@ var builtinCommands = []struct {
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
 	{[]string{"attach"}, "attach"},
+	{[]string{"auth"}, "auth"},
 	{[]string{"name", "rename"}, "name"},
 	{[]string{"current"}, "current"},
 	{[]string{"status"}, "status"},
@@ -3366,6 +3388,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	}
 
 	switch cmdID {
+	case "auth":
+		e.cmdAuth(p, msg, args)
 	case "new":
 		e.cmdNew(p, msg, args)
 	case "list":
@@ -5400,6 +5424,11 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 		}
 		defer agentTurn.Unlock()
 
+		state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
+		if state.agentSession == nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
+			return
+		}
 		state.mu.Lock()
 		state.platform = p
 		state.replyCtx = msg.ReplyCtx

@@ -812,6 +812,7 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
+			"/auth [status|login|code <code>|cancel]\n  Claude login (administrator private chat only)\n\n" +
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List cc-connect sessions for this chat\n\n" +
 			"/search <keyword>\n  Search cc-connect sessions by name, ID, or message\n\n" +
@@ -853,6 +854,7 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
+			"/auth [status|login|code <授权码>|cancel]\n  Claude 登录（仅管理员私聊）\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出当前聊天的 cc-connect 会话\n\n" +
 			"/search <关键词>\n  按名称、ID 或消息搜索 cc-connect 会话\n\n" +
@@ -894,6 +896,7 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
+			"/auth [status|login|code <授權碼>|cancel]\n  Claude 登入（僅管理員私聊）\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出目前聊天的 cc-connect 會話\n\n" +
 			"/search <關鍵詞>\n  按名稱、ID 或訊息搜尋 cc-connect 會話\n\n" +
@@ -934,6 +937,7 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
+			"/auth [status|login|code <コード>|cancel]\n  Claude 認証（管理者の個別チャットのみ）\n\n" +
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  このチャットの cc-connect セッション一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
@@ -973,6 +977,7 @@ var messages = map[MsgKey]map[Language]string{
 			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
+			"/auth [status|login|code <código>|cancel]\n  Autenticación Claude (chat privado de administrador)\n\n" +
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones de cc-connect para este chat\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
@@ -2588,6 +2593,89 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Usa /switch <id> para cambiar a una sesión.",
 	},
 	// Builtin command descriptions
+	MsgKey("auth"): {
+		LangEnglish:            "Claude login: status | login | code <code> | cancel (admin private chat)",
+		LangChinese:            "Claude 登录：status | login | code <授权码> | cancel（管理员私聊）",
+		LangTraditionalChinese: "Claude 登入：status | login | code <授權碼> | cancel（管理員私聊）",
+		LangJapanese:           "Claude 認証: status | login | code <コード> | cancel（管理者の個別チャット）",
+		LangSpanish:            "Autenticación Claude: status | login | code <código> | cancel (chat privado de administrador)",
+	},
+	MsgKey("auth_usage"): {
+		LangEnglish: "Usage: /auth status | /auth login | /auth code <one-time authorization code> | /auth cancel. Never send persistent tokens.",
+		LangChinese: "用法：/auth status | /auth login | /auth code <一次性授权码> | /auth cancel。请勿发送长期 token。",
+	},
+	MsgKey("auth_denied"): {
+		LangEnglish: "Remote login is disabled or you are not an authorized administrator. Configure [agent_auth] and explicit allowed_user_ids.",
+		LangChinese: "远程登录未启用，或你不在管理员白名单中。请配置 [agent_auth] 和明确的 allowed_user_ids。",
+	},
+	MsgKey("auth_private"): {
+		LangEnglish: "Use /auth in an administrator's private chat with this bot. Forwarded, quoted, and attachment messages are not accepted.",
+		LangChinese: "请在管理员与机器人的私聊中使用 /auth。不接受转发、引用或带附件的授权消息。",
+	},
+	MsgKey("auth_unsupported"): {
+		LangEnglish: "Remote login currently supports Claude Code projects only.",
+		LangChinese: "远程登录目前仅支持 Claude Code 项目。",
+	},
+	MsgKey("auth_busy"): {
+		LangEnglish: "Another login is in progress. Finish it or cancel it from the private chat that started it.",
+		LangChinese: "已有登录流程进行中。请完成登录，或在发起登录的私聊中取消。",
+	},
+	MsgKey("auth_override"): {
+		LangEnglish: "CLAUDE_CODE_OAUTH_TOKEN is set in the daemon environment. Remove that override before browser login; otherwise new Claude processes keep using the token.",
+		LangChinese: "daemon 环境中设置了 CLAUDE_CODE_OAUTH_TOKEN，请先移除该覆盖再进行浏览器登录，否则新 Claude 进程仍会使用该 token。",
+	},
+	MsgKey("auth_link"): {
+		LangEnglish: "Open this official Claude link in your browser:\n%s\n\nAfter authorizing, submit the one-time code using /auth code <code>. The code is handled by the CLI, not the Agent. Chat providers may retain your message; never paste a persistent token. /auth cancel aborts login.",
+		LangChinese: "请在浏览器中打开 Claude 官方授权链接：\n%s\n\n授权后发送 /auth code <一次性授权码>。授权码只交给 CLI，不会发送给 Agent。聊天平台可能保留消息，请勿粘贴长期 token。可用 /auth cancel 取消。",
+	},
+	MsgKey("auth_code_hint"): {
+		LangEnglish: "Login is pending. This message was not sent to the Agent. Submit only a one-time code using /auth code <code>, or use /auth cancel.",
+		LangChinese: "正在等待登录，此消息未发送给 Agent。请使用 /auth code <一次性授权码> 提交，或用 /auth cancel 取消。",
+	},
+	MsgKey("auth_invalid_code"): {
+		LangEnglish: "Invalid authorization code. Submit a single one-time code, not a persistent token, URL, or multiline text.",
+		LangChinese: "授权码格式不正确。请仅提交单个一次性授权码，不要提交长期 token、URL 或多行文本。",
+	},
+	MsgKey("auth_no_pending"): {
+		LangEnglish: "No active login belongs to this administrator and chat. Start with /auth login.",
+		LangChinese: "当前管理员和私聊没有进行中的登录流程，请先发送 /auth login。",
+	},
+	MsgKey("auth_not_ready"): {
+		LangEnglish: "Wait for the authorization link, or for the submitted code to finish. To retry a code, cancel and start a new login.",
+		LangChinese: "请等待授权链接，或等待已提交的授权码处理完成。如需重新提交，请取消后重新登录。",
+	},
+	MsgKey("auth_submitted"): {
+		LangEnglish: "Authorization code submitted. Waiting for Claude to complete login.",
+		LangChinese: "授权码已提交，正在等待 Claude 完成登录。",
+	},
+	MsgKey("auth_success"): {
+		LangEnglish: "Claude login completed. Running replies are allowed to finish; cached Claude processes will be replaced before their next turn. Local sessions and history are retained. Missing transcripts require separate recovery.",
+		LangChinese: "Claude 登录成功。正在运行的回复会继续完成，旧 Claude 进程会在下一轮启动前替换。本地会话和历史保留；缺失的 transcript 仍需单独恢复。",
+	},
+	MsgKey("auth_failed"): {
+		LangEnglish: "Claude authentication failed or its CLI response could not be verified. Try /auth login again; also check that Claude CLI is installed and reachable.",
+		LangChinese: "Claude 认证失败，或无法验证 CLI 的结果。请重新 /auth login，并确认 Claude CLI 已安装且网络可用。",
+	},
+	MsgKey("auth_timeout"): {
+		LangEnglish: "Claude login timed out. Start again with /auth login.",
+		LangChinese: "Claude 登录已超时，请重新发送 /auth login。",
+	},
+	MsgKey("auth_cancelled"): {
+		LangEnglish: "Claude login cancelled.",
+		LangChinese: "Claude 登录已取消。",
+	},
+	MsgKey("auth_pending"): {
+		LangEnglish: "A Claude login is pending for this chat. /auth cancel aborts it.",
+		LangChinese: "当前私聊有进行中的 Claude 登录，可用 /auth cancel 取消。",
+	},
+	MsgKey("auth_logged_in"): {
+		LangEnglish: "Claude CLI reports logged in. This credential check does not verify a live model request.",
+		LangChinese: "Claude CLI 显示已登录。此凭证检查不等于实时模型请求验证。",
+	},
+	MsgKey("auth_logged_out"): {
+		LangEnglish: "Claude CLI is not logged in. Use /auth login.",
+		LangChinese: "Claude CLI 未登录，请使用 /auth login。",
+	},
 	MsgBuiltinCmdNew: {
 		LangEnglish:            "Start a new session, arg: [name]",
 		LangChinese:            "创建新会话，参数: [名称]",

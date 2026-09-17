@@ -24,6 +24,12 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// PrivateChatChecker must use platform-provided chat metadata, not user text.
+// Unknown or reconstructed contexts must fail closed for credential commands.
+type PrivateChatChecker interface {
+	IsPrivateChat(replyCtx any) bool
+}
+
 // FileSender is implemented by platforms that support sending local files.
 type FileSender interface {
 	SendFile(ctx context.Context, replyCtx any, path string, caption string) error

@@ -31,6 +31,12 @@ func init() {
 type replyContext struct {
 	messageID string
 	chatID    string
+	private   bool
+}
+
+func (p *Platform) IsPrivateChat(ctx any) bool {
+	rctx, ok := ctx.(replyContext)
+	return ok && rctx.private
 }
 
 type quotedMessage struct {
@@ -300,7 +306,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	} else {
 		sessionKey = fmt.Sprintf("feishu:%s:%s", chatID, userID)
 	}
-	rctx := replyContext{messageID: messageID, chatID: chatID}
+	rctx := replyContext{messageID: messageID, chatID: chatID, private: chatType == "p2p"}
 	quoted := p.fetchQuotedMessage(msg.ParentId, msg.RootId)
 
 	switch msgType {

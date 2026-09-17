@@ -32,6 +32,7 @@ type Config struct {
 	Speech                SpeechConfig        `toml:"speech"`
 	TTS                   TTSConfig           `toml:"tts"`
 	AgentUpdates          AgentUpdatesConfig  `toml:"agent_updates"`
+	AgentAuth             AgentAuthConfig     `toml:"agent_auth"`
 	Display               DisplayConfig       `toml:"display"`
 	StreamPreview         StreamPreviewConfig `toml:"stream_preview"`  // real-time streaming preview
 	RateLimit             RateLimitConfig     `toml:"rate_limit"`      // per-session rate limiting
@@ -58,6 +59,12 @@ type EchoConfig struct {
 	OrgID                string   `toml:"org_id"`
 	Tags                 []string `toml:"tags"`
 	HeartbeatIntervalSec int      `toml:"heartbeat_interval_sec"`
+}
+
+type AgentAuthConfig struct {
+	Enabled        bool     `toml:"enabled"`
+	AllowedUserIDs []string `toml:"allowed_user_ids"`
+	TimeoutSecs    int      `toml:"timeout_secs"`
 }
 
 type AgentUpdatesConfig struct {
@@ -403,6 +410,12 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+	if c.AgentAuth.TimeoutSecs < 0 || c.AgentAuth.TimeoutSecs > 1800 {
+		return fmt.Errorf("config: agent_auth.timeout_secs must be between 0 and 1800")
+	}
+	if c.AgentAuth.Enabled && !hasExplicitAuthUser(c.AgentAuth.AllowedUserIDs) {
+		return fmt.Errorf("config: agent_auth.allowed_user_ids must include explicit users when enabled")
+	}
 	if c.AgentUpdates.TimeoutSecs < 0 {
 		return fmt.Errorf("config: agent_updates.timeout_secs must be >= 0")
 	}
@@ -457,6 +470,16 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+func hasExplicitAuthUser(users []string) bool {
+	for _, user := range users {
+		user = strings.TrimSpace(user)
+		if user != "" && user != "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // SaveActiveProvider persists the active provider name for a project.

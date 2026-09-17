@@ -740,6 +740,34 @@ cc-connect daemon uninstall
 
 会话进行中，Agent 可能请求工具权限。回复 **允许** / **拒绝** / **允许所有**（本次会话自动批准后续所有请求）。
 
+## Claude 远程登录
+
+默认关闭。启用时必须配置明确的管理员平台用户 ID：
+
+```toml
+[agent_auth]
+enabled = true
+allowed_user_ids = ["ou_你的飞书用户ID", "你的Telegram用户ID"]
+timeout_secs = 600
+```
+
+在与 Claude Code 机器人的**私聊**中发送 `/auth login`。用手机或另一台电脑打开
+返回的 Claude 官方授权链接，授权后发送 `/auth code <一次性授权码>`。
+`/auth status` 查看凭证状态，`/auth cancel` 取消登录。等待登录期间，同一私聊的
+普通消息会被拦截，不会发送给 Agent。
+
+登录由官方 `claude auth login --claudeai` 进程完成，OAuth 凭证仍由 Claude CLI
+管理。授权码不会写入 echo-client 日志或本地会话历史，也不会发送给 Agent；
+但聊天平台可能保留你提交的消息，**请勿粘贴长期 token**。同一 daemon 一次只能
+进行一个登录流程，并绑定发起项目、管理员和私聊。拒绝群聊、未知聊天类型、
+转发和引用消息。需要支持手动授权码输入的 Claude CLI 和 PTY 环境，已在
+Claude Code 2.1.273 验证链接及输入提示。
+
+登录成功后，该 daemon 会标记已有的 Claude 交互进程，在下一轮启动前替换；正在运行的回复会继续完成。
+本地历史与会话绑定保留。使用同一系统用户和配置目录的其他 Claude 程序共享
+凭证，但其他 daemon 可能需要单独刷新进程。环境变量或 settings 中的 token
+覆盖需要另外移除。登录本身不会恢复已经缺失的 backend transcript。
+
 ## 多机器人中继
 
 cc-connect 支持跨平台机器人通信，让多个 AI Agent 在同一个群聊中协作。
