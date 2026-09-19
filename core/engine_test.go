@@ -658,6 +658,9 @@ func TestShouldResetAgentSessionOnResult(t *testing.T) {
 	if !e.shouldResetAgentSessionOnResult("Payload too large for this request") {
 		t.Fatal("expected payload size limit to trigger reset")
 	}
+	if !e.shouldResetAgentSessionOnResult("No conversation found with session ID: missing") {
+		t.Fatal("expected missing Claude transcript to trigger reset")
+	}
 	if e.shouldResetAgentSessionOnResult("normal response") {
 		t.Fatal("did not expect normal response to trigger reset")
 	}
@@ -674,6 +677,7 @@ func TestBuildAgentPrompt_IncludesReplayContextAfterReset(t *testing.T) {
 	session.AddHistory("user", "Please review the image set in SocialOps.")
 	session.AddHistory("assistant", "I checked the folder and found a few suspicious files.")
 	session.AddHistory("assistant", "API Error: 400 {\"type\":\"error\",\"error\":{\"message\":\"Could not process image\"}}")
+	session.AddHistory("assistant", "No conversation found with session ID: missing")
 
 	got := e.buildAgentPrompt(session, &Message{Content: "Continue with the cleanup plan."})
 	if !strings.Contains(got, "Previous conversation context:") {
@@ -687,6 +691,9 @@ func TestBuildAgentPrompt_IncludesReplayContextAfterReset(t *testing.T) {
 	}
 	if strings.Contains(got, "Could not process image") {
 		t.Fatalf("prompt should exclude fatal image error history: %q", got)
+	}
+	if strings.Contains(got, "No conversation found") {
+		t.Fatalf("prompt should exclude missing transcript error history: %q", got)
 	}
 	if !strings.Contains(got, "Continue from that context.") || !strings.Contains(got, "Continue with the cleanup plan.") {
 		t.Fatalf("prompt missing current turn continuation: %q", got)

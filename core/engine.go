@@ -3216,6 +3216,13 @@ func (e *Engine) shouldResetAgentSessionOnResult(content string) bool {
 		return false
 	}
 	lower := strings.ToLower(content)
+	if strings.Contains(lower, "no conversation found") ||
+		strings.Contains(lower, "session not found") ||
+		strings.Contains(lower, "failed to resume") ||
+		strings.Contains(lower, "resolve rollout") ||
+		strings.Contains(lower, "rollout path") {
+		return true
+	}
 	if strings.Contains(lower, "request too large") ||
 		strings.Contains(lower, "payload too large") ||
 		strings.Contains(lower, "max 20mb") {

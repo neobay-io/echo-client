@@ -345,10 +345,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 }
 
 func (cs *claudeSession) handleResult(raw map[string]any) {
-	var content string
-	if result, ok := raw["result"].(string); ok {
-		content = result
-	}
+	content := claudeResultContent(raw)
 	if containsClaudeImageError(content) {
 		slog.Error("claudeSession: image failure result", "content", content, "recent_tools", strings.Join(cs.snapshotRecentTools(), " | "))
 	}
@@ -361,6 +358,40 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	case <-cs.ctx.Done():
 		return
 	}
+}
+
+func claudeResultContent(raw map[string]any) string {
+	result, _ := raw["result"].(string)
+	if isError, _ := raw["is_error"].(bool); !isError {
+		return result
+	}
+
+	parts := make([]string, 0, 2)
+	if result = strings.TrimSpace(result); result != "" {
+		parts = append(parts, result)
+	}
+	switch values := raw["errors"].(type) {
+	case []any:
+		for _, value := range values {
+			if message, ok := value.(string); ok && strings.TrimSpace(message) != "" {
+				parts = append(parts, strings.TrimSpace(message))
+			}
+		}
+	case []string:
+		for _, message := range values {
+			if strings.TrimSpace(message) != "" {
+				parts = append(parts, strings.TrimSpace(message))
+			}
+		}
+	case string:
+		if strings.TrimSpace(values) != "" {
+			parts = append(parts, strings.TrimSpace(values))
+		}
+	}
+	if len(parts) == 0 {
+		return "Claude request failed."
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (cs *claudeSession) handleControlRequest(raw map[string]any) {

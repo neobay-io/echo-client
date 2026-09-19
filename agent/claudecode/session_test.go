@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"image"
 	"image/color"
@@ -289,6 +290,39 @@ func TestContainsClaudeImageError(t *testing.T) {
 				t.Fatalf("containsClaudeImageError(%q) = %v, want %v", tc.content, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestClaudeResultContentIncludesExecutionErrors(t *testing.T) {
+	raw := map[string]any{
+		"type":       "result",
+		"subtype":    "error_during_execution",
+		"is_error":   true,
+		"result":     "",
+		"session_id": "27c523cc-a4c5-45a6-8017-6e8379d35707",
+		"errors":     []any{"No conversation found with session ID: 27c523cc-a4c5-45a6-8017-6e8379d35707"},
+	}
+
+	got := claudeResultContent(raw)
+	if !strings.Contains(got, "No conversation found") {
+		t.Fatalf("execution error was lost: %q", got)
+	}
+
+	cs := &claudeSession{events: make(chan core.Event, 1), ctx: context.Background()}
+	cs.sessionID.Store("")
+	cs.handleResult(raw)
+	event := <-cs.events
+	if event.Type != core.EventResult || event.Content != got {
+		t.Fatalf("event = %#v, want result containing %q", event, got)
+	}
+}
+
+func TestClaudeResultContentPreservesSuccessfulResult(t *testing.T) {
+	if got := claudeResultContent(map[string]any{"result": "hello"}); got != "hello" {
+		t.Fatalf("successful result = %q", got)
+	}
+	if got := claudeResultContent(map[string]any{"is_error": true}); got != "Claude request failed." {
+		t.Fatalf("empty error result = %q", got)
 	}
 }
 
