@@ -5839,9 +5839,6 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 // SendFileToSession sends a local file to an active session from an external caller (API/CLI).
 // An omitted session key is accepted only when exactly one session is active.
 func (e *Engine) SendFileToSession(sessionKey, path, caption string) error {
-	e.interactiveMu.Lock()
-	defer e.interactiveMu.Unlock()
-
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("path is required")
@@ -5850,6 +5847,7 @@ func (e *Engine) SendFileToSession(sessionKey, path, caption string) error {
 		return fmt.Errorf("path must be absolute")
 	}
 
+	e.interactiveMu.Lock()
 	var state *interactiveState
 	if sessionKey != "" {
 		state = e.interactiveStates[sessionKey]
@@ -5859,6 +5857,7 @@ func (e *Engine) SendFileToSession(sessionKey, path, caption string) error {
 				continue
 			}
 			if state != nil {
+				e.interactiveMu.Unlock()
 				return fmt.Errorf("session key is required when multiple sessions are active")
 			}
 			state = s
@@ -5866,6 +5865,7 @@ func (e *Engine) SendFileToSession(sessionKey, path, caption string) error {
 	}
 
 	if state == nil {
+		e.interactiveMu.Unlock()
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)
 	}
 
@@ -5873,6 +5873,7 @@ func (e *Engine) SendFileToSession(sessionKey, path, caption string) error {
 	p := state.platform
 	replyCtx := state.replyCtx
 	state.mu.Unlock()
+	e.interactiveMu.Unlock()
 
 	if p == nil {
 		return fmt.Errorf("no active session found (key=%q)", sessionKey)

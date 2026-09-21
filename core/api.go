@@ -158,21 +158,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	engine, ok := s.engines[req.Project]
-	s.mu.RUnlock()
-
-	if !ok {
-		// If only one engine, use it by default
-		s.mu.RLock()
-		if len(s.engines) == 1 {
-			for _, e := range s.engines {
-				engine = e
-				ok = true
-			}
-		}
-		s.mu.RUnlock()
-	}
+	engine, ok := s.resolveEngine(req.Project)
 
 	if !ok {
 		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
@@ -206,20 +192,7 @@ func (s *APIServer) handleSendFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	engine, ok := s.engines[req.Project]
-	s.mu.RUnlock()
-
-	if !ok {
-		s.mu.RLock()
-		if len(s.engines) == 1 {
-			for _, e := range s.engines {
-				engine = e
-				ok = true
-			}
-		}
-		s.mu.RUnlock()
-	}
+	engine, ok := s.resolveEngine(req.Project)
 
 	if !ok {
 		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
@@ -235,6 +208,26 @@ func (s *APIServer) handleSendFile(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
 		slog.Warn("api: encode /send-file response failed", "error", err)
 	}
+}
+
+// resolveEngine permits implicit routing only when the caller omitted the
+// project and exactly one engine is configured. An explicit unknown project
+// must never fall through to another project.
+func (s *APIServer) resolveEngine(project string) (*Engine, bool) {
+	project = strings.TrimSpace(project)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if project != "" {
+		engine, ok := s.engines[project]
+		return engine, ok
+	}
+	if len(s.engines) != 1 {
+		return nil, false
+	}
+	for _, engine := range s.engines {
+		return engine, true
+	}
+	return nil, false
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
