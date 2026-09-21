@@ -60,6 +60,37 @@ func TestEngineSendFileToSession(t *testing.T) {
 	}
 }
 
+func TestEngineSendFileToSessionAllowsSingleImplicitSession(t *testing.T) {
+	p := &stubFilePlatform{n: "stub"}
+	e := NewEngine("proj", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.interactiveStates["session-1"] = &interactiveState{
+		platform: p,
+		replyCtx: "reply",
+	}
+
+	if err := e.SendFileToSession("", "/tmp/report.pdf", "single session"); err != nil {
+		t.Fatalf("SendFileToSession: %v", err)
+	}
+	if p.sentPath != "/tmp/report.pdf" {
+		t.Fatalf("sentPath = %q, want /tmp/report.pdf", p.sentPath)
+	}
+}
+
+func TestEngineSendFileToSessionRejectsAmbiguousImplicitSession(t *testing.T) {
+	p := &stubFilePlatform{n: "stub"}
+	e := NewEngine("proj", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.interactiveStates["group-session"] = &interactiveState{platform: p, replyCtx: "group"}
+	e.interactiveStates["private-session"] = &interactiveState{platform: p, replyCtx: "private"}
+
+	err := e.SendFileToSession("", "/tmp/report.pdf", "ambiguous")
+	if err == nil || !strings.Contains(err.Error(), "session key is required") {
+		t.Fatalf("SendFileToSession ambiguous session err = %v", err)
+	}
+	if p.sentPath != "" {
+		t.Fatalf("file was sent despite ambiguous session: %q", p.sentPath)
+	}
+}
+
 func TestAPIServerHandleSendFile(t *testing.T) {
 	p := &stubFilePlatform{n: "stub"}
 	e := NewEngine("proj", &stubAgent{}, []Platform{p}, "", LangEnglish)

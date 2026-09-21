@@ -5837,7 +5837,7 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 }
 
 // SendFileToSession sends a local file to an active session from an external caller (API/CLI).
-// If sessionKey is empty, it picks the first active session.
+// An omitted session key is accepted only when exactly one session is active.
 func (e *Engine) SendFileToSession(sessionKey, path, caption string) error {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
@@ -5855,8 +5855,13 @@ func (e *Engine) SendFileToSession(sessionKey, path, caption string) error {
 		state = e.interactiveStates[sessionKey]
 	} else {
 		for _, s := range e.interactiveStates {
+			if s == nil {
+				continue
+			}
+			if state != nil {
+				return fmt.Errorf("session key is required when multiple sessions are active")
+			}
 			state = s
-			break
 		}
 	}
 

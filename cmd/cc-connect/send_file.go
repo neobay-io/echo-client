@@ -65,6 +65,8 @@ func runSendFile(args []string) {
 		}
 	}
 
+	project, sessionKey = resolveSendFileTarget(project, sessionKey)
+
 	if strings.TrimSpace(path) == "" {
 		fmt.Fprintln(os.Stderr, "Error: path is required")
 		printSendFileUsage()
@@ -117,6 +119,18 @@ func runSendFile(args []string) {
 	fmt.Println("File sent successfully.")
 }
 
+func resolveSendFileTarget(project, sessionKey string) (string, string) {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		project = strings.TrimSpace(os.Getenv("CC_PROJECT"))
+	}
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		sessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
+	}
+	return project, sessionKey
+}
+
 func printSendFileUsage() {
 	fmt.Printf(`Usage: %s send-file [options] --path <absolute-path>
        %s send-file [options] <absolute-path>
@@ -126,8 +140,8 @@ Send a local file to an active %s session.
 Options:
       --path <path>        Absolute local file path to send
       --caption <text>     Optional short caption sent alongside the file
-  -p, --project <name>     Target project (optional if only one project)
-  -s, --session <key>      Target session key (optional, picks first active)
+  -p, --project <name>     Target project (auto-detected from CC_PROJECT env)
+  -s, --session <key>      Target session (auto-detected from CC_SESSION_KEY env)
       --config <path>      Config file used to resolve data_dir
       --data-dir <path>    Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
   -h, --help               Show this help
