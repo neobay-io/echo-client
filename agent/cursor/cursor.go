@@ -30,15 +30,18 @@ func init() {
 //   - "plan":     --trust --mode plan (read-only analysis)
 //   - "ask":      --trust --mode ask (Q&A style, read-only)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string // CLI binary name, default "agent"
-	providers  []core.ProviderConfig
-	activeIdx  int
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir     string
+	model       string
+	mode        string
+	cmd         string // CLI binary name, default "agent"
+	providers   []core.ProviderConfig
+	activeIdx   int
+	sessionEnv  []string
+	modelRunner cursorModelRunner
+	mu          sync.Mutex
 }
+
+type cursorModelRunner func(ctx context.Context, command, workDir string, env []string) ([]byte, error)
 
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
@@ -107,14 +110,73 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return []core.ModelOption{
-		{Name: "claude-sonnet-4-20250514", Desc: "Claude Sonnet 4"},
-		{Name: "claude-opus-4-20250514", Desc: "Claude Opus 4"},
-		{Name: "gpt-4o", Desc: "GPT-4o"},
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
-		{Name: "cursor-small", Desc: "Cursor Small (fast)"},
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.Lock()
+	runner := a.modelRunner
+	command := a.cmd
+	extraEnv := append(a.providerEnvLocked(), a.sessionEnv...)
+	workDir := core.SessionWorkDirFromEnv(extraEnv, a.workDir)
+	current := a.effectiveModelLocked()
+	env := core.MergeEnv(os.Environ(), extraEnv)
+	a.mu.Unlock()
+	if runner == nil {
+		runner = runCursorModelList
 	}
+	if output, err := runner(ctx, command, workDir, env); err == nil {
+		if models := parseCursorModelList(string(output)); len(models) > 0 {
+			return models
+		}
+	} else {
+		slog.Debug("cursor: failed to fetch models from CLI", "error", err)
+	}
+	if current != "" {
+		return []core.ModelOption{{Name: current, Desc: "Current model"}}
+	}
+	return nil
+}
+
+func runCursorModelList(ctx context.Context, command, workDir string, env []string) ([]byte, error) {
+	return core.RunCommandOutput(ctx, command, []string{"--list-models"}, workDir, core.MergeEnv(env, []string{"NO_COLOR=1"}))
+}
+
+func parseCursorModelList(output string) []core.ModelOption {
+	seen := make(map[string]bool)
+	var models []core.ModelOption
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.EqualFold(line, "Available models") || strings.HasPrefix(line, "Tip:") {
+			continue
+		}
+		name := line
+		desc := ""
+		if idx := strings.Index(line, " - "); idx >= 0 {
+			name = strings.TrimSpace(line[:idx])
+			desc = strings.TrimSpace(line[idx+3:])
+		} else if fields := strings.Fields(line); len(fields) > 0 {
+			name = fields[0]
+		}
+		normalized := strings.ToLower(name)
+		if !validCursorModelName(name) || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		models = append(models, core.ModelOption{Name: name, Desc: desc})
+	}
+	return models
+}
+
+func validCursorModelName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, ch := range name {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || strings.ContainsRune("-._/[]=:,", ch) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -260,6 +322,13 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) effectiveModelLocked() string {
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) && a.providers[a.activeIdx].Model != "" {
+		return a.providers[a.activeIdx].Model
+	}
+	return a.model
 }
 
 // ── Session listing ─────────────────────────────────────────────

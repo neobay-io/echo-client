@@ -19,12 +19,15 @@ func init() {
 
 // Agent drives Qoder CLI using `qodercli --print --output-format stream-json`.
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string // "default" | "acceptEdits" | "plan" | "dontAsk" | "yolo"
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir     string
+	model       string
+	mode        string // "default" | "acceptEdits" | "plan" | "dontAsk" | "yolo"
+	sessionEnv  []string
+	modelRunner qoderModelRunner
+	mu          sync.Mutex
 }
+
+type qoderModelRunner func(ctx context.Context, workDir string, env []string) ([]byte, error)
 
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
@@ -110,14 +113,71 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return []core.ModelOption{
-		{Name: "auto", Desc: "Auto (recommended)"},
-		{Name: "ultimate", Desc: "Ultimate (most capable)"},
-		{Name: "performance", Desc: "Performance (balanced)"},
-		{Name: "efficient", Desc: "Efficient (fast)"},
-		{Name: "lite", Desc: "Lite (lightweight)"},
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.Lock()
+	runner := a.modelRunner
+	env := core.MergeEnv(os.Environ(), a.sessionEnv)
+	workDir := core.SessionWorkDirFromEnv(a.sessionEnv, a.workDir)
+	current := a.model
+	a.mu.Unlock()
+	if runner == nil {
+		runner = runQoderModelList
 	}
+	if output, err := runner(ctx, workDir, env); err == nil {
+		if models := parseQoderModelList(string(output)); len(models) > 0 {
+			return models
+		}
+	} else {
+		slog.Debug("qoder: failed to fetch models from CLI", "error", err)
+	}
+	if current != "" {
+		return []core.ModelOption{{Name: current, Desc: "Current model"}}
+	}
+	return []core.ModelOption{{Name: "auto", Desc: "Automatic model selection"}}
+}
+
+func runQoderModelList(ctx context.Context, workDir string, env []string) ([]byte, error) {
+	env = core.MergeEnv(env, []string{"NO_COLOR=1"})
+	return core.RunCommandOutput(ctx, "qodercli", []string{"--list-models"}, workDir, env)
+}
+
+func parseQoderModelList(output string) []core.ModelOption {
+	seen := make(map[string]bool)
+	counts := make(map[string]int)
+	for _, line := range strings.Split(output, "\n") {
+		counts[strings.ToLower(canonicalQoderModel(strings.TrimSpace(line)))]++
+	}
+	var models []core.ModelOption
+	for _, line := range strings.Split(output, "\n") {
+		name := canonicalQoderModel(strings.TrimSpace(line))
+		normalized := strings.ToLower(name)
+		if name == "" || normalized == "model" || seen[normalized] || counts[normalized] > 1 {
+			continue
+		}
+		seen[normalized] = true
+		models = append(models, core.ModelOption{Name: name})
+	}
+	return models
+}
+
+func canonicalQoderModel(line string) string {
+	if strings.HasSuffix(line, ")") {
+		if start := strings.LastIndex(line, " ("); start >= 0 {
+			candidate := strings.TrimSpace(line[start+2 : len(line)-1])
+			if strings.Contains(candidate, "…") || strings.Contains(candidate, "...") {
+				// Qoder truncates keys to 40 characters, but accepts exact display names.
+				line = strings.TrimSpace(line[:start])
+			} else {
+				if candidate != "" && !strings.ContainsAny(candidate, " \t") {
+					return candidate
+				}
+			}
+		}
+	}
+	if strings.Contains(line, "…") || strings.Contains(line, "...") || strings.ContainsAny(line, "\x1b\x00") {
+		return ""
+	}
+	return line
 }
 
 func (a *Agent) SetSessionEnv(env []string) {

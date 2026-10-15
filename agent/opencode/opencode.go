@@ -24,15 +24,18 @@ func init() {
 //   - "default": standard mode
 //   - "yolo":    auto mode (opencode run is auto by default in non-interactive mode)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string // CLI binary name, default "opencode"
-	providers  []core.ProviderConfig
-	activeIdx  int
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir     string
+	model       string
+	mode        string
+	cmd         string // CLI binary name, default "opencode"
+	providers   []core.ProviderConfig
+	activeIdx   int
+	sessionEnv  []string
+	modelRunner opencodeModelRunner
+	mu          sync.Mutex
 }
+
+type opencodeModelRunner func(ctx context.Context, command, workDir string, env []string) ([]byte, error)
 
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
@@ -97,13 +100,51 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return []core.ModelOption{
-		{Name: "anthropic/claude-sonnet-4-20250514", Desc: "Claude Sonnet 4 (default)"},
-		{Name: "anthropic/claude-opus-4-20250514", Desc: "Claude Opus 4"},
-		{Name: "openai/gpt-4o", Desc: "GPT-4o"},
-		{Name: "openai/o3", Desc: "OpenAI o3"},
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.Lock()
+	runner := a.modelRunner
+	command := a.cmd
+	extraEnv := append(a.providerEnvLocked(), a.sessionEnv...)
+	workDir := core.SessionWorkDirFromEnv(extraEnv, a.workDir)
+	current := a.effectiveModelLocked()
+	env := core.MergeEnv(os.Environ(), extraEnv)
+	a.mu.Unlock()
+	if runner == nil {
+		runner = runOpenCodeModelList
 	}
+	if output, err := runner(ctx, command, workDir, env); err == nil {
+		if models := parseOpenCodeModelList(string(output)); len(models) > 0 {
+			return models
+		}
+	} else {
+		slog.Debug("opencode: failed to fetch models from CLI", "error", err)
+	}
+	if current != "" {
+		return []core.ModelOption{{Name: current, Desc: "Current model"}}
+	}
+	return nil
+}
+
+func runOpenCodeModelList(ctx context.Context, command, workDir string, env []string) ([]byte, error) {
+	return core.RunCommandOutput(ctx, command, []string{"models"}, workDir, core.MergeEnv(env, []string{"NO_COLOR=1"}))
+}
+
+func parseOpenCodeModelList(output string) []core.ModelOption {
+	seen := make(map[string]bool)
+	var models []core.ModelOption
+	for _, line := range strings.Split(output, "\n") {
+		name := strings.TrimSpace(line)
+		if fields := strings.Fields(name); len(fields) > 0 {
+			name = fields[0]
+		}
+		normalized := strings.ToLower(name)
+		if !strings.Contains(name, "/") || strings.Contains(name, "\x1b") || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		models = append(models, core.ModelOption{Name: name})
+	}
+	return models
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -239,6 +280,13 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) effectiveModelLocked() string {
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) && a.providers[a.activeIdx].Model != "" {
+		return a.providers[a.activeIdx].Model
+	}
+	return a.model
 }
 
 // -- Session listing --

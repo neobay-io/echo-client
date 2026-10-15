@@ -301,8 +301,8 @@ type MemoryFileProvider interface {
 type ModelSwitcher interface {
 	SetModel(model string)
 	GetModel() string
-	// AvailableModels tries to fetch models from the provider API.
-	// Falls back to a built-in list on failure.
+	// AvailableModels discovers models from the provider API or agent CLI.
+	// Implementations may fall back to stable aliases when discovery fails.
 	AvailableModels(ctx context.Context) []ModelOption
 }
 

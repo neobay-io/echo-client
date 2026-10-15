@@ -198,31 +198,41 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
-	return []core.ModelOption{
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro (most capable)"},
-		{Name: "gemini-2.5-flash", Desc: "Gemini 2.5 Flash (fast)"},
-		{Name: "gemini-2.0-flash", Desc: "Gemini 2.0 Flash (lightweight)"},
+	a.mu.Lock()
+	current := a.effectiveModelLocked()
+	a.mu.Unlock()
+	models := []core.ModelOption{
+		{Name: "auto", Desc: "Automatic model selection"},
+		{Name: "pro", Desc: "Gemini Pro alias"},
+		{Name: "flash", Desc: "Gemini Flash alias"},
+		{Name: "flash-lite", Desc: "Gemini Flash Lite alias"},
 	}
+	if current != "" && !containsGeminiModel(models, current) {
+		models = append([]core.ModelOption{{Name: current, Desc: "Current model"}}, models...)
+	}
+	return models
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("GOOGLE_API_KEY")
-	}
+	a.mu.Lock()
+	extraEnv := append(a.providerEnvLocked(), a.sessionEnv...)
+	a.mu.Unlock()
+	effectiveEnv := core.MergeEnv(os.Environ(), extraEnv)
+	apiKey := core.EnvValue(effectiveEnv, "GEMINI_API_KEY", "GOOGLE_API_KEY")
 	if apiKey == "" {
 		return nil
 	}
 
-	url := "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	const endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("x-goog-api-key", apiKey)
+	resp, err := core.NoRedirectHTTPClient().Do(req)
 	if err != nil {
-		slog.Debug("gemini: failed to fetch models", "error", err)
+		slog.Debug("gemini: model discovery request failed")
 		return nil
 	}
 	defer func() {
@@ -253,6 +263,15 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].Name > models[j].Name })
 	return models
+}
+
+func containsGeminiModel(models []core.ModelOption, name string) bool {
+	for _, model := range models {
+		if strings.EqualFold(model.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -440,6 +459,13 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) effectiveModelLocked() string {
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) && a.providers[a.activeIdx].Model != "" {
+		return a.providers[a.activeIdx].Model
+	}
+	return a.model
 }
 
 // ── Session listing ─────────────────────────────────────────────

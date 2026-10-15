@@ -1,17 +1,20 @@
 package codex
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -35,8 +38,11 @@ type Agent struct {
 	providers      []core.ProviderConfig
 	activeIdx      int // -1 = no provider set
 	sessionEnv     []string
+	modelRunner    codexModelRunner
 	mu             sync.Mutex
 }
+
+type codexModelRunner func(ctx context.Context, workDir string, env []string) ([]core.ModelOption, error)
 
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
@@ -144,60 +150,213 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
-	return []core.ModelOption{
-		{Name: "gpt-5.4", Desc: "GPT-5.4 (default)"},
-		{Name: "gpt-5.2-codex", Desc: "GPT-5.2-Codex (code-optimized)"},
-		{Name: "gpt-5.1-codex-max", Desc: "GPT-5.1-Codex-Max (deep review)"},
-		{Name: "gpt-5.4-mini", Desc: "GPT-5.4-Mini (fast)"},
-		{Name: "gpt-5.3-codex", Desc: "GPT-5.3-Codex (balanced coding)"},
-		{Name: "gpt-5.3-codex-spark", Desc: "GPT-5.3-Codex-Spark (fastest coding)"},
-		{Name: "gpt-5.2", Desc: "GPT-5.2 (general purpose)"},
-		{Name: "gpt-5.1-codex-mini", Desc: "GPT-5.1-Codex-Mini (lightweight)"},
+
+	a.mu.Lock()
+	runner := a.modelRunner
+	extraEnv := append(a.providerEnvLocked(), a.sessionEnv...)
+	workDir := core.SessionWorkDirFromEnv(extraEnv, a.workDir)
+	current := a.model
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) && a.providers[a.activeIdx].Model != "" {
+		current = a.providers[a.activeIdx].Model
 	}
+	env := core.MergeEnv(os.Environ(), extraEnv)
+	a.mu.Unlock()
+	if runner == nil {
+		runner = listCodexModels
+	}
+	if models, err := runner(ctx, workDir, env); err == nil && len(models) > 0 {
+		return models
+	} else if err != nil {
+		slog.Debug("codex: failed to fetch models from app-server", "error", err)
+	}
+	if current != "" {
+		return []core.ModelOption{{Name: current, Desc: "Current model"}}
+	}
+	return nil
 }
 
-var openaiChatModels = map[string]bool{
-	"o4-mini": true, "o3": true, "o3-mini": true, "o1": true, "o1-mini": true,
-	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
-	"gpt-4o": true, "gpt-4o-mini": true,
-	"codex-mini-latest": true,
-	"gpt-5.4":           true, "gpt-5.4-mini": true,
-	"gpt-5.3-codex": true, "gpt-5.3-codex-spark": true,
-	"gpt-5.2": true, "gpt-5.2-codex": true,
-	"gpt-5.1-codex-max": true, "gpt-5.1-codex-mini": true,
+func listCodexModels(ctx context.Context, workDir string, env []string) ([]core.ModelOption, error) {
+	cmd := exec.CommandContext(ctx, "codex", "app-server", "--stdio")
+	if strings.TrimSpace(workDir) != "" {
+		cmd.Dir = workDir
+	}
+	cmd.Env = env
+	prepareCommandForGroupKill(cmd)
+	cmd.WaitDelay = 500 * time.Millisecond
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("codex model list stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, fmt.Errorf("codex model list stdout: %w", err)
+	}
+	// Close readers on cancellation even if an escaped descendant retains them.
+	cmd.Cancel = func() error {
+		_ = stdout.Close()
+		_ = stdin.Close()
+		return killCommandProcessGroup(cmd, cmd.Process.Pid)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("codex model list start: %w", err)
+	}
+
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = killCommandProcessGroup(cmd, cmd.Process.Pid)
+		_ = cmd.Wait()
+	}
+	defer stop()
+
+	encoder := json.NewEncoder(stdin)
+	if err := encoder.Encode(map[string]any{
+		"id": 1, "method": "initialize",
+		"params": map[string]any{"clientInfo": map[string]string{"name": "echo-client", "version": "1"}},
+	}); err != nil {
+		return nil, fmt.Errorf("codex model list initialize: %w", err)
+	}
+
+	type rpcResponse struct {
+		ID     int             `json:"id"`
+		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	waitForResponse := func(id int) (json.RawMessage, error) {
+		for scanner.Scan() {
+			var response rpcResponse
+			if err := json.Unmarshal(scanner.Bytes(), &response); err != nil || response.ID != id {
+				continue
+			}
+			if len(response.Error) > 0 && string(response.Error) != "null" {
+				return nil, fmt.Errorf("app-server error: %s", response.Error)
+			}
+			return response.Result, nil
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
+		stop()
+		return nil, fmt.Errorf("app-server exited before response %d", id)
+	}
+
+	if _, err := waitForResponse(1); err != nil {
+		return nil, err
+	}
+	if err := encoder.Encode(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
+		return nil, err
+	}
+	var models []core.ModelOption
+	cursor := ""
+	seenCursors := make(map[string]bool)
+	seenModels := make(map[string]bool)
+	for requestID := 2; ; requestID++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		params := map[string]any{"limit": 100}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		if err := encoder.Encode(map[string]any{"id": requestID, "method": "model/list", "params": params}); err != nil {
+			return nil, err
+		}
+		resultJSON, err := waitForResponse(requestID)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			NextCursor string `json:"nextCursor"`
+			Data       []struct {
+				Model       string `json:"model"`
+				DisplayName string `json:"displayName"`
+				IsDefault   bool   `json:"isDefault"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(resultJSON, &result); err != nil {
+			return nil, fmt.Errorf("decode codex model list: %w", err)
+		}
+
+		for _, model := range result.Data {
+			name := strings.TrimSpace(model.Model)
+			if name == "" || seenModels[name] {
+				continue
+			}
+			seenModels[name] = true
+			desc := strings.TrimSpace(model.DisplayName)
+			if model.IsDefault {
+				desc = strings.TrimSpace(desc + " (default)")
+			}
+			models = append(models, core.ModelOption{Name: name, Desc: desc})
+		}
+		cursor = result.NextCursor
+		if cursor == "" {
+			break
+		}
+		if seenCursors[cursor] {
+			return nil, fmt.Errorf("repeated model catalog cursor")
+		}
+		seenCursors[cursor] = true
+	}
+
+	stop()
+	return models, nil
+}
+
+func isOpenAIChatModel(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	for _, incompatible := range []string{"image", "audio", "transcrib", "tts", "realtime", "embedding", "search", "moderation"} {
+		if strings.Contains(id, incompatible) {
+			return false
+		}
+	}
+	return strings.HasPrefix(id, "gpt-") ||
+		strings.HasPrefix(id, "codex-") ||
+		strings.HasPrefix(id, "o1") ||
+		strings.HasPrefix(id, "o3") ||
+		strings.HasPrefix(id, "o4")
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 	a.mu.Lock()
-	apiKey := ""
-	baseURL := ""
-	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
-		apiKey = a.providers[a.activeIdx].APIKey
-		baseURL = a.providers[a.activeIdx].BaseURL
-	}
+	extraEnv := append(a.providerEnvLocked(), a.sessionEnv...)
 	a.mu.Unlock()
-
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
+	env := core.MergeEnv(os.Environ(), extraEnv)
+	apiKey := core.EnvValue(env, "OPENAI_API_KEY")
+	baseURL := core.EnvValue(env, "OPENAI_BASE_URL")
 	if apiKey == "" {
 		return nil
 	}
 	if baseURL == "" {
-		baseURL = os.Getenv("OPENAI_BASE_URL")
-	}
-	if baseURL == "" {
 		baseURL = "https://api.openai.com"
 	}
-	baseURL = strings.TrimRight(baseURL, "/")
-
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/v1/models", nil)
+	endpoint, err := url.Parse(baseURL)
+	if err != nil {
+		return nil
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/")
+	if endpoint.Path == "" {
+		endpoint.Path = "/v1"
+	}
+	if !strings.HasSuffix(endpoint.Path, "/models") {
+		endpoint.Path += "/models"
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint.String(), nil)
 	if err != nil {
 		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := core.NoRedirectHTTPClient().Do(req)
 	if err != nil {
 		slog.Debug("codex: failed to fetch models", "error", err)
 		return nil
@@ -220,7 +379,7 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 
 	var models []core.ModelOption
 	for _, m := range result.Data {
-		if openaiChatModels[m.ID] {
+		if isOpenAIChatModel(m.ID) {
 			models = append(models, core.ModelOption{Name: m.ID})
 		}
 	}

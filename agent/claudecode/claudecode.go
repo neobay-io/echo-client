@@ -47,9 +47,12 @@ type Agent struct {
 
 	providerProxy *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL string              // local URL of the proxy
+	modelRunner   claudeModelRunner
 
 	mu sync.Mutex
 }
+
+type claudeModelRunner func(ctx context.Context, workDir string) ([]byte, error)
 
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
@@ -182,12 +185,106 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
 	}
-	return []core.ModelOption{
-		{Name: "claude-opus-4-7", Desc: "Claude Opus 4.7"},
-		{Name: "claude-opus-4-7-1m", Desc: "Claude Opus 4.7 1M"},
-		{Name: "claude-sonnet-4-6", Desc: "Claude Sonnet 4.6"},
-		{Name: "claude-haiku-4-5", Desc: "Claude Haiku 4.5"},
+	if models := a.fetchModelsFromCLI(ctx); len(models) > 0 {
+		return models
 	}
+	return []core.ModelOption{
+		{Name: "default", Desc: "Claude Code default"},
+		{Name: "opus"},
+		{Name: "sonnet"},
+		{Name: "haiku"},
+	}
+}
+
+func (a *Agent) fetchModelsFromCLI(ctx context.Context) []core.ModelOption {
+	a.mu.Lock()
+	runner := a.modelRunner
+	workDir := a.workDir
+	a.mu.Unlock()
+	if runner == nil {
+		runner = runClaudeModelCommand
+	}
+
+	output, err := runner(ctx, workDir)
+	if err != nil {
+		slog.Debug("claudecode: failed to fetch models from CLI", "error", err)
+		return nil
+	}
+
+	var result struct {
+		IsError      bool   `json:"is_error"`
+		LocalCommand string `json:"local_command"`
+		Result       string `json:"result"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		slog.Debug("claudecode: failed to decode CLI model response", "error", err)
+		return nil
+	}
+	if result.IsError || result.LocalCommand != "model" {
+		return nil
+	}
+	return parseClaudeModelAliases(result.Result)
+}
+
+// /model is handled locally by Claude Code and reports aliases without an API turn.
+func runClaudeModelCommand(ctx context.Context, workDir string) ([]byte, error) {
+	return core.RunCommandOutput(ctx, "claude", []string{
+		"--safe-mode",
+		"--no-session-persistence",
+		"--output-format", "json",
+		"--print", "/model",
+	}, workDir, filterEnv(os.Environ(), "CLAUDECODE"))
+}
+
+func parseClaudeModelAliases(text string) []core.ModelOption {
+	const marker = "Available:"
+	idx := strings.Index(text, marker)
+	if idx < 0 {
+		return nil
+	}
+	line := text[idx+len(marker):]
+	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+		line = line[:end]
+	}
+	if end := strings.Index(strings.ToLower(line), "or a full model id"); end >= 0 {
+		line = line[:end]
+	}
+	line = strings.Trim(line, " ,.\t")
+	current := parseClaudeCurrentModel(text)
+	currentFamily := ""
+	if fields := strings.Fields(current); len(fields) > 0 {
+		currentFamily = strings.ToLower(fields[0])
+	}
+
+	seen := make(map[string]bool)
+	var models []core.ModelOption
+	for _, item := range strings.Split(line, ",") {
+		name := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(item), "or "))
+		normalized := strings.ToLower(name)
+		if name == "" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		desc := ""
+		if current != "" && (normalized == "default" || normalized == currentFamily) {
+			desc = current
+		}
+		models = append(models, core.ModelOption{Name: name, Desc: desc})
+	}
+	return models
+}
+
+func parseClaudeCurrentModel(text string) string {
+	const marker = "Current model:"
+	idx := strings.Index(text, marker)
+	if idx < 0 {
+		return ""
+	}
+	line := text[idx+len(marker):]
+	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+		line = line[:end]
+	}
+	return strings.Trim(strings.TrimSpace(line), "`")
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {

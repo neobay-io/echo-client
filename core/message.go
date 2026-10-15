@@ -30,6 +30,22 @@ func MergeEnv(base, extra []string) []string {
 	return append(merged, extra...)
 }
 
+// EnvValue returns the last value assigned to any of keys. Later entries win,
+// matching the environment passed to agent subprocesses.
+func EnvValue(env []string, keys ...string) string {
+	wanted := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	for i := len(env) - 1; i >= 0; i-- {
+		key, value, ok := strings.Cut(env[i], "=")
+		if ok && wanted[key] {
+			return value
+		}
+	}
+	return ""
+}
+
 // AllowList checks whether a user ID is permitted based on a comma-separated
 // allow_from string. Returns true if allowFrom is empty or "*" (allow all),
 // or if the userID is in the list. Comparison is case-insensitive.

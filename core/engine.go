@@ -196,6 +196,8 @@ type Engine struct {
 	pendingLoopCreates map[string]bool
 	reviewMu           sync.Mutex
 	reviewFlows        map[string]*reviewFlow
+	modelPickerMu      sync.Mutex
+	modelPickers       map[string]modelPickerSnapshot
 
 	quietMu sync.RWMutex
 	quiet   bool // when true, suppress thinking and tool progress messages globally
@@ -3299,7 +3301,7 @@ var builtinCommands = []struct {
 	{[]string{"status"}, "status"},
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
-	{[]string{"model"}, "model"},
+	{[]string{"model", "models"}, "model"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"effort", "reasoning"}, "effort"},
 	{[]string{"lang"}, "lang"},
@@ -4934,22 +4936,53 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 }
 
 func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+	e.modelPickerMu.Lock()
+	defer e.modelPickerMu.Unlock()
 	switcher, ok := e.agent.(ModelSwitcher)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
-	defer cancel()
-	models := switcher.AvailableModels(fetchCtx)
 	current := switcher.GetModel()
-	selectableModels := modelPickerOptions(p.Name(), e.agent.Name(), current, models)
-	if len(selectableModels) == 0 {
-		selectableModels = models
+	contextID := e.modelPickerContext()
+	snapshot, valid := e.modelPickerSnapshotFor(msg.SessionKey, contextID)
+	reject := func() { e.reply(p, msg.ReplyCtx, "Model selection expired or invalid. Run /models again.") }
+
+	page := 1
+	showPicker := len(args) == 0
+	if len(args) > 0 && strings.EqualFold(args[0], "page") {
+		showPicker = true
+		if len(args) > 1 {
+			if requested, err := strconv.Atoi(args[1]); err == nil && requested > 0 {
+				page = requested
+			}
+		}
 	}
 
-	if len(args) == 0 {
+	if showPicker {
+		if len(args) == 0 {
+			fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+			models := switcher.AvailableModels(fetchCtx)
+			cancel()
+			if contextID != e.modelPickerContext() {
+				reject()
+				return
+			}
+			snapshot = e.saveModelPickerSnapshot(msg.SessionKey, contextID, modelPickerOptions(p.Name(), e.agent.Name(), current, models))
+		} else if !valid || (len(args) > 2 && args[2] != snapshot.Token) {
+			reject()
+			return
+		}
+		selectableModels := snapshot.Models
+		const pageSize = 20
+		pageCount := max(1, (len(selectableModels)+pageSize-1)/pageSize)
+		if page > pageCount {
+			page = pageCount
+		}
+		start := (page - 1) * pageSize
+		end := min(start+pageSize, len(selectableModels))
+
 		var sb strings.Builder
 		if current == "" {
 			sb.WriteString(e.i18n.T(MsgModelDefault))
@@ -4958,8 +4991,13 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
-		sb.WriteString(e.i18n.T(MsgModelListTitle))
-		for i, m := range selectableModels {
+		sb.WriteString(strings.TrimRight(e.i18n.T(MsgModelListTitle), "\r\n"))
+		if pageCount > 1 {
+			fmt.Fprintf(&sb, " (%d/%d)", page, pageCount)
+		}
+		sb.WriteString("\n")
+		for i, m := range selectableModels[start:end] {
+			modelIndex := start + i
 			marker := "  "
 			if m.Name == current {
 				marker = "> "
@@ -4968,25 +5006,29 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			if desc != "" {
 				desc = " — " + desc
 			}
-			fmt.Fprintf(&sb, "%s%d. %s%s\n", marker, i+1, m.Name, desc)
+			fmt.Fprintf(&sb, "%s%d. %s%s\n", marker, modelIndex+1, m.Name, desc)
 		}
 		sb.WriteString("\n")
 		sb.WriteString(e.i18n.T(MsgModelUsage))
+		if pageCount > 1 {
+			fmt.Fprintf(&sb, "\n/model page N (1-%d)", pageCount)
+		}
 
 		buttonsPerRow := 3
 		if strings.EqualFold(p.Name(), "feishu") {
 			buttonsPerRow = 1
 		}
 
-		// Build button rows; use numeric index to stay within callback limits.
+		// Bind short indices to this chat's catalog snapshot, not a fresh query.
 		var buttons [][]ButtonOption
 		var row []ButtonOption
-		for i, m := range selectableModels {
+		for i, m := range selectableModels[start:end] {
+			modelIndex := start + i
 			label := m.Name
 			if m.Name == current {
 				label = "▶ " + label
 			}
-			row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model %d", i+1)})
+			row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model pick %s %d", snapshot.Token, modelIndex+1)})
 			if len(row) >= buttonsPerRow {
 				buttons = append(buttons, row)
 				row = nil
@@ -4995,14 +5037,40 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		if len(row) > 0 {
 			buttons = append(buttons, row)
 		}
+		if pageCount > 1 {
+			var navigation []ButtonOption
+			if page > 1 {
+				navigation = append(navigation, ButtonOption{Text: fmt.Sprintf("← %d/%d", page-1, pageCount), Data: fmt.Sprintf("cmd:/model page %d %s", page-1, snapshot.Token)})
+			}
+			if page < pageCount {
+				navigation = append(navigation, ButtonOption{Text: fmt.Sprintf("%d/%d →", page+1, pageCount), Data: fmt.Sprintf("cmd:/model page %d %s", page+1, snapshot.Token)})
+			}
+			buttons = append(buttons, navigation)
+		}
 		e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 		return
 	}
 
 	target := args[0]
-	if idx, err := strconv.Atoi(target); err == nil && idx >= 1 && idx <= len(selectableModels) {
-		target = selectableModels[idx-1].Name
+	if target == "pick" {
+		if len(args) != 3 || !valid || args[1] != snapshot.Token {
+			reject()
+			return
+		}
+		idx, err := strconv.Atoi(args[2])
+		if err != nil || idx < 1 || idx > len(snapshot.Models) {
+			reject()
+			return
+		}
+		target = snapshot.Models[idx-1].Name
+	} else if idx, err := strconv.Atoi(target); err == nil {
+		if !valid || idx < 1 || idx > len(snapshot.Models) {
+			reject()
+			return
+		}
+		target = snapshot.Models[idx-1].Name
 	}
+	delete(e.modelPickers, msg.SessionKey)
 
 	switcher.SetModel(target)
 	e.cleanupInteractiveState(msg.SessionKey)
@@ -5015,80 +5083,15 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 }
 
-func modelPickerOptions(platformName, agentName, current string, available []ModelOption) []ModelOption {
+func modelPickerOptions(platformName, _ string, current string, available []ModelOption) []ModelOption {
 	if !strings.EqualFold(platformName, "feishu") {
 		return available
 	}
-
-	base := feishuPreferredModels(agentName)
-	if len(base) == 0 {
-		return available
-	}
-
-	availableByName := make(map[string]ModelOption, len(available))
-	for _, m := range available {
-		availableByName[strings.ToLower(strings.TrimSpace(m.Name))] = m
-	}
-
-	options := make([]ModelOption, 0, len(base)+1)
-	if current = strings.TrimSpace(current); current != "" && !containsModelOption(base, current) {
-		if m, ok := availableByName[strings.ToLower(current)]; ok {
-			options = append(options, m)
-		} else {
-			options = append(options, ModelOption{Name: current, Desc: "Current model"})
-		}
-	}
-
-	for _, m := range base {
-		if live, ok := availableByName[strings.ToLower(m.Name)]; ok {
-			if strings.TrimSpace(live.Desc) != "" {
-				m.Desc = live.Desc
-			}
-		}
-		if !containsModelOption(options, m.Name) {
-			options = append(options, m)
-		}
+	options := append([]ModelOption(nil), available...)
+	if current = strings.TrimSpace(current); current != "" && !containsModelOption(options, current) {
+		options = append([]ModelOption{{Name: current, Desc: "Current model"}}, options...)
 	}
 	return options
-}
-
-func feishuPreferredModels(agentName string) []ModelOption {
-	switch strings.ToLower(strings.TrimSpace(agentName)) {
-	case "claudecode":
-		return []ModelOption{
-			{Name: "claude-opus-4-7", Desc: "Claude Opus 4.7"},
-			{Name: "claude-opus-4-7-1m", Desc: "Claude Opus 4.7 1M"},
-			{Name: "claude-sonnet-4-6", Desc: "Claude Sonnet 4.6"},
-			{Name: "claude-haiku-4-5", Desc: "Claude Haiku 4.5"},
-		}
-	case "codex":
-		return []ModelOption{
-			{Name: "gpt-5.4", Desc: "GPT-5.4 (default)"},
-			{Name: "gpt-5.2-codex", Desc: "GPT-5.2-Codex (code-optimized)"},
-			{Name: "gpt-5.1-codex-max", Desc: "GPT-5.1-Codex-Max (deep review)"},
-			{Name: "gpt-5.4-mini", Desc: "GPT-5.4-Mini (fast)"},
-			{Name: "gpt-5.3-codex", Desc: "GPT-5.3-Codex (balanced coding)"},
-			{Name: "gpt-5.3-codex-spark", Desc: "GPT-5.3-Codex-Spark (fastest coding)"},
-			{Name: "gpt-5.2", Desc: "GPT-5.2 (general purpose)"},
-			{Name: "gpt-5.1-codex-mini", Desc: "GPT-5.1-Codex-Mini (lightweight)"},
-		}
-	case "gemini":
-		return []ModelOption{
-			{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro (most capable)"},
-			{Name: "gemini-2.5-flash", Desc: "Gemini 2.5 Flash (fast)"},
-			{Name: "gemini-2.0-flash", Desc: "Gemini 2.0 Flash (lightweight)"},
-		}
-	case "qoder":
-		return []ModelOption{
-			{Name: "auto", Desc: "Auto (recommended)"},
-			{Name: "ultimate", Desc: "Ultimate (most capable)"},
-			{Name: "performance", Desc: "Performance (balanced)"},
-			{Name: "efficient", Desc: "Efficient (fast)"},
-			{Name: "lite", Desc: "Lite (lightweight)"},
-		}
-	default:
-		return nil
-	}
 }
 
 func containsModelOption(options []ModelOption, name string) bool {

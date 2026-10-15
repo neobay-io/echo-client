@@ -974,7 +974,7 @@ func TestCmdSearchUsesLocalSessionHistory(t *testing.T) {
 	}
 }
 
-func TestCmdModel_FeishuUsesStableAgentSpecificButtons(t *testing.T) {
+func TestCmdModel_FeishuUsesDiscoveredModels(t *testing.T) {
 	tests := []struct {
 		name         string
 		agentName    string
@@ -993,56 +993,49 @@ func TestCmdModel_FeishuUsesStableAgentSpecificButtons(t *testing.T) {
 				{Name: "gemini-2.0-flash"},
 				{Name: "gemini-robotics-er-1.6-preview"},
 			},
-			wantButtons: []string{"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"},
+			wantButtons: []string{"gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-robotics-er-1.6-preview"},
 		},
 		{
 			name:      "codex",
 			agentName: "codex",
 			models: []ModelOption{
-				{Name: "gpt-5.4"},
-				{Name: "gpt-5.2-codex"},
-				{Name: "gpt-5.1-codex-max"},
-				{Name: "gpt-5.4-mini"},
-				{Name: "gpt-5.3-codex"},
-				{Name: "gpt-5.3-codex-spark"},
-				{Name: "gpt-5.2"},
-				{Name: "gpt-5.1-codex-mini"},
+				{Name: "gpt-6-astra"},
+				{Name: "gpt-5.6-sol"},
+				{Name: "gpt-5.6-terra"},
+				{Name: "gpt-5.6-luna"},
 			},
 			wantButtons: []string{
-				"gpt-5.4",
-				"gpt-5.2-codex",
-				"gpt-5.1-codex-max",
-				"gpt-5.4-mini",
-				"gpt-5.3-codex",
-				"gpt-5.3-codex-spark",
-				"gpt-5.2",
-				"gpt-5.1-codex-mini",
+				"gpt-6-astra",
+				"gpt-5.6-sol",
+				"gpt-5.6-terra",
+				"gpt-5.6-luna",
 			},
 		},
 		{
 			name:      "claudecode",
 			agentName: "claudecode",
-			current:   "claude-sonnet-4-6",
+			current:   "opus",
 			models: []ModelOption{
-				{Name: "claude-opus-4-7"},
-				{Name: "claude-opus-4-7-1m"},
-				{Name: "claude-sonnet-4-6"},
-				{Name: "claude-haiku-4-5"},
+				{Name: "sonnet"},
+				{Name: "opus"},
+				{Name: "haiku"},
+				{Name: "fable"},
+				{Name: "best"},
 			},
-			wantButtons:  []string{"claude-opus-4-7", "claude-opus-4-7-1m", "▶ claude-sonnet-4-6", "claude-haiku-4-5"},
-			wantFirstSet: "claude-opus-4-7",
+			wantButtons:  []string{"sonnet", "▶ opus", "haiku", "fable", "best"},
+			wantFirstSet: "sonnet",
 		},
 		{
 			name:      "qoder",
 			agentName: "qoder",
 			models: []ModelOption{
-				{Name: "auto"},
-				{Name: "ultimate"},
-				{Name: "performance"},
-				{Name: "efficient"},
-				{Name: "lite"},
+				{Name: "Auto"},
+				{Name: "Ultimate"},
+				{Name: "Fast"},
+				{Name: "Efficient"},
+				{Name: "Qwen3.8-Max"},
 			},
-			wantButtons: []string{"auto", "ultimate", "performance", "efficient", "lite"},
+			wantButtons: []string{"Auto", "Ultimate", "Fast", "Efficient", "Qwen3.8-Max"},
 		},
 	}
 
@@ -1070,6 +1063,39 @@ func TestCmdModel_FeishuUsesStableAgentSpecificButtons(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCmdModelPaginatesLargeDynamicCatalogs(t *testing.T) {
+	models := make([]ModelOption, 45)
+	for i := range models {
+		models[i] = ModelOption{Name: fmt.Sprintf("model-%02d", i+1)}
+	}
+	agent := &stubModelSwitchAgent{name: "opencode", models: models}
+	e := NewEngine("test", agent, nil, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:chat:user", ReplyCtx: "ctx"}
+
+	firstPage := &stubButtonPlatform{n: "feishu"}
+	e.cmdModel(firstPage, msg, nil)
+	if got := firstPage.buttonTextsSnapshot(); len(got) != 21 || got[0] != "model-01" || got[19] != "model-20" || got[20] != "2/3 →" {
+		t.Fatalf("first-page buttons = %#v", got)
+	}
+	if data := firstPage.buttonDataSnapshot(); !strings.HasPrefix(data[19], "cmd:/model pick ") || !strings.HasSuffix(data[19], " 20") || !strings.HasPrefix(data[20], "cmd:/model page 2 ") {
+		t.Fatalf("first-page button data = %#v", data)
+	}
+
+	secondPage := &stubButtonPlatform{n: "feishu"}
+	e.cmdModel(secondPage, msg, []string{"page", "2"})
+	if got := secondPage.buttonTextsSnapshot(); len(got) != 22 || got[0] != "model-21" || got[19] != "model-40" || got[20] != "← 1/3" || got[21] != "3/3 →" {
+		t.Fatalf("second-page buttons = %#v", got)
+	}
+	if sent := strings.Join(secondPage.sentSnapshot(), "\n"); !strings.Contains(sent, "(2/3)") {
+		t.Fatalf("second-page content = %q", sent)
+	}
+
+	e.cmdModel(secondPage, msg, []string{"21"})
+	if got := agent.GetModel(); got != "model-21" {
+		t.Fatalf("selected model = %q, want model-21", got)
 	}
 }
 

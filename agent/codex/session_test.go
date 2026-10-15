@@ -22,11 +22,22 @@ func TestAgentSetReasoningLevelNormalizesValue(t *testing.T) {
 	}
 }
 
-func TestAvailableModelsFallsBackToCurrentGPT5Family(t *testing.T) {
+func TestAvailableModelsUsesAppServerCatalog(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("OPENAI_BASE_URL", "")
 
-	agent := &Agent{}
+	agent := &Agent{
+		workDir: "/workspace",
+		modelRunner: func(_ context.Context, workDir string, _ []string) ([]core.ModelOption, error) {
+			if workDir != "/workspace" {
+				t.Fatalf("workDir = %q, want /workspace", workDir)
+			}
+			return []core.ModelOption{
+				{Name: "gpt-6-astra", Desc: "GPT-6-Astra (default)"},
+				{Name: "gpt-5.6-sol", Desc: "GPT-5.6-Sol"},
+			}, nil
+		},
+	}
 	models := agent.AvailableModels(context.Background())
 	var names []string
 	for _, model := range models {
@@ -34,17 +45,43 @@ func TestAvailableModelsFallsBackToCurrentGPT5Family(t *testing.T) {
 	}
 
 	want := []string{
-		"gpt-5.4",
-		"gpt-5.2-codex",
-		"gpt-5.1-codex-max",
-		"gpt-5.4-mini",
-		"gpt-5.3-codex",
-		"gpt-5.3-codex-spark",
-		"gpt-5.2",
-		"gpt-5.1-codex-mini",
+		"gpt-6-astra",
+		"gpt-5.6-sol",
 	}
 	if !slices.Equal(names, want) {
 		t.Fatalf("AvailableModels() = %#v, want %#v", names, want)
+	}
+}
+
+func TestListCodexModelsIntegration(t *testing.T) {
+	if os.Getenv("CODEX_MODEL_LIST_INTEGRATION") == "" {
+		t.Skip("set CODEX_MODEL_LIST_INTEGRATION=1 to run")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	models, err := listCodexModels(ctx, t.TempDir(), os.Environ())
+	if err != nil {
+		t.Fatalf("listCodexModels: %v", err)
+	}
+	if len(models) == 0 {
+		t.Fatal("listCodexModels returned no models")
+	}
+	if models[0].Name == "" {
+		t.Fatalf("first model = %#v", models[0])
+	}
+}
+
+func TestIsOpenAIChatModelAllowsFutureGPTModels(t *testing.T) {
+	for _, model := range []string{"gpt-6-astra", "gpt-5.6-sol", "o4-mini", "codex-mini-latest"} {
+		if !isOpenAIChatModel(model) {
+			t.Errorf("isOpenAIChatModel(%q) = false", model)
+		}
+	}
+	for _, model := range []string{"text-embedding-3-large", "dall-e-3", "whisper-1"} {
+		if isOpenAIChatModel(model) {
+			t.Errorf("isOpenAIChatModel(%q) = true", model)
+		}
 	}
 }
 

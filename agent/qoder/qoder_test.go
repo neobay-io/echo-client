@@ -70,6 +70,39 @@ func TestQoderSession(t *testing.T) {
 	fmt.Printf("Session ID: %s\n", sid)
 }
 
+func TestAvailableModelsUsesQoderCLI(t *testing.T) {
+	agent := &Agent{
+		workDir: "/workspace",
+		modelRunner: func(_ context.Context, workDir string, _ []string) ([]byte, error) {
+			if workDir != "/workspace" {
+				t.Fatalf("workDir = %q, want /workspace", workDir)
+			}
+			return []byte("MODEL\nAuto\nUltimate\nFast\nQwen3.8-Max\n"), nil
+		},
+	}
+
+	models := agent.AvailableModels(context.Background())
+	want := []string{"Auto", "Ultimate", "Fast", "Qwen3.8-Max"}
+	if len(models) != len(want) {
+		t.Fatalf("AvailableModels() = %#v, want %v", models, want)
+	}
+	for i, name := range want {
+		if models[i].Name != name {
+			t.Fatalf("model %d = %q, want %q", i, models[i].Name, name)
+		}
+	}
+}
+
+func TestParseQoderCustomModelIdentifiers(t *testing.T) {
+	models := parseQoderModelList("MODEL\nAuto\nLocal Qwen (custom/local-qwen)\nToo long (custom/trunca...)\nAnother (custom/trunca…)\n")
+	if len(models) != 4 || models[1].Name != "custom/local-qwen" || models[2].Name != "Too long" || models[3].Name != "Another" {
+		t.Fatalf("canonical identifiers = %#v", models)
+	}
+	if ambiguous := parseQoderModelList("Duplicate (custom/one…)\nDuplicate (custom/two…)\n"); len(ambiguous) != 0 {
+		t.Fatalf("ambiguous display names should not be selectable: %#v", ambiguous)
+	}
+}
+
 func TestSkillDirsUseQoderPaths(t *testing.T) {
 	agent, err := New(map[string]any{"work_dir": "/tmp/demo"})
 	if err != nil {

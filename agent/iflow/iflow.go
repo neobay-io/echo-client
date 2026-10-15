@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,12 +110,84 @@ func (a *Agent) GetModel() string {
 	return a.model
 }
 
-func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
-	return []core.ModelOption{
+func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
+		return models
+	}
+	a.mu.Lock()
+	current := a.effectiveModelLocked()
+	a.mu.Unlock()
+	models := []core.ModelOption{
 		{Name: "Qwen3-Coder", Desc: "Qwen3 Coder"},
 		{Name: "Kimi-K2.5", Desc: "Kimi K2.5"},
 		{Name: "DeepSeek-v3", Desc: "DeepSeek v3"},
 	}
+	if current != "" && !containsModel(models, current) {
+		models = append([]core.ModelOption{{Name: current, Desc: "Current model"}}, models...)
+	}
+	return models
+}
+
+func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
+	a.mu.Lock()
+	extraEnv := append(a.providerEnvLocked(), a.sessionEnv...)
+	a.mu.Unlock()
+	effectiveEnv := core.MergeEnv(os.Environ(), extraEnv)
+	apiKey := core.EnvValue(effectiveEnv, "IFLOW_API_KEY", "IFLOW_apiKey")
+	baseURL := core.EnvValue(effectiveEnv, "IFLOW_BASE_URL", "IFLOW_baseUrl")
+	if apiKey == "" || baseURL == "" {
+		return nil
+	}
+
+	endpoint, err := url.Parse(baseURL)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return nil
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/")
+	if !strings.HasSuffix(endpoint.Path, "/models") {
+		endpoint.Path += "/models"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := core.NoRedirectHTTPClient().Do(req)
+	if err != nil {
+		slog.Debug("iflow: failed to fetch models", "error", err)
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+	models := make([]core.ModelOption, 0, len(result.Data))
+	for _, model := range result.Data {
+		if name := strings.TrimSpace(model.ID); name != "" {
+			models = append(models, core.ModelOption{Name: name})
+		}
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
+	return models
+}
+
+func containsModel(models []core.ModelOption, name string) bool {
+	for _, model := range models {
+		if strings.EqualFold(model.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -287,6 +361,13 @@ func (a *Agent) providerEnvLocked() []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+func (a *Agent) effectiveModelLocked() string {
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) && a.providers[a.activeIdx].Model != "" {
+		return a.providers[a.activeIdx].Model
+	}
+	return a.model
 }
 
 // -- Session listing helpers --
