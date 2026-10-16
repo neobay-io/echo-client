@@ -32,19 +32,24 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
-	cmd         *exec.Cmd
-	stdin       io.WriteCloser
-	stdinMu     sync.Mutex
-	events      chan core.Event
-	recentMu    sync.Mutex
-	recentTools []string
-	sessionID   atomic.Value // stores string
-	autoApprove bool         // auto mode: approve all permission requests
-	workDir     string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	done        chan struct{}
-	alive       atomic.Bool
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	stdinMu        sync.Mutex
+	events         chan core.Event
+	recentMu       sync.Mutex
+	recentTools    []string
+	sessionID      atomic.Value // stores string
+	autoApprove    bool         // auto mode: approve all permission requests
+	workDir        string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	done           chan struct{}
+	alive          atomic.Bool
+	resuming       atomic.Bool
+	resumeID       string // immutable requested transcript ID
+	resumeWorkSeen atomic.Bool
+	failureMu      sync.Mutex
+	failure        error
 }
 
 var heicImageConverter = convertHEICImage
@@ -92,12 +97,14 @@ func newClaudeSession(ctx context.Context, workDir, model, reasoningLevel, sessi
 		events:      make(chan core.Event, 64),
 		autoApprove: mode == "bypassPermissions",
 		workDir:     workDir,
+		resumeID:    sessionID,
 		ctx:         sessionCtx,
 		cancel:      cancel,
 		done:        make(chan struct{}),
 	}
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
+	cs.resuming.Store(isClaudeSessionID(sessionID))
 
 	go cs.readLoop(stdout, &stderrBuf)
 
@@ -163,8 +170,10 @@ func isClaudeSessionID(sessionID string) bool {
 
 func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer func() {
+		defer close(cs.done)
+		defer close(cs.events)
 		cs.alive.Store(false)
-		if err := cs.cmd.Wait(); err != nil {
+		if err := cs.cmd.Wait(); err != nil && cs.sessionFailure() == nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
@@ -176,8 +185,6 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 				}
 			}
 		}
-		close(cs.events)
-		close(cs.done)
 	}()
 
 	if err := readJSONLines(stdout, func(line []byte) error {
@@ -205,6 +212,7 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 		case "result":
 			cs.handleResult(raw)
 		case "control_request":
+			cs.resumeWorkSeen.Store(true)
 			cs.handleControlRequest(raw)
 		case "control_cancel_request":
 			requestID, _ := raw["request_id"].(string)
@@ -248,6 +256,9 @@ func readJSONLines(r io.Reader, handle func([]byte) error) error {
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
+	if raw["subtype"] == "compact_boundary" {
+		cs.resumeWorkSeen.Store(true)
+	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 		evt := core.Event{Type: core.EventText, SessionID: sid}
@@ -260,6 +271,7 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 }
 
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
+	cs.resumeWorkSeen.Store(true)
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
@@ -323,6 +335,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		}
 		contentType, _ := item["type"].(string)
 		if contentType == "tool_result" {
+			cs.resumeWorkSeen.Store(true)
 			result, _ := item["content"].(string)
 			if strings.TrimSpace(result) != "" {
 				evt := core.Event{Type: core.EventToolResult, Content: result}
@@ -346,6 +359,19 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 
 func (cs *claudeSession) handleResult(raw map[string]any) {
 	content := claudeResultContent(raw)
+	isError, _ := raw["is_error"].(bool)
+	subtype, _ := raw["subtype"].(string)
+	isError = isError || strings.HasPrefix(subtype, "error_")
+	turns, hasTurns := raw["num_turns"].(float64)
+	localCommand, _ := raw["local_command"].(string)
+	// Resume can emit an empty, zero-turn success for a restored background
+	// notification before processing stdin. It is not our prompt's completion.
+	if cs.resuming.Load() && !isError && subtype == "success" && hasTurns && turns == 0 &&
+		strings.TrimSpace(content) == "" && localCommand == "" && !cs.resumeWorkSeen.Load() {
+		slog.Debug("claudeSession: ignoring empty resume notification result")
+		return
+	}
+	wasResuming := cs.resuming.Swap(false)
 	if containsClaudeImageError(content) {
 		slog.Error("claudeSession: image failure result", "content", content, "recent_tools", strings.Join(cs.snapshotRecentTools(), " | "))
 	}
@@ -353,6 +379,20 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.sessionID.Store(sid)
 	}
 	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+	if isError {
+		evt.Type = core.EventError
+		evt.Error = errors.New(content)
+		resultID, _ := raw["session_id"].(string)
+		if wasResuming && cs.resumeID != "" && resultID == cs.resumeID && !cs.resumeWorkSeen.Load() &&
+			hasTurns && turns == 0 && strings.TrimSpace(content) == "No conversation found with session ID: "+cs.resumeID {
+			evt.Error = fmt.Errorf("%w: %s", core.ErrAgentSessionNotFound, content)
+			// Only a terminal startup failure survives across Send calls. Ordinary
+			// request errors must not poison a live process's subsequent turns.
+			cs.failureMu.Lock()
+			cs.failure = evt.Error
+			cs.failureMu.Unlock()
+		}
+	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
@@ -362,7 +402,9 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 
 func claudeResultContent(raw map[string]any) string {
 	result, _ := raw["result"].(string)
-	if isError, _ := raw["is_error"].(bool); !isError {
+	isError, _ := raw["is_error"].(bool)
+	subtype, _ := raw["subtype"].(string)
+	if !isError && !strings.HasPrefix(subtype, "error_") {
 		return result
 	}
 
@@ -590,6 +632,9 @@ func convertHEICImage(img core.ImageAttachment) (core.ImageAttachment, error) {
 // The normalized images are then saved locally and only the file paths are
 // referenced in the text prompt so Claude Code can inspect them via local tools.
 func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	if err := cs.sessionFailure(); err != nil {
+		return err
+	}
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
@@ -680,6 +725,9 @@ func (cs *claudeSession) writeJSON(v any) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	if _, err := cs.stdin.Write(append(data, '\n')); err != nil {
+		if failure := cs.sessionFailure(); failure != nil {
+			return failure
+		}
 		return fmt.Errorf("write stdin: %w", err)
 	}
 	return nil
@@ -692,6 +740,12 @@ func (cs *claudeSession) Events() <-chan core.Event {
 func (cs *claudeSession) CurrentSessionID() string {
 	v, _ := cs.sessionID.Load().(string)
 	return v
+}
+
+func (cs *claudeSession) sessionFailure() error {
+	cs.failureMu.Lock()
+	defer cs.failureMu.Unlock()
+	return cs.failure
 }
 
 func (cs *claudeSession) Alive() bool {

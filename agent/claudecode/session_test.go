@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -301,6 +302,7 @@ func TestClaudeResultContentIncludesExecutionErrors(t *testing.T) {
 		"result":     "",
 		"session_id": "27c523cc-a4c5-45a6-8017-6e8379d35707",
 		"errors":     []any{"No conversation found with session ID: 27c523cc-a4c5-45a6-8017-6e8379d35707"},
+		"num_turns":  float64(0),
 	}
 
 	got := claudeResultContent(raw)
@@ -309,11 +311,67 @@ func TestClaudeResultContentIncludesExecutionErrors(t *testing.T) {
 	}
 
 	cs := &claudeSession{events: make(chan core.Event, 1), ctx: context.Background()}
+	cs.resumeID = raw["session_id"].(string)
+	cs.resuming.Store(true)
 	cs.sessionID.Store("")
 	cs.handleResult(raw)
 	event := <-cs.events
-	if event.Type != core.EventResult || event.Content != got {
-		t.Fatalf("event = %#v, want result containing %q", event, got)
+	if event.Type != core.EventError || event.Content != got || !errors.Is(event.Error, core.ErrAgentSessionNotFound) {
+		t.Fatalf("event = %#v, want missing-session error containing %q", event, got)
+	}
+	if err := cs.Send("review", nil, nil); !errors.Is(err, core.ErrAgentSessionNotFound) {
+		t.Fatalf("Send after startup error = %v", err)
+	}
+}
+
+func TestClaudeResumeIgnoresZeroTurnNotificationResult(t *testing.T) {
+	cs := &claudeSession{events: make(chan core.Event, 4), ctx: context.Background()}
+	cs.resuming.Store(true)
+	cs.handleResult(map[string]any{"subtype": "success", "num_turns": float64(0), "result": ""})
+	if len(cs.events) != 0 {
+		t.Fatal("resume notification prematurely completed the turn")
+	}
+	cs.handleAssistant(map[string]any{"message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "real answer"}}}})
+	cs.handleResult(map[string]any{"subtype": "success", "num_turns": float64(1), "result": "real answer"})
+	if event := <-cs.events; event.Type != core.EventText || event.Content != "real answer" {
+		t.Fatalf("text = %#v", event)
+	}
+	if event := <-cs.events; event.Type != core.EventResult || event.Content != "real answer" {
+		t.Fatalf("result = %#v", event)
+	}
+}
+
+func TestClaudeResultDoesNotHideErrorsOrLocalCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		raw   map[string]any
+		local bool
+		want  core.EventType
+	}{
+		{"error subtype", map[string]any{"subtype": "error_during_execution", "errors": []any{"Authentication failed"}, "num_turns": float64(0)}, false, core.EventError},
+		{"missing message after work started", map[string]any{"subtype": "error_during_execution", "errors": []any{"No conversation found with session ID: example"}, "num_turns": float64(1)}, false, core.EventError},
+		{"local command metadata", map[string]any{"subtype": "success", "local_command": "compact", "num_turns": float64(0)}, false, core.EventResult},
+		{"observed compact completion", map[string]any{"subtype": "success", "num_turns": float64(0)}, true, core.EventResult},
+		{"completed empty turn", map[string]any{"subtype": "success", "num_turns": float64(1)}, false, core.EventResult},
+		{"older result format", map[string]any{"subtype": "success"}, false, core.EventResult},
+		{"success describing missing session", map[string]any{"subtype": "success", "num_turns": float64(1), "result": "No conversation found with session ID: example"}, false, core.EventResult},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &claudeSession{events: make(chan core.Event, 1), ctx: context.Background()}
+			cs.resuming.Store(true)
+			if tc.local {
+				cs.handleSystem(map[string]any{"subtype": "compact_boundary"})
+			}
+			cs.handleResult(tc.raw)
+			select {
+			case event := <-cs.events:
+				if event.Type != tc.want || errors.Is(event.Error, core.ErrAgentSessionNotFound) {
+					t.Fatalf("event = %#v", event)
+				}
+			default:
+				t.Fatal("expected completion/error event")
+			}
+		})
 	}
 }
 

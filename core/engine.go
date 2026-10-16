@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -888,21 +889,10 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 // records the real result).
 var errCronEnqueued = fmt.Errorf("cron run enqueued")
 
-// isResumeFailure reports whether err looks like a failed attempt to resume a
-// stale/deleted agent session (as opposed to a transient runtime error), so a
-// cron job can drop its bound id and start fresh next run instead of failing
-// forever.
+// isResumeFailure only accepts a confirmed startup failure, not error text
+// about arbitrary workspace files encountered while executing tools.
 func isResumeFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "resolve rollout") ||
-		strings.Contains(s, "rollout path") ||
-		strings.Contains(s, "does not exist") ||
-		strings.Contains(s, "no conversation found") ||
-		strings.Contains(s, "session not found") ||
-		strings.Contains(s, "failed to resume")
+	return errors.Is(err, ErrAgentSessionNotFound)
 }
 
 // runCronIsolatedTurn runs one cron turn on the job's OWN isolated agent session
@@ -1564,10 +1554,15 @@ func (e *Engine) sendChunksWithPrefix(p Platform, replyCtx any, prefix, content 
 	return nil
 }
 
-func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agentSessionKey string, prompt string, opts managedTurnOpts) (string, error) {
+func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agentSessionKey string, prompt string, opts managedTurnOpts) (response string, turnErr error) {
 	if state == nil || state.agentSession == nil {
 		return "", fmt.Errorf("failed to start agent session")
 	}
+	defer func() {
+		if turnErr != nil {
+			e.cleanupInteractiveTurn(agentSessionKey, state, session, turnErr)
+		}
+	}()
 
 	agentTurn, err := e.lockAgentSessionTurn(e.ctx, session)
 	if err != nil {
@@ -1636,24 +1631,15 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 		select {
 		case event, ok = <-events:
 			if !ok {
-				if len(textParts) > 0 {
-					final := strings.Join(textParts, "")
-					session.AddHistory("assistant", final)
-					e.sessions.Save()
-					return final, nil
-				}
-				return "", fmt.Errorf("agent process exited without response")
+				return "", fmt.Errorf("agent process exited before completing the managed turn")
 			}
 		case <-state.stopped:
 			return "", fmt.Errorf("agent session stopped")
 		case <-firstEventCh:
-			e.cleanupInteractiveState(agentSessionKey)
 			return "", fmt.Errorf("agent session timed out waiting for first response")
 		case <-turnCh:
-			e.cleanupInteractiveState(agentSessionKey)
 			return "", fmt.Errorf("agent session timed out before completing the turn")
 		case <-idleCh:
-			e.cleanupInteractiveState(agentSessionKey)
 			return "", fmt.Errorf("agent session timed out (no response)")
 		case <-e.ctx.Done():
 			return "", e.ctx.Err()
@@ -1743,9 +1729,15 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 				return "", err
 			}
 		case EventResult:
+			if event.Error != nil {
+				return "", event.Error
+			}
 			fullResponse := event.Content
 			if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
+			}
+			if strings.TrimSpace(fullResponse) == "" {
+				return "", errEmptyAgentResponse
 			}
 			prompt := detectTextInteractionPrompt(fullResponse)
 			displayResponse := fullResponse
@@ -1774,19 +1766,9 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 					e.offerResultActionCard(p, replyCtx, displayResponse)
 				}
 			}
-			if e.shouldResetAgentSessionOnResult(displayResponse) {
-				slog.Warn("resetting agent session after fatal result", "agent", e.agent.Name(), "session", session.ID, "agent_session", session.AgentSessionID)
-				session.mu.Lock()
-				session.AgentSessionID = ""
-				session.NeedsReplay = true
-				session.mu.Unlock()
-				e.sessions.Save()
-				e.cleanupInteractiveState(agentSessionKey)
-			}
 			return displayResponse, nil
 		case EventError:
 			if event.Error != nil {
-				_ = e.sendChunksWithPrefix(p, replyCtx, opts.Prefix, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 				return "", event.Error
 			}
 			return "", fmt.Errorf("agent error")
@@ -2532,9 +2514,14 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 	state.mu.Unlock()
 	if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
 		slog.Error("failed to send prompt", "error", err)
+		if errors.Is(err, ErrAgentSessionNotFound) {
+			e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
+			e.sendAgentError(p, msg.ReplyCtx, err)
+			return
+		}
 
 		if !state.agentSession.Alive() {
-			e.cleanupInteractiveState(msg.SessionKey)
+			e.cleanupInteractiveTurn(msg.SessionKey, state, session, nil)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
 			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
@@ -2548,6 +2535,7 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 			}
 			sendStart = time.Now()
 			if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
+				e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
@@ -2678,9 +2666,14 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 	state.mu.Unlock()
 	if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
 		slog.Error("failed to send prompt", "error", err)
+		if errors.Is(err, ErrAgentSessionNotFound) {
+			e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
+			e.sendAgentError(p, msg.ReplyCtx, err)
+			return nil, "", time.Time{}, stopTyping, err
+		}
 
 		if !state.agentSession.Alive() {
-			e.cleanupInteractiveState(msg.SessionKey)
+			e.cleanupInteractiveTurn(msg.SessionKey, state, session, nil)
 			e.send(p, msg.ReplyCtx, e.i18n.T(MsgSessionRestarting))
 
 			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
@@ -2696,6 +2689,7 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 			}
 			sendStart = time.Now()
 			if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
+				e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return nil, "", time.Time{}, stopTyping, err
 			}
@@ -2811,6 +2805,37 @@ func (e *Engine) cleanupInteractiveState(sessionKey string) {
 	}
 }
 
+// A delayed error or timeout belongs to one process, not whichever process a
+// /switch or /new has since installed under the same chat key.
+func (e *Engine) cleanupInteractiveTurn(key string, expected *interactiveState, session *Session, err error) {
+	e.interactiveMu.Lock()
+	if expected == nil || e.interactiveStates[key] != expected {
+		e.interactiveMu.Unlock()
+		return
+	}
+	reset := session != nil && err != nil &&
+		(errors.Is(err, ErrAgentSessionNotFound) || e.shouldResetAgentSessionOnResult(err.Error()))
+	if reset {
+		session.mu.Lock()
+		session.AgentSessionID = ""
+		session.NeedsReplay = true
+		session.mu.Unlock()
+	}
+	delete(e.interactiveStates, key)
+	e.clearInteractionPrompt(key)
+	e.interactiveMu.Unlock()
+	if reset {
+		e.sessions.Save()
+	}
+	e.closeInteractiveState(expected)
+}
+
+func (e *Engine) sendAgentError(p Platform, replyCtx any, err error) {
+	if sendErr := e.sendChunksWithPrefix(p, replyCtx, "", fmt.Sprintf(e.i18n.T(MsgError), err)); sendErr != nil {
+		slog.Error("failed to send agent error", "platform", p.Name(), "error", sendErr)
+	}
+}
+
 func (e *Engine) closeInteractiveState(state *interactiveState) {
 	if state != nil && state.agentSession != nil {
 		state.stop()
@@ -2843,7 +2868,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
-	resetAgentSession := false
+	lastEventAt := waitStart
+	var lastEventType EventType
 
 	state.mu.Lock()
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx)
@@ -2896,18 +2922,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out waiting for first response"))
-			e.cleanupInteractiveState(sessionKey)
+			e.cleanupInteractiveTurn(sessionKey, state, session, nil)
 			return
 		case <-turnCh:
 			slog.Error("agent session turn timeout: turn exceeded maximum duration",
-				"session_key", sessionKey, "timeout", e.turnTimeout, "elapsed", time.Since(turnStart))
+				"session_key", sessionKey, "timeout", e.turnTimeout, "elapsed", time.Since(turnStart),
+				"last_event_type", lastEventType, "last_event_age", time.Since(lastEventAt), "tools", toolCount)
 			sp.finish("")
 			state.mu.Lock()
 			p := state.platform
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out before completing the turn"))
-			e.cleanupInteractiveState(sessionKey)
+			e.cleanupInteractiveTurn(sessionKey, state, session, nil)
 			return
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
@@ -2918,12 +2945,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
-			e.cleanupInteractiveState(sessionKey)
+			e.cleanupInteractiveTurn(sessionKey, state, session, nil)
 			return
 		case <-e.ctx.Done():
 			return
 		}
 
+		lastEventAt = time.Now()
+		lastEventType = event.Type
 		// Reset idle timer after receiving an event
 		if idleTimer != nil {
 			if !idleTimer.Stop() {
@@ -3071,6 +3100,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			cp.Finalize("done")
+			if event.Error != nil {
+				sp.finish("")
+				e.sendAgentError(p, replyCtx, event.Error)
+				e.cleanupInteractiveTurn(sessionKey, state, session, event.Error)
+				return
+			}
 			e.bindAgentSessionID(session, event.SessionID)
 			if agentTurn != nil {
 				if err := agentTurn.Bind(e.ctx, event.SessionID); err != nil {
@@ -3094,16 +3129,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if displayResponse != "" {
 				session.AddHistory("assistant", displayResponse)
 				e.sessions.Save()
-			}
-
-			if e.shouldResetAgentSessionOnResult(displayResponse) {
-				slog.Warn("resetting agent session after fatal result", "agent", e.agent.Name(), "session", session.ID, "agent_session", session.AgentSessionID)
-				session.mu.Lock()
-				session.AgentSessionID = ""
-				session.NeedsReplay = true
-				session.mu.Unlock()
-				e.sessions.Save()
-				resetAgentSession = true
 			}
 
 			turnDuration := time.Since(turnStart)
@@ -3167,11 +3192,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			if resetAgentSession {
-				slog.Info("cleaning up interactive state after fatal result", "session_key", sessionKey, "session", session.ID)
-				e.cleanupInteractiveState(sessionKey)
-			}
-
 			return
 
 		case EventError:
@@ -3179,8 +3199,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			sp.finish("") // clean up preview on error
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				e.sendAgentError(p, replyCtx, event.Error)
 			}
+			e.cleanupInteractiveTurn(sessionKey, state, session, event.Error)
 			return
 		}
 	}
@@ -3189,7 +3210,7 @@ channelClosed:
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
 	cp.Finalize("stopped")
-	e.cleanupInteractiveState(sessionKey)
+	e.cleanupInteractiveTurn(sessionKey, state, session, nil)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -5453,21 +5474,19 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 
 		cmd := compressor.CompressCommand()
 		if err := state.agentSession.Send(cmd, nil, nil); err != nil {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			if !state.agentSession.Alive() {
-				e.cleanupInteractiveState(msg.SessionKey)
-			}
+			e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
+			e.sendAgentError(p, msg.ReplyCtx, err)
 			return
 		}
 
-		e.processCompressEvents(state, msg.SessionKey, p, msg.ReplyCtx)
+		e.processCompressEvents(state, session, msg.SessionKey, p, msg.ReplyCtx)
 	}()
 }
 
 // processCompressEvents drains agent events after a compress command.
 // Unlike processInteractiveEvents it does NOT record history and treats
 // an empty result as success rather than "(empty response)".
-func (e *Engine) processCompressEvents(state *interactiveState, sessionKey string, p Platform, replyCtx any) {
+func (e *Engine) processCompressEvents(state *interactiveState, session *Session, sessionKey string, p Platform, replyCtx any) {
 	var textParts []string
 	events := state.agentSession.Events()
 
@@ -5486,7 +5505,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, sessionKey strin
 		select {
 		case event, ok = <-events:
 			if !ok {
-				e.cleanupInteractiveState(sessionKey)
+				e.cleanupInteractiveTurn(sessionKey, state, session, nil)
 				if len(textParts) > 0 {
 					e.send(p, replyCtx, strings.Join(textParts, ""))
 				} else {
@@ -5498,7 +5517,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, sessionKey strin
 			return
 		case <-idleCh:
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "compress timed out"))
-			e.cleanupInteractiveState(sessionKey)
+			e.cleanupInteractiveTurn(sessionKey, state, session, nil)
 			return
 		case <-e.ctx.Done():
 			return
@@ -5520,6 +5539,11 @@ func (e *Engine) processCompressEvents(state *interactiveState, sessionKey strin
 				textParts = append(textParts, event.Content)
 			}
 		case EventResult:
+			if event.Error != nil {
+				e.cleanupInteractiveTurn(sessionKey, state, session, event.Error)
+				e.sendAgentError(p, replyCtx, event.Error)
+				return
+			}
 			result := event.Content
 			if result == "" && len(textParts) > 0 {
 				result = strings.Join(textParts, "")
@@ -5531,8 +5555,9 @@ func (e *Engine) processCompressEvents(state *interactiveState, sessionKey strin
 			}
 			return
 		case EventError:
+			e.cleanupInteractiveTurn(sessionKey, state, session, event.Error)
 			if event.Error != nil {
-				e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+				e.sendAgentError(p, replyCtx, event.Error)
 			}
 			return
 		case EventPermissionRequest:
@@ -5921,7 +5946,10 @@ func drainEvents(ch <-chan Event) {
 	drained := 0
 	for {
 		select {
-		case <-ch:
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
 			drained++
 		default:
 			if drained > 0 {
@@ -8223,6 +8251,9 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 			"elapsed", time.Since(packetStart),
 			"error", err,
 		)
+		if errors.Is(err, errEmptyAgentResponse) {
+			return fmt.Errorf("%s", e.i18n.T(MsgReviewPacketEmpty))
+		}
 		return err
 	}
 	reviewPacket = extractReviewPacket(reviewPacket)
@@ -8267,6 +8298,9 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 				"origin_session", originSession.ID,
 				"error", err,
 			)
+			if errors.Is(err, errEmptyAgentResponse) {
+				return fmt.Errorf("%s", e.i18n.T(MsgReviewPacketEmpty))
+			}
 			return err
 		}
 		reviewPacket = extractReviewPacket(retryPacket)
@@ -8308,16 +8342,8 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 	}
 	defer reviewerSession.Unlock()
 
-	reviewState := reviewerEngine.getOrCreateInteractiveState(reviewKey, originPlatform, originReplyCtx, reviewerSession)
-	reviewState.mu.Lock()
-	reviewState.platform = originPlatform
-	reviewState.replyCtx = originReplyCtx
-	reviewState.mu.Unlock()
 	reviewPrompt := buildReviewPrompt(e.name, reviewerProject, reviewPacket)
-	reviewSummary, err := reviewerEngine.runManagedTurn(reviewState, reviewerSession, reviewKey, reviewPrompt, managedTurnOpts{
-		Prefix:      reviewerProject + ": ",
-		AutoApprove: true,
-	})
+	reviewSummary, err := reviewerEngine.runReviewerTurn(reviewerSession, reviewKey, originPlatform, originReplyCtx, reviewPrompt)
 	if err != nil {
 		return err
 	}
@@ -8358,6 +8384,29 @@ func (e *Engine) startReviewCycle(sessionKey, reviewerProject string) error {
 		OfferFollowUpCard: true,
 	})
 	return err
+}
+
+// The reviewer receives a self-contained packet, so it can recover a missing
+// backend transcript without replaying old reviews or resetting the origin chat.
+func (e *Engine) runReviewerTurn(session *Session, key string, p Platform, replyCtx any, prompt string) (string, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		state := originStateForReviewPacket(e, key, p, replyCtx, session)
+		result, err := e.runManagedTurn(state, session, key, prompt, managedTurnOpts{
+			Prefix: e.name + ": ", AutoApprove: true,
+		})
+		if attempt != 0 || !errors.Is(err, ErrAgentSessionNotFound) {
+			return result, err
+		}
+		session.mu.Lock()
+		session.NeedsReplay = false
+		session.mu.Unlock()
+		e.sessions.Save()
+		slog.Warn("review: missing transcript; retrying once with a fresh agent session", "project", e.name, "session", session.ID)
+		if err := e.sendChunksWithPrefix(p, replyCtx, e.name+": ", "Previous review session no longer exists. Retrying once in a new agent session; local history is retained."); err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("review recovery failed")
 }
 
 func originStateForReviewPacket(e *Engine, sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {

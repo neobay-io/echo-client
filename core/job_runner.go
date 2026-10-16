@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -285,7 +286,7 @@ func (e *Engine) runIsolatedCronTurn(
 ) (finalSessionID string, output string, err error) {
 	agentSession, err := e.startAgentSession(ctx, agentSessionID, syntheticKey, env)
 	if err != nil {
-		return "", "", fmt.Errorf("start isolated cron session: %w", err)
+		return "", "", fmt.Errorf("start isolated cron session: %w", cronResumeError(err, agentSessionID, false))
 	}
 	defer func() {
 		_ = agentSession.Close()
@@ -298,12 +299,13 @@ func (e *Engine) runIsolatedCronTurn(
 		return "", "", ctx.Err()
 	case err := <-sendErr:
 		if err != nil {
-			return "", "", fmt.Errorf("send cron prompt: %w", err)
+			return "", "", fmt.Errorf("send cron prompt: %w", cronResumeError(err, agentSessionID, false))
 		}
 	}
 
 	sessionID := agentSession.CurrentSessionID()
 	var buf jobTextBuffer
+	workSeen := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -316,11 +318,17 @@ func (e *Engine) runIsolatedCronTurn(
 				sessionID = event.SessionID
 			}
 			switch event.Type {
+			case EventToolUse, EventToolResult, EventThinking:
+				workSeen = true
 			case EventText:
 				if event.Content != "" {
+					workSeen = true
 					buf.Append(event.Content)
 				}
 			case EventResult:
+				if event.Error != nil {
+					return sessionID, buf.String(), cronResumeError(event.Error, agentSessionID, workSeen)
+				}
 				out := event.Content
 				if out == "" {
 					out = buf.String()
@@ -331,7 +339,7 @@ func (e *Engine) runIsolatedCronTurn(
 				if evErr == nil {
 					evErr = fmt.Errorf("cron session received agent error event")
 				}
-				return sessionID, buf.String(), evErr
+				return sessionID, buf.String(), cronResumeError(evErr, agentSessionID, workSeen)
 			case EventPermissionRequest:
 				return sessionID, buf.String(), fmt.Errorf(
 					"cron session hit a permission request for tool %q; run the project in bypass/yolo mode for unattended cron",
@@ -340,6 +348,21 @@ func (e *Engine) runIsolatedCronTurn(
 			}
 		}
 	}
+}
+
+func cronResumeError(err error, resumeID string, workSeen bool) error {
+	if resumeID == "" || workSeen {
+		if errors.Is(err, ErrAgentSessionNotFound) {
+			return fmt.Errorf("%s", err) // Work already ran; this is not a startup failure.
+		}
+		return err
+	}
+	// Older Codex adapters report this specific thread/resume RPC diagnostic
+	// without a typed error. Never infer resume failure from generic file errors.
+	if strings.HasPrefix(err.Error(), "thread/resume:") && strings.Contains(err.Error(), "failed to resolve rollout path") {
+		return fmt.Errorf("%w: %v", ErrAgentSessionNotFound, err)
+	}
+	return err
 }
 
 func (e *Engine) StartJobSession(

@@ -3860,7 +3860,8 @@ func TestProcessInteractiveEvents_FatalClaudeImageErrorCleansInteractiveState(t 
 	p := &stubPlatformEngine{n: "test"}
 	events := make(chan Event, 1)
 	events <- Event{
-		Type:    EventResult,
+		Type:    EventError,
+		Error:   fmt.Errorf("Could not process image"),
 		Content: "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Could not process image\"}}",
 		Done:    true,
 	}
@@ -3888,7 +3889,8 @@ func TestProcessInteractiveEvents_RequestTooLargeCleansInteractiveState(t *testi
 	p := &stubPlatformEngine{n: "test"}
 	events := make(chan Event, 1)
 	events <- Event{
-		Type:    EventResult,
+		Type:    EventError,
+		Error:   fmt.Errorf("Request too large (max 20MB)"),
 		Content: "Request too large (max 20MB). Try with a smaller file.",
 		Done:    true,
 	}

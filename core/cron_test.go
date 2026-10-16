@@ -253,11 +253,12 @@ func TestRunCronIsolatedTurnDropsStaleSessionID(t *testing.T) {
 
 func TestIsResumeFailure(t *testing.T) {
 	cases := map[string]bool{
-		"thread/resume: failed to resolve rollout path /x: file does not exist": true,
-		"failed to resume session":        true,
-		"no conversation found":           true,
-		"transient api error: status 500": false,
-		"context deadline exceeded":       false,
+		"thread/resume: failed to resolve rollout path /x: file does not exist": false,
+		"failed to resume session":               false,
+		"no conversation found":                  false,
+		"Workspace artifact /foo does not exist": false,
+		"transient api error: status 500":        false,
+		"context deadline exceeded":              false,
 	}
 	for msg, want := range cases {
 		if got := isResumeFailure(fmt.Errorf("%s", msg)); got != want {
@@ -266,6 +267,9 @@ func TestIsResumeFailure(t *testing.T) {
 	}
 	if isResumeFailure(nil) {
 		t.Error("isResumeFailure(nil) should be false")
+	}
+	if !isResumeFailure(fmt.Errorf("startup: %w", ErrAgentSessionNotFound)) {
+		t.Fatal("confirmed missing-session error was not recognized")
 	}
 }
 
