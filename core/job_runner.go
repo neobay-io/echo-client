@@ -109,6 +109,7 @@ func (r engineJobRunner) Run(
 	if sessionKey == "echo-job-" {
 		sessionKey = "echo-job-anonymous"
 	}
+	defer r.engine.trackBackgroundTurn()()
 	agentSession, err := r.engine.StartJobSession(ctx, req, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("start job session: %w", err)
@@ -291,6 +292,7 @@ func (e *Engine) runIsolatedCronTurn(
 	env []string,
 	opts AgentSessionOptions,
 ) (finalSessionID string, output string, err error) {
+	defer e.trackBackgroundTurn()()
 	agentSession, err := e.startAgentSession(ctx, agentSessionID, syntheticKey, env, opts)
 	if err != nil {
 		return "", "", fmt.Errorf("start isolated cron session: %w", cronResumeError(err, agentSessionID, false))

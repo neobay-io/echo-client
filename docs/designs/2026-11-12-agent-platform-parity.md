@@ -311,7 +311,13 @@ Echo 侧（独立仓库，单独 PR）：
   7. `/auth` 运行时同时要求“该 agent 和流程确有登录实现”，并按 login / status 分别检查能力。
   8. `/status` 和模型选择器按“聊天设置 → provider 模型 → 项目模型”显示，与实际启动一致。
 
-  剩余风险：purge 看不到另一个服务进程里的引用（Claude 服务和 Codex 服务各是一个进程）；切换设置会重置“本会话全部允许”的状态（与改动前的 `/mode` 一致，属于有意保留）；Codex 的模式参数只用假 CLI 和 `exec resume` 参数解析验证过，还没跑过真实的一轮。
+  剩余风险：purge 看不到另一个服务进程里的引用（Claude 服务和 Codex 服务各是一个进程）；切换设置会重置“本会话全部允许”的状态（与改动前的 `/mode` 一致，属于有意保留）；Codex 的模式参数只用假 CLI 和 `exec resume` 参数解析验证过，还没跑过真实的一轮（2026-11-17 已补实测，见下一条）。
+- **P0 实测（2026-11-17，`go test -tags live`，真实 CLI 与账号）**：
+  - Codex：`acceptEdits`、`auto`、`default` 三种模式下，新线程和续接线程（`exec resume`）都能完成一轮；前两种模式实际写出了文件。修复前续接线程会因为 `--full-auto` 直接失败。
+  - 更正一处描述：`default` 不加任何覆盖，写不写得了文件取决于 `~/.codex/config.toml`。本机设置了 `approvals_reviewer = "auto_review"`，所以 `default` 也能写，并不是“只读沙箱”。README、配置示例和模式说明已改正。
+  - Claude：按会话设置的 model / effort / mode 确实传给了 `claude` 进程；从 haiku 切到 sonnet 并 `--resume` 后，仍然记得上一轮的内容，说明 `/model` 切换不会丢上下文。
+  - 还需要人工验收的部分：Feishu 和 Telegram 里 `/status`、`/model`、`/mode` 的卡片与按钮显示。
+  - 实测用例在 `agent/codex/live_test.go`、`agent/claudecode/live_test.go`、`core/agent_upgrade_live_test.go`，都带 `live` build tag，不进默认测试。
 - **T0.5**：`core/agent_cli.go` 与新的 `echo-client doctor [agent-type...]` 子命令：按当前进程的 PATH 解析 CLI，输出版本、实际路径、符号链接目标，并标出 PATH 上的其他副本和损坏的安装；聊天里的 `/doctor` 用同一套逻辑。**Kimi Code CLI 尚未安装**：需要从 npm 安装第三方包，留到 P1 开始时由你确认后再装。
 
 ### P1 接入 agy 与 Kimi（约 3 天）
@@ -404,6 +410,13 @@ Echo 侧（独立仓库，单独 PR）：
 | T10.5 | **升级后生效**：重启空闲的常驻 agent 进程（Claude），下一轮 resume 原会话；刷新模型缓存与能力探测（§5.1）；跑一次冒烟检查（`--version` + 能力探测），失败就回滚并告警 | T0.1 | 升级后不用重启服务，新版本马上生效 |
 | T10.6 | **新目标**：Kimi Code（npm `@moonshot-ai/kimi-code` 或 CLI 自带的更新命令，待 spike 确认）、agy（安装器或 CLI 自带的更新命令，待 spike 确认；agy 几乎每天发版，默认每天一次足够）；清理 legacy `kimi-cli` | T1.2, T1.3 | 四个主力 agent 都纳入自动升级 |
 | T10.7 | **Echo 联动**：heartbeat / 注册 metadata 带上各 CLI 的版本；Echo 任务运行中不升级 | T7.1 | Echo 仪表盘能看到每台主机的 CLI 版本 |
+
+**P10 实现记录（2026-11-17，核心部分：T10.1、T10.3、T10.4）**
+
+- **T10.1**：每个目标先按服务自己的 PATH 定位 CLI（与 agent 进程一致），版本探测直接执行这个二进制；按实际路径识别安装路线（Codex：standalone / npm / Homebrew；Claude：native / Homebrew / npm；Gemini：npm / Homebrew；Qoder：自更新），没有手动配置命令时自动选用对应的升级命令（Codex standalone 用官方安装脚本）。手动配置的 `version_command` / `update_command` 始终优先。命令执行改为非登录 shell（`/bin/sh -c`），不再读 `~/.profile`。PATH 上有其他副本时在日志和 `/agent-upgrade status` 里告警。本机实测四个目标都定位正确。
+- **T10.3**：自动运行失败时日志带上错误和输出尾部；计划、失败退避、每个目标的上次结果、通知会话都持久化到 `<data_dir>/agent-upgrade-state.json`；`/agent-upgrade status` 显示二进制路径、安装路线、副本告警、上次结果；新增 `/agent-upgrade notify on|off|list`（仅 `allowed_user_ids`），版本变化或失败时通知已登记的会话。
+- **T10.4**：下次运行时间按“上次运行 + 间隔”计算并持久化，重启不再重新计时；服务停机期间错过的运行在启动约 2 分钟后补上；新增 `window = "HH:MM-HH:MM"`（可跨午夜）；空闲判断加入 Echo 任务、隔离 cron 运行和 relay 轮次；用户缓存目录下的文件锁让两个服务不会同时升级同一个 CLI，持有锁期间另一个服务的新消息也会等待。
+- **尚未做**：升级期间的新消息仍然是提示稍后重试，而不是排队；另一个服务进程里正在运行的轮次看不到（锁只保证不会同时升级）；T10.2、T10.5、T10.6、T10.7。
 
 ### P9 文档与测试（贯穿）
 

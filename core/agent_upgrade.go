@@ -25,6 +25,10 @@ type AgentUpgradeTargetConfig struct {
 	PinVersion     string
 	FailureBackoff time.Duration
 	MaxFailures    int
+	// *Set mark commands the user configured explicitly; only defaults are
+	// replaced by the commands derived from the detected install route.
+	VersionCommandSet bool
+	UpdateCommandSet  bool
 }
 
 type AgentUpgradeConfig struct {
@@ -34,7 +38,10 @@ type AgentUpgradeConfig struct {
 	Policy         string
 	Interval       time.Duration
 	Timeout        time.Duration
-	Targets        map[string]AgentUpgradeTargetConfig
+	// Window restricts automatic runs to a local time range "HH:MM-HH:MM"
+	// (may wrap midnight). Empty means any time.
+	Window  string
+	Targets map[string]AgentUpgradeTargetConfig
 }
 
 type AgentUpgradeStatus struct {
@@ -53,6 +60,12 @@ type AgentUpgradeStatus struct {
 	ConsecutiveFailures int
 	LastFailureReason   string
 	BackoffUntil        time.Time
+	// Where the CLI resolves for agent processes and how it was installed.
+	BinaryPath   string
+	ResolvedPath string
+	InstallRoute string
+	Warning      string
+	LastResult   *AgentUpgradeLastResult
 }
 
 type AgentUpgradeRunResult struct {
@@ -71,6 +84,9 @@ type AgentUpgradeRunResult struct {
 type resolvedAgentUpgradeTarget struct {
 	cfg           AgentUpgradeTargetConfig
 	blockedReason string
+	info          AgentCLIInfo
+	route         string
+	warning       string
 }
 
 type agentUpgradeFailureState struct {
@@ -87,25 +103,46 @@ type AgentUpgradeManager struct {
 	cfg         AgentUpgradeConfig
 	runCommand  AgentUpgradeCommandRunner
 	busyCountFn func(string) int
+	inspectCLI  func(context.Context, string) AgentCLIInfo
 	running     map[string]bool
 	failures    map[string]agentUpgradeFailureState
+	lastResults map[string]AgentUpgradeLastResult
+	notifyChats []AgentUpgradeNotifyChat
+	notifyFn    func(project, sessionKey, text string) error
+	statePath   string
+	lockDir     string
 	lastAutoRun time.Time
 	nextAutoRun time.Time
-	startOnce   sync.Once
-	wakeCh      chan struct{}
-	loopDone    chan struct{}
+	// Delay before a run that was missed while the service was down, so a
+	// restart does not upgrade before chats reconnect.
+	startupGrace time.Duration
+	startOnce    sync.Once
+	wakeCh       chan struct{}
+	loopDone     chan struct{}
 }
+
+const defaultAgentUpgradeStartupGrace = 2 * time.Minute
 
 func NewAgentUpgradeManager(cfg AgentUpgradeConfig) *AgentUpgradeManager {
 	m := &AgentUpgradeManager{
-		runCommand: defaultAgentUpgradeCommandRunner,
-		running:    make(map[string]bool),
-		failures:   make(map[string]agentUpgradeFailureState),
-		wakeCh:     make(chan struct{}, 1),
-		loopDone:   make(chan struct{}),
+		runCommand:   defaultAgentUpgradeCommandRunner,
+		running:      make(map[string]bool),
+		failures:     make(map[string]agentUpgradeFailureState),
+		lastResults:  make(map[string]AgentUpgradeLastResult),
+		lockDir:      defaultAgentUpgradeLockDir(),
+		startupGrace: defaultAgentUpgradeStartupGrace,
+		wakeCh:       make(chan struct{}, 1),
+		loopDone:     make(chan struct{}),
 	}
 	m.ApplyConfig(cfg)
 	return m
+}
+
+// SetCLIInspector replaces how agent CLIs are located (tests).
+func (m *AgentUpgradeManager) SetCLIInspector(fn func(context.Context, string) AgentCLIInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inspectCLI = fn
 }
 
 func DefaultAgentUpgradeConfig() AgentUpgradeConfig {
@@ -177,6 +214,7 @@ func (m *AgentUpgradeManager) ApplyConfig(cfg AgentUpgradeConfig) {
 	if cfg.Timeout > 0 {
 		base.Timeout = cfg.Timeout
 	}
+	base.Window = strings.TrimSpace(cfg.Window)
 	if len(cfg.Targets) > 0 {
 		for name, override := range cfg.Targets {
 			name = normalizeAgentUpgradeTarget(name)
@@ -197,6 +235,8 @@ func (m *AgentUpgradeManager) ApplyConfig(cfg AgentUpgradeConfig) {
 			if strings.TrimSpace(override.UpdateCommand) != "" {
 				target.UpdateCommand = strings.TrimSpace(override.UpdateCommand)
 			}
+			target.VersionCommandSet = override.VersionCommandSet
+			target.UpdateCommandSet = override.UpdateCommandSet
 			if minVersion := strings.TrimSpace(override.MinimumVersion); minVersion != "" {
 				target.MinimumVersion = minVersion
 			}
@@ -246,14 +286,32 @@ func (m *AgentUpgradeManager) AuthorizeRun(userID string) error {
 	return fmt.Errorf("you are not allowed to run agent upgrades")
 }
 
+// IsTargetRunning reports whether name is being upgraded by this process or by
+// another echo-client process sharing the lock directory; new turns for that
+// agent wait meanwhile.
 func (m *AgentUpgradeManager) IsTargetRunning(name string) bool {
 	name = normalizeAgentUpgradeTarget(name)
 	if name == "" {
 		return false
 	}
 	m.mu.Lock()
+	running := m.running[name]
+	dir := m.lockDir
+	m.mu.Unlock()
+	return running || upgradeLockHeld(dir, name)
+}
+
+func (m *AgentUpgradeManager) lockDirPath() string {
+	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.running[name]
+	return m.lockDir
+}
+
+// SetLockDir overrides where cross-process upgrade locks live (tests).
+func (m *AgentUpgradeManager) SetLockDir(dir string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lockDir = dir
 }
 
 func (m *AgentUpgradeManager) Start(ctx context.Context) {
@@ -318,9 +376,17 @@ func (m *AgentUpgradeManager) loop(ctx context.Context) {
 			interval = defaultAgentUpgradeInterval
 		}
 		if nextRun.IsZero() && cfg.Enabled && cfg.Policy != "off" {
-			nextRun = time.Now().Add(interval)
+			window, werr := parseUpgradeWindow(cfg.Window)
+			if werr != nil {
+				slog.Warn("agent upgrade: ignoring invalid window", "error", werr)
+			}
+			m.mu.Lock()
+			persistedNext, lastRun, grace := m.nextAutoRun, m.lastAutoRun, m.startupGrace
+			m.mu.Unlock()
+			nextRun = computeNextAutoRun(time.Now(), persistedNext, lastRun, interval, grace, window)
 		}
 		m.updateScheduleState(time.Time{}, nextRun)
+		m.saveState()
 
 		wait := time.Until(nextRun)
 		if wait < 0 {
@@ -356,7 +422,7 @@ func (m *AgentUpgradeManager) loop(ctx context.Context) {
 			slog.Warn("agent upgrade auto-check failed", "error", err)
 		} else {
 			for _, res := range results {
-				slog.Info("agent upgrade auto-run",
+				attrs := []any{
 					"agent", res.Name,
 					"strategy", res.Strategy,
 					"busy_sessions", res.BusySessions,
@@ -365,12 +431,30 @@ func (m *AgentUpgradeManager) loop(ctx context.Context) {
 					"before", res.BeforeVersion,
 					"after", res.AfterVersion,
 					"changed", res.Changed,
-				)
+				}
+				if res.Err != nil {
+					// Previously the error was dropped, so failures could not
+					// be diagnosed from the logs.
+					attrs = append(attrs, "error", res.Err, "output_tail", outputTail(res.Output, 400))
+					slog.Warn("agent upgrade auto-run failed", attrs...)
+					continue
+				}
+				slog.Info("agent upgrade auto-run", attrs...)
 			}
 		}
 		nextRun = time.Time{}
 		m.updateScheduleState(completedAt, nextRun)
+		m.saveState()
 	}
+}
+
+// outputTail keeps the end of command output, where installers print errors.
+func outputTail(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return "…" + s[len(s)-max:]
 }
 
 func (m *AgentUpgradeManager) Statuses(ctx context.Context) []AgentUpgradeStatus {
@@ -398,6 +482,15 @@ func (m *AgentUpgradeManager) Statuses(ctx context.Context) []AgentUpgradeStatus
 			ConsecutiveFailures: failureState.ConsecutiveFailures,
 			LastFailureReason:   failureState.LastFailureReason,
 			BackoffUntil:        failureState.BackoffUntil,
+			InstallRoute:        resolved.route,
+			Warning:             resolved.warning,
+		}
+		if sel := resolved.info.Selected; sel != nil {
+			st.BinaryPath = sel.Path
+			st.ResolvedPath = sel.Resolved
+		}
+		if last, ok := m.LastResult(name); ok {
+			st.LastResult = &last
 		}
 		if busyFn != nil {
 			st.BusySessions = busyFn(name)
@@ -437,8 +530,22 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 		return nil, err
 	}
 	results := make([]AgentUpgradeRunResult, 0, len(names))
+	binaryPaths := make(map[string]string, len(names))
+	defer func() {
+		for _, res := range results {
+			m.recordResult(res, automatic, binaryPaths[res.Name])
+		}
+		m.saveState()
+		m.notifyResults(results, automatic)
+	}()
 	for _, name := range names {
 		resolved := m.resolveTarget(ctx, name, cfg.Targets[name], runner)
+		if resolved.info.Selected != nil {
+			binaryPaths[name] = resolved.info.Selected.Path
+		}
+		if resolved.warning != "" {
+			slog.Warn("agent upgrade: duplicate installs", "agent", name, "detail", resolved.warning)
+		}
 		cfgTarget := resolved.cfg
 		res := AgentUpgradeRunResult{Name: name, Strategy: cfgTarget.Strategy}
 		if automatic {
@@ -481,6 +588,20 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 		}
 		func() {
 			defer m.endTargetRun(name)
+
+			// Another echo-client service may be upgrading the same CLI.
+			release, locked, lockErr := acquireUpgradeLock(m.lockDirPath(), name)
+			if lockErr != nil {
+				slog.Warn("agent upgrade: cross-process lock unavailable; continuing", "agent", name, "error", lockErr)
+				release, locked = func() {}, true
+			}
+			if !locked {
+				res.Skipped = true
+				res.Reason = "another echo-client process is upgrading " + name
+				results = append(results, res)
+				return
+			}
+			defer release()
 
 			if busyFn != nil {
 				res.BusySessions = busyFn(name)
@@ -539,17 +660,46 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 	return results, nil
 }
 
+// resolveTarget works out what to probe and run for one target. It first
+// locates the CLI exactly as agent processes do (this process's PATH), so the
+// version probe and the update hit the binary that actually runs, then applies
+// the per-agent rules below.
 func (m *AgentUpgradeManager) resolveTarget(ctx context.Context, name string, target AgentUpgradeTargetConfig, runner AgentUpgradeCommandRunner) resolvedAgentUpgradeTarget {
+	info := m.inspectTarget(ctx, name)
+	route := detectInstallRoute(name, info.Selected)
+	target, routeReason := applyInstallRoute(name, target, info, route)
+	resolved := m.resolveTargetRules(ctx, name, target, runner, route)
+	resolved.info = info
+	resolved.route = route
+	resolved.warning = otherInstallsWarning(info)
+	resolved.blockedReason = joinBlockedReasons(resolved.blockedReason, routeReason)
+	return resolved
+}
+
+func (m *AgentUpgradeManager) resolveTargetRules(ctx context.Context, name string, target AgentUpgradeTargetConfig, runner AgentUpgradeCommandRunner, route string) resolvedAgentUpgradeTarget {
 	resolved := resolvedAgentUpgradeTarget{cfg: target}
 	switch name {
 	case "claudecode":
+		if route == installRouteNative {
+			// Located directly; no need to probe through a shell.
+			if !target.UpdateCommandSet {
+				resolved.cfg.UpdateCommand = "claude update"
+			}
+			if normalizeAgentUpgradeChannel(target.Channel) == "latest" {
+				resolved.blockedReason = "channel \"latest\" is not supported for native claude installs"
+			}
+			if target.PinVersion != "" {
+				resolved.blockedReason = joinBlockedReasons(resolved.blockedReason, fmt.Sprintf("pin_version %q is not supported for the detected claude install route", target.PinVersion))
+			}
+			return resolved
+		}
 		return resolveClaudeCodeUpgradeTarget(ctx, runner, target)
 	case "codex":
 		if target.Channel != "" {
 			resolved.blockedReason = fmt.Sprintf("channel %q is not supported for codex", target.Channel)
 			return resolved
 		}
-		if target.PinVersion != "" && target.Strategy == "package_manager" {
+		if target.PinVersion != "" && target.Strategy == "package_manager" && !target.UpdateCommandSet {
 			resolved.cfg.UpdateCommand = fmt.Sprintf("npm install -g %s", shellQuote("@openai/codex@"+strings.TrimSpace(target.PinVersion)))
 		}
 		return resolved
@@ -624,12 +774,16 @@ func resolveClaudeCodeUpgradeTarget(ctx context.Context, runner AgentUpgradeComm
 	source, updateCommand, blockedReason := detectClaudeCodeUpgradeRoute(ctx, runner, target.Channel)
 	switch source {
 	case "native", "brew", "npm":
-		resolved.cfg.UpdateCommand = updateCommand
+		if !target.UpdateCommandSet {
+			resolved.cfg.UpdateCommand = updateCommand
+		}
 		if source != "native" {
 			resolved.cfg.Strategy = "package_manager"
 		}
 	case "apt", "dnf", "apk":
-		resolved.cfg.UpdateCommand = updateCommand
+		if !target.UpdateCommandSet {
+			resolved.cfg.UpdateCommand = updateCommand
+		}
 	}
 	resolved.blockedReason = blockedReason
 	if target.PinVersion != "" {
@@ -902,8 +1056,12 @@ func joinBlockedReasons(parts ...string) string {
 	return strings.Join(out, "; ")
 }
 
+// defaultAgentUpgradeCommandRunner runs cmd in a plain (non-login) shell with
+// this process's environment. A login shell re-reads ~/.profile and
+// path_helper and can resolve a different copy of the CLI than the agent
+// processes, which is how upgrades used to hit the wrong install.
 func defaultAgentUpgradeCommandRunner(ctx context.Context, cmd string) (string, error) {
-	c := exec.CommandContext(ctx, "/bin/sh", "-lc", cmd)
+	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
 	out, err := c.CombinedOutput()
 	return string(out), err
 }

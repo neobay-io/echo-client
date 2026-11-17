@@ -162,8 +162,19 @@ level = "info" # debug, info, warn, error
 # run_enabled = false          # gates only chat-triggered `/agent-upgrade run`; scheduler still follows policy below
 # allowed_user_ids = ["ou_xxx"] # required when run_enabled = true
 # policy = "idle_only"         # off | check_only | idle_only
-# interval_secs = 86400        # 24h
+# interval_secs = 86400        # 24h; the schedule is kept in <data_dir>/agent-upgrade-state.json, so restarts do not reset it
 # timeout_secs = 1200
+# window = "02:00-06:00"       # optional local time range for automatic runs (may wrap midnight)
+#
+# Each target's CLI is located on the service's own PATH (the copy agents
+# actually run). Leave version_command / update_command unset to use the
+# commands for the detected install (Codex: standalone installer, npm or
+# Homebrew; Claude: native, Homebrew or npm). Set them only to override.
+# Upgrades wait until the agent has no chat turns, Echo jobs, cron runs or
+# relay turns, and a lock in the user cache dir keeps two echo-client services
+# from upgrading the same CLI at once.
+# `/agent-upgrade notify on` (allowed_user_ids only) sends upgrade results and
+# failures to that chat.
 #
 # [agent_updates.claudecode]
 # enabled = true
@@ -179,8 +190,8 @@ level = "info" # debug, info, warn, error
 # [agent_updates.codex]
 # enabled = true
 # strategy = "package_manager"
-# version_command = "codex --version"
-# update_command = "npm install -g @openai/codex@latest"
+# version_command = "codex --version"                    # optional; default probes the resolved binary
+# update_command = "npm install -g @openai/codex@latest" # optional; default follows the detected install
 # minimum_version = "0.124.0"
 # pin_version = "0.124.0"       # package_manager targets can pin npm package versions
 # max_failures = 3
@@ -805,7 +816,7 @@ app_secret = "your-feishu-app-secret"
 # mode = "default"  # "default" | "acceptEdits" | "auto" | "bypassPermissions"
 #
 # Mode options / 模式说明 (legacy values suggest / auto-edit / full-auto / yolo still work):
-# - "default":           Codex defaults, read-only sandbox in exec (alias: suggest) / Codex 默认设置，exec 下为只读沙箱
+# - "default":           no overrides; follows ~/.codex/config.toml (alias: suggest) / 不加覆盖，按 ~/.codex/config.toml 执行
 # - "acceptEdits":       edit and run commands inside the workspace sandbox, no escalation (alias: auto-edit) / 工作区沙箱内可编辑和执行，不允许越权
 # - "auto":              workspace sandbox, escalations auto-reviewed like --approve-for-me (alias: full-auto) / 工作区沙箱，越权请求自动审核
 # - "bypassPermissions": bypass all approvals and sandbox, dangerous (alias: yolo) / 跳过所有审批和沙箱（危险）

@@ -28,7 +28,7 @@ func init() {
 // Modes use the canonical names from core (legacy aliases in parentheses).
 // `codex exec resume` rejects --sandbox / --approve-for-me, so everything is
 // passed as -c overrides that both `exec` and `exec resume` accept:
-//   - "default" (suggest): no flags; Codex defaults apply
+//   - "default" (suggest): no overrides; ~/.codex/config.toml decides
 //   - "acceptEdits" (auto-edit): sandbox_mode=workspace-write, approval_policy=never
 //   - "auto" (full-auto): what --approve-for-me sets: workspace-write sandbox,
 //     approval_policy=on-request, approvals_reviewer=auto_review
@@ -586,7 +586,7 @@ func (a *Agent) providerEnvLocked() []string {
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Codex defaults (read-only sandbox in exec)", DescZh: "Codex 默认设置（exec 下为只读沙箱）"},
+		{Key: "default", Name: "Default", NameZh: "默认", Desc: "No overrides: follows your Codex config (~/.codex/config.toml)", DescZh: "不加覆盖，按 ~/.codex/config.toml 的设置执行"},
 		{Key: "acceptEdits", Name: "Accept Edits", NameZh: "接受编辑", Desc: "Edit and run commands inside the workspace sandbox; no escalation", DescZh: "可在工作区沙箱内编辑和执行命令，不允许越权"},
 		{Key: "auto", Name: "Auto", NameZh: "自动模式", Desc: "Workspace sandbox; escalation requests reviewed automatically (--approve-for-me)", DescZh: "工作区沙箱，越权请求由 Codex 自动审核（--approve-for-me）"},
 		{Key: "bypassPermissions", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},

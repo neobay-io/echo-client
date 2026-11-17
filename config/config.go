@@ -74,6 +74,7 @@ type AgentUpdatesConfig struct {
 	Policy         string                  `toml:"policy,omitempty"`
 	IntervalSecs   int                     `toml:"interval_secs,omitempty"`
 	TimeoutSecs    int                     `toml:"timeout_secs,omitempty"`
+	Window         string                  `toml:"window,omitempty"` // local "HH:MM-HH:MM" for automatic runs
 	ClaudeCode     AgentUpdateTargetConfig `toml:"claudecode"`
 	Codex          AgentUpdateTargetConfig `toml:"codex"`
 	Gemini         AgentUpdateTargetConfig `toml:"gemini"`

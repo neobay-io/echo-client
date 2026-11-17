@@ -268,7 +268,7 @@ app_secret = "your-app-secret"
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
-| **默认** | `default`（别名 `suggest`） | Codex 默认设置（`exec` 下为只读沙箱）。 |
+| **默认** | `default`（别名 `suggest`） | 不加任何覆盖，沙箱和审批按你的 Codex 配置（`~/.codex/config.toml`）执行。 |
 | **接受编辑** | `acceptEdits`（别名 `auto-edit`） | 可在工作区沙箱内编辑和执行命令，不允许越权。 |
 | **自动** | `auto`（别名 `full-auto`） | 工作区沙箱，越权请求由 Codex 自动审核（等同 `--approve-for-me`）。推荐日常使用。 |
 | **YOLO 模式** | `bypassPermissions`（别名 `yolo`） | 跳过所有审批和沙箱。 |

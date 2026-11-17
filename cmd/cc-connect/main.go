@@ -497,15 +497,26 @@ func main() {
 		engine.SetAgentAuthManager(agentAuthMgr)
 	}
 	agentUpgradeMgr = core.NewAgentUpgradeManager(buildAgentUpgradeConfig(cfg.AgentUpdates))
+	// Schedule, failures, last results and notification chats survive restarts.
+	agentUpgradeMgr.SetStatePath(filepath.Join(cfg.DataDir, "agent-upgrade-state.json"))
 	agentUpgradeMgr.SetBusyCountFunc(func(agentName string) int {
 		count := 0
 		for _, e := range engines {
 			if e.GetAgent().Name() != agentName {
 				continue
 			}
-			count += e.BusySessionCount()
+			// Chat turns plus Echo jobs, isolated cron runs and relay turns.
+			count += e.ActiveAgentWork()
 		}
 		return count
+	})
+	agentUpgradeMgr.SetNotifier(func(project, sessionKey, text string) error {
+		for _, e := range engines {
+			if e.ProjectName() == project {
+				return e.NotifySession(sessionKey, text)
+			}
+		}
+		return fmt.Errorf("project %q not found", project)
 	})
 	for _, e := range engines {
 		e.SetAgentUpgradeManager(agentUpgradeMgr)
@@ -997,6 +1008,7 @@ func buildAgentUpgradeConfig(cfg config.AgentUpdatesConfig) core.AgentUpgradeCon
 	if cfg.TimeoutSecs > 0 {
 		result.Timeout = time.Duration(cfg.TimeoutSecs) * time.Second
 	}
+	result.Window = strings.TrimSpace(cfg.Window)
 	apply := func(name string, src config.AgentUpdateTargetConfig) {
 		target := result.Targets[name]
 		if src.Enabled != nil {
@@ -1008,11 +1020,14 @@ func buildAgentUpgradeConfig(cfg config.AgentUpdatesConfig) core.AgentUpgradeCon
 		if channel := strings.TrimSpace(src.Channel); channel != "" {
 			target.Channel = channel
 		}
+		// Explicit commands win over the ones derived from the detected install.
 		if versionCmd := strings.TrimSpace(src.VersionCommand); versionCmd != "" {
 			target.VersionCommand = versionCmd
+			target.VersionCommandSet = true
 		}
 		if updateCmd := strings.TrimSpace(src.UpdateCommand); updateCmd != "" {
 			target.UpdateCommand = updateCmd
+			target.UpdateCommandSet = true
 		}
 		if minVersion := strings.TrimSpace(src.MinimumVersion); minVersion != "" {
 			target.MinimumVersion = minVersion

@@ -270,7 +270,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
-| **Default** | `default` (alias: `suggest`) | Codex defaults (read-only sandbox in `exec`). |
+| **Default** | `default` (alias: `suggest`) | No overrides: sandbox and approvals follow your Codex config (`~/.codex/config.toml`). |
 | **Accept Edits** | `acceptEdits` (alias: `auto-edit`) | Edit and run commands inside the workspace sandbox; no escalation. |
 | **Auto** | `auto` (alias: `full-auto`) | Workspace sandbox; escalation requests reviewed automatically (same as `--approve-for-me`). Recommended. |
 | **YOLO** | `bypassPermissions` (alias: `yolo`) | Bypass all approvals and sandbox. |

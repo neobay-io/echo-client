@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -213,6 +214,10 @@ type Engine struct {
 
 	preparedSkillMetaMu sync.Mutex
 	preparedSkillMeta   map[string]map[string]any
+
+	// backgroundTurns counts Echo jobs, isolated cron runs and relay turns in
+	// flight (see ActiveAgentWork).
+	backgroundTurns atomic.Int64
 
 	// Background start retries for platforms whose Start failed. See
 	// platform_start.go.
@@ -685,6 +690,26 @@ func (e *Engine) BusySessionCount() int {
 		return 0
 	}
 	return e.sessions.BusySessionCount()
+}
+
+// ActiveAgentWork counts agent turns running right now: chat turns plus Echo
+// jobs, isolated cron runs and relay turns, which do not lock a chat session.
+// The upgrade manager waits until this is zero.
+func (e *Engine) ActiveAgentWork() int {
+	return e.BusySessionCount() + int(e.backgroundTurns.Load())
+}
+
+// trackBackgroundTurn marks one non-chat agent turn as running until the
+// returned func is called.
+func (e *Engine) trackBackgroundTurn() func() {
+	e.backgroundTurns.Add(1)
+	return func() { e.backgroundTurns.Add(-1) }
+}
+
+// NotifySession sends text to a chat by session key, reconstructing the reply
+// context when no turn is active.
+func (e *Engine) NotifySession(sessionKey, text string) error {
+	return e.sendTextToSession(sessionKey, text)
 }
 
 // AddCommand registers a custom slash command.
@@ -7626,7 +7651,7 @@ func (e *Engine) cmdAgentUpgrade(p Platform, msg *Message, args []string) {
 
 	sub := "status"
 	if len(args) > 0 {
-		sub = matchSubCommand(strings.ToLower(args[0]), []string{"status", "check", "run"})
+		sub = matchSubCommand(strings.ToLower(args[0]), []string{"status", "check", "run", "notify"})
 	}
 
 	switch sub {
@@ -7663,12 +7688,43 @@ func (e *Engine) cmdAgentUpgrade(p Platform, msg *Message, args []string) {
 		if !nextAutoRun.IsZero() {
 			fmt.Fprintf(&sb, "next auto-check: %s\n", nextAutoRun.Format(time.RFC3339))
 		}
+		if cfg.Window != "" {
+			fmt.Fprintf(&sb, "window: %s (local time)\n", cfg.Window)
+		}
+		if chats := e.agentUpgradeMgr.NotifyChats(); len(chats) > 0 {
+			fmt.Fprintf(&sb, "notifications: %d chat(s)\n", len(chats))
+		}
 		for _, st := range statuses {
 			fmt.Fprintf(&sb, "\n- %s\n", st.Name)
 			fmt.Fprintf(&sb, "  strategy: %s\n", st.Strategy)
 			fmt.Fprintf(&sb, "  enabled: %v\n", st.Enabled)
 			if st.Channel != "" {
 				fmt.Fprintf(&sb, "  channel: %s\n", st.Channel)
+			}
+			if st.BinaryPath != "" {
+				path := st.BinaryPath
+				if st.ResolvedPath != "" && st.ResolvedPath != st.BinaryPath {
+					path += " → " + st.ResolvedPath
+				}
+				fmt.Fprintf(&sb, "  binary: %s\n", path)
+			}
+			if st.InstallRoute != "" {
+				fmt.Fprintf(&sb, "  install: %s\n", st.InstallRoute)
+			}
+			if st.Warning != "" {
+				fmt.Fprintf(&sb, "  ⚠️ %s\n", st.Warning)
+			}
+			if last := st.LastResult; last != nil {
+				outcome := "no change"
+				switch {
+				case last.Error != "":
+					outcome = "failed: " + truncateIf(last.Error, 160)
+				case last.Skipped:
+					outcome = "skipped: " + last.Reason
+				case last.Changed:
+					outcome = fmt.Sprintf("upgraded %s → %s", last.BeforeVersion, last.AfterVersion)
+				}
+				fmt.Fprintf(&sb, "  last attempt: %s, %s\n", last.At.Format(time.RFC3339), outcome)
 			}
 			fmt.Fprintf(&sb, "  busy sessions: %d\n", st.BusySessions)
 			if st.VersionErr != "" {
@@ -7702,6 +7758,43 @@ func (e *Engine) cmdAgentUpgrade(p Platform, msg *Message, args []string) {
 			}
 		}
 		e.reply(p, msg.ReplyCtx, strings.TrimRight(sb.String(), "\n"))
+	case "notify":
+		// Upgrades and failures are reported to registered chats.
+		if err := e.agentUpgradeMgr.AuthorizeAdmin(msg.UserID); err != nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+			return
+		}
+		action := "list"
+		if len(args) > 1 {
+			action = strings.ToLower(args[1])
+		}
+		chat := AgentUpgradeNotifyChat{Project: e.name, SessionKey: msg.SessionKey}
+		switch action {
+		case "on":
+			e.agentUpgradeMgr.SetNotifyChat(chat, true)
+			e.reply(p, msg.ReplyCtx, "✅ This chat will be told when an agent CLI is upgraded or an upgrade fails.")
+		case "off":
+			e.agentUpgradeMgr.SetNotifyChat(chat, false)
+			e.reply(p, msg.ReplyCtx, "✅ This chat no longer receives agent upgrade notifications.")
+		case "list":
+			chats := e.agentUpgradeMgr.NotifyChats()
+			if len(chats) == 0 {
+				e.reply(p, msg.ReplyCtx, "No chats receive agent upgrade notifications. Use `/agent-upgrade notify on` here to add this one.")
+				return
+			}
+			var sb strings.Builder
+			sb.WriteString("Agent upgrade notifications go to:\n")
+			for _, c := range chats {
+				marker := ""
+				if c == chat {
+					marker = " (this chat)"
+				}
+				fmt.Fprintf(&sb, "- %s / %s%s\n", c.Project, c.SessionKey, marker)
+			}
+			e.reply(p, msg.ReplyCtx, strings.TrimRight(sb.String(), "\n"))
+		default:
+			e.reply(p, msg.ReplyCtx, "Usage: `/agent-upgrade notify [on|off|list]`")
+		}
 	case "run":
 		if err := e.agentUpgradeMgr.AuthorizeRun(msg.UserID); err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
@@ -7748,7 +7841,7 @@ func (e *Engine) cmdAgentUpgrade(p Platform, msg *Message, args []string) {
 		}
 		e.reply(p, msg.ReplyCtx, strings.TrimRight(sb.String(), "\n"))
 	default:
-		e.reply(p, msg.ReplyCtx, "Usage: `/agent-upgrade [status|check(alias)|run] [target|all]`")
+		e.reply(p, msg.ReplyCtx, "Usage: `/agent-upgrade [status|check(alias)|run] [target|all]` or `/agent-upgrade notify [on|off|list]`")
 	}
 }
 
@@ -8895,6 +8988,7 @@ func splitTTSByLength(text string, maxLen int) []string {
 // the complete response is collected.
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message string) (string, error) {
 	relaySessionKey := "relay:" + fromProject + ":" + chatID
+	defer e.trackBackgroundTurn()()
 	session := e.sessions.GetOrCreateActive(relaySessionKey)
 	agentTurn, err := e.lockAgentSessionTurn(ctx, session)
 	if err != nil {
