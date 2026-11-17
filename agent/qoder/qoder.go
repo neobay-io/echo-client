@@ -56,20 +56,9 @@ func New(opts map[string]any) (core.Agent, error) {
 }
 
 func normalizeMode(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "acceptedits", "accept-edits", "accept_edits", "edit":
-		return "acceptEdits"
-	case "plan":
-		return "plan"
-	case "dontask", "dont-ask", "dont_ask":
-		return "dontAsk"
-	case "yolo", "bypass", "dangerously-skip-permissions":
-		return "yolo"
-	case "bypasspermissions", "bypass-permissions", "bypass_permissions":
-		return "yolo"
-	default:
-		return "default"
-	}
+	// Shared table in core/permission_mode.go, so Echo registration and the
+	// adapter always agree (canonical names like bypassPermissions included).
+	return core.NormalizePermissionMode("qoder", raw)
 }
 
 func parseThinkingBudget(raw any) int {

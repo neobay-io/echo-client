@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -164,7 +165,31 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 }
 
 // findSessionFile locates the JSONL transcript for a given session ID.
+// rolloutTimestamp matches the timestamp Codex puts between "rollout-" and
+// the thread id, e.g. rollout-2026-06-04T19-55-57-<thread id>.jsonl.
+var rolloutTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-`)
+
+// rolloutThreadID extracts the whole thread id from a transcript file name.
+// Thread ids contain hyphens, so suffix matching could accept a partial id.
+func rolloutThreadID(base string) string {
+	name, ok := strings.CutSuffix(base, ".jsonl")
+	if !ok {
+		return ""
+	}
+	name = strings.TrimPrefix(name, "rollout-")
+	if loc := rolloutTimestamp.FindStringIndex(name); loc != nil {
+		name = name[loc[1]:]
+	}
+	return name
+}
+
 func findSessionFile(sessionID string) string {
+	// Transcripts are named rollout-<timestamp>-<thread id>.jsonl. Match the
+	// whole id at the end of the name: a substring match could pick another
+	// session's file (and an empty id would match every file).
+	if !core.ValidAgentSessionID(sessionID) {
+		return ""
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -180,7 +205,7 @@ func findSessionFile(sessionID string) string {
 		if err != nil || info.IsDir() || found != "" {
 			return nil
 		}
-		if strings.Contains(filepath.Base(path), sessionID) {
+		if rolloutThreadID(filepath.Base(path)) == sessionID {
 			found = path
 		}
 		return nil

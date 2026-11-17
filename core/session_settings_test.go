@@ -249,7 +249,7 @@ func TestDeletePurgeRemovesAgentTranscriptOnlyWhenAsked(t *testing.T) {
 	if got := len(e.sessions.ListSessions(key)); got != 1 {
 		t.Fatalf("remaining local sessions = %d, want 1 (active)", got)
 	}
-	if sent := strings.Join(p.sent, "\n"); !strings.Contains(sent, "another cc-connect session still uses it") {
+	if sent := strings.Join(p.sent, "\n"); !strings.Contains(sent, "still used by project test, session") {
 		t.Fatalf("shared purge reply missing: %q", sent)
 	}
 }

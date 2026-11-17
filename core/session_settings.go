@@ -10,11 +10,18 @@ func (e *Engine) perSessionSettings() bool {
 	return ok
 }
 
-// effectiveModel is the model the given chat session runs with.
+// effectiveModel is the model the given chat session runs with, using the same
+// precedence as the Claude / Codex adapters at start: the chat's /model
+// choice, then the active provider's model, then the project model.
 func (e *Engine) effectiveModel(s *Session) string {
 	if s != nil && e.perSessionSettings() {
 		if model := strings.TrimSpace(s.Settings().Model); model != "" {
 			return model
+		}
+	}
+	if ps, ok := e.agent.(ProviderSwitcher); ok {
+		if provider := ps.GetActiveProvider(); provider != nil && strings.TrimSpace(provider.Model) != "" {
+			return provider.Model
 		}
 	}
 	if ms, ok := e.agent.(ModelSwitcher); ok {
@@ -55,6 +62,11 @@ func (e *Engine) effectiveMode(s *Session) string {
 // session (context survives) and its process is retired before the next turn,
 // so a turn already running is not interrupted.
 func (e *Engine) applySessionSetting(sessionKey string, update func(*AgentSessionOptions), legacy func()) {
+	// Same lock as /new and /switch: otherwise /new could copy the old
+	// settings into a new active session between our lookup and update, and
+	// e.g. "/mode default" would leave the new session in bypass mode.
+	unlockTransition := e.lockSessionTransition(sessionKey)
+	defer unlockTransition()
 	if e.perSessionSettings() {
 		s := e.sessions.GetOrCreateActive(sessionKey)
 		s.UpdateSettings(update)

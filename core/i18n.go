@@ -2648,14 +2648,19 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🗑️ cc-connect 會話記錄已刪除：%s。Agent transcript 也已刪除。",
 	},
 	MsgKey("delete_purge_shared"): {
-		LangEnglish:            "🗑️ cc-connect session removed: %s. The agent transcript was kept because another cc-connect session still uses it.",
-		LangChinese:            "🗑️ cc-connect 会话记录已删除：%s。Agent transcript 仍被其他 cc-connect 会话使用，已保留。",
-		LangTraditionalChinese: "🗑️ cc-connect 會話記錄已刪除：%s。Agent transcript 仍被其他 cc-connect 會話使用，已保留。",
+		LangEnglish:            "🗑️ cc-connect session removed: %s. The agent transcript was kept because it is still used by %s.",
+		LangChinese:            "🗑️ cc-connect 会话记录已删除：%s。Agent transcript 仍在被使用（%s），已保留。",
+		LangTraditionalChinese: "🗑️ cc-connect 會話記錄已刪除：%s。Agent transcript 仍在被使用（%s），已保留。",
 	},
 	MsgKey("delete_purge_failed"): {
-		LangEnglish:            "🗑️ cc-connect session removed: %s, but deleting the agent transcript failed: %v",
-		LangChinese:            "🗑️ cc-connect 会话记录已删除：%s，但删除 Agent transcript 失败：%v",
-		LangTraditionalChinese: "🗑️ cc-connect 會話記錄已刪除：%s，但刪除 Agent transcript 失敗：%v",
+		LangEnglish:            "❌ Could not delete the agent transcript of %s: %v. The cc-connect session was kept, so you can retry.",
+		LangChinese:            "❌ 删除 %s 的 Agent transcript 失败：%v。cc-connect 会话记录已保留，可以重试。",
+		LangTraditionalChinese: "❌ 刪除 %s 的 Agent transcript 失敗：%v。cc-connect 會話記錄已保留，可以重試。",
+	},
+	MsgKey("delete_purge_invalid_id"): {
+		LangEnglish:            "❌ %s points at a malformed agent session ID, so its transcript was not deleted. Use `/delete <number>` to remove only the cc-connect session.",
+		LangChinese:            "❌ %s 关联的 agent 会话 ID 格式异常，未删除 transcript。可以用 `/delete <序号>` 只删除 cc-connect 会话记录。",
+		LangTraditionalChinese: "❌ %s 關聯的 agent 會話 ID 格式異常，未刪除 transcript。可以用 `/delete <序號>` 只刪除 cc-connect 會話記錄。",
 	},
 	MsgKey("delete_purge_unsupported"): {
 		LangEnglish:            "This agent cannot delete its transcripts; use `/delete <number>` to remove only the cc-connect session.",

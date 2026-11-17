@@ -304,12 +304,24 @@ func (sm *SessionManager) DeleteSession(userKey, sessionID string) (*Session, er
 	return nil, fmt.Errorf("session %q not found", sessionID)
 }
 
-// HasAgentSessionReference reports whether any local session (in any chat)
-// still points at agentSessionID.
-func (sm *SessionManager) HasAgentSessionReference(agentSessionID string) bool {
+// agentSessionReferenceExcept returns the ID of a local session (in any chat),
+// other than exceptID, that points at agentSessionID, or "".
+func (sm *SessionManager) agentSessionReferenceExcept(agentSessionID, exceptID string) string {
+	agentSessionID = strings.TrimSpace(agentSessionID)
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	return sm.hasAgentSessionReferenceLocked(strings.TrimSpace(agentSessionID))
+	for id, session := range sm.sessions {
+		if session == nil || id == exceptID {
+			continue
+		}
+		session.mu.Lock()
+		matches := strings.TrimSpace(session.AgentSessionID) == agentSessionID
+		session.mu.Unlock()
+		if matches {
+			return id
+		}
+	}
+	return ""
 }
 
 func (sm *SessionManager) hasAgentSessionReferenceLocked(agentSessionID string) bool {

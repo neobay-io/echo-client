@@ -3931,6 +3931,9 @@ func (e *Engine) attachRow(s AgentSessionInfo, activeAgentID string, holder sess
 // process; warn on the GUI unless force), point work_dir at the session's cwd,
 // bind the session, and surface the last exchange for context.
 func (e *Engine) attachSessionByID(sessionKey, id string, force bool) string {
+	// Binding a transcript must not interleave with a /delete purge of it.
+	transcriptOwnershipMu.Lock()
+	defer transcriptOwnershipMu.Unlock()
 	lister, ok := e.agent.(AllSessionsLister)
 	if !ok {
 		return e.i18n.T(MsgAttachNotSupported)
@@ -7959,41 +7962,66 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	removed, err := e.sessions.DeleteSession(msg.SessionKey, matched.ID)
-	if err != nil {
-		if err == errCannotDeleteActiveSession {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteActiveDenied))
-			return
-		}
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
+	if purge && strings.TrimSpace(matched.AgentSessionID) != "" {
+		e.reply(p, msg.ReplyCtx, e.purgeLocalSession(msg.SessionKey, *matched, deleter))
 		return
+	}
+	if text, ok := e.removeLocalSession(msg.SessionKey, matched.ID); !ok {
+		e.reply(p, msg.ReplyCtx, text)
+		return
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), localSessionDisplayName(*matched)))
+}
+
+// removeLocalSession deletes one inactive local session record; on failure it
+// returns the message to show.
+func (e *Engine) removeLocalSession(sessionKey, localID string) (string, bool) {
+	if _, err := e.sessions.DeleteSession(sessionKey, localID); err != nil {
+		if err == errCannotDeleteActiveSession {
+			return e.i18n.T(MsgDeleteActiveDenied), false
+		}
+		return fmt.Sprintf("❌ %v", err), false
+	}
+	return "", true
+}
+
+// purgeLocalSession deletes the agent transcript and then the local record.
+// The transcript goes first so a failed deletion leaves the record in place
+// for a retry. A transcript still needed by another session, a cron job or a
+// running chat in any project of this process is kept.
+func (e *Engine) purgeLocalSession(sessionKey string, matched localSessionInfo, deleter SessionDeleter) string {
+	unlockTransition := e.lockSessionTransition(sessionKey)
+	defer unlockTransition()
+	transcriptOwnershipMu.Lock()
+	defer transcriptOwnershipMu.Unlock()
+
+	name := localSessionDisplayName(matched)
+	if e.sessions.ActiveSessionID(sessionKey) == matched.ID {
+		return e.i18n.T(MsgDeleteActiveDenied)
+	}
+	agentSessionID := strings.TrimSpace(matched.AgentSessionID)
+	if !ValidAgentSessionID(agentSessionID) {
+		slog.Warn("delete: refusing to purge malformed agent session id", "agent", e.agent.Name(), "local_session", matched.ID)
+		return e.i18n.Tf(MsgKey("delete_purge_invalid_id"), name)
+	}
+	if holder := e.transcriptReference(agentSessionID, matched.ID); holder != "" {
+		if text, ok := e.removeLocalSession(sessionKey, matched.ID); !ok {
+			return text
+		}
+		return e.i18n.Tf(MsgKey("delete_purge_shared"), name, holder)
 	}
 
-	name := localSessionDisplayName(*matched)
-	agentSessionID := ""
-	if removed != nil {
-		removed.mu.Lock()
-		agentSessionID = strings.TrimSpace(removed.AgentSessionID)
-		removed.mu.Unlock()
-	}
-	if !purge || agentSessionID == "" {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), name))
-		return
-	}
-	// Another chat (or /attach) may still resume this transcript.
-	if e.sessions.HasAgentSessionReference(agentSessionID) {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgKey("delete_purge_shared"), name))
-		return
-	}
 	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	defer cancel()
 	if err := deleter.DeleteSession(ctx, agentSessionID); err != nil {
 		slog.Warn("delete: agent transcript purge failed", "agent", e.agent.Name(), "agent_session", agentSessionID, "error", err)
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgKey("delete_purge_failed"), name, err))
-		return
+		return e.i18n.Tf(MsgKey("delete_purge_failed"), name, err)
 	}
 	slog.Info("delete: agent transcript purged", "agent", e.agent.Name(), "agent_session", agentSessionID)
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgKey("delete_purged"), name))
+	if text, ok := e.removeLocalSession(sessionKey, matched.ID); !ok {
+		return text
+	}
+	return e.i18n.Tf(MsgKey("delete_purged"), name)
 }
 
 func (e *Engine) deleteSessionByID(sessionKey, id string) string {

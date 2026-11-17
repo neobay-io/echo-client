@@ -138,3 +138,30 @@ func TestStartSettingsPrefersChatOverrides(t *testing.T) {
 		t.Fatalf("capabilities: %v", errs)
 	}
 }
+
+func TestFindSessionFileMatchesWholeThreadID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	dir := filepath.Join(home, "sessions", "2026", "11", "17")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	decoy := filepath.Join(dir, "rollout-2026-11-17T01-00-00-x019fbb7f-aaaa.jsonl")
+	target := filepath.Join(dir, "rollout-2026-11-17T02-00-00-019fbb7f-aaaa.jsonl")
+	for _, f := range []string{decoy, target} {
+		if err := os.WriteFile(f, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := findSessionFile("019fbb7f-aaaa"); got != target {
+		t.Fatalf("findSessionFile = %q, want %q", got, target)
+	}
+	for _, id := range []string{"", "aaaa", "../x", "*"} {
+		if got := findSessionFile(id); got != "" && id != "aaaa" {
+			t.Errorf("findSessionFile(%q) = %q", id, got)
+		}
+	}
+	if got := findSessionFile("aaaa"); got != "" {
+		t.Errorf("partial id matched %q", got)
+	}
+}

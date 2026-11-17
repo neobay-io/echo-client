@@ -296,6 +296,13 @@ func claudeLoginStatus(ctx context.Context) (bool, error) {
 	return status.LoggedIn, nil
 }
 
+// remoteAuthImplemented reports whether AgentAuthManager can drive an agent's
+// login with the declared flow. Only Claude Code's URL + code login exists
+// until per-agent authenticators are added (design P2).
+func remoteAuthImplemented(agentName, flow string) bool {
+	return agentName == "claudecode" && flow == AuthFlowURLCode
+}
+
 func (e *Engine) SetAgentAuthManager(manager *AgentAuthManager) { e.agentAuthMgr = manager }
 
 func (e *Engine) RefreshInteractiveAuth() {
@@ -359,7 +366,11 @@ func (e *Engine) cmdAuth(p Platform, msg *Message, args []string) {
 		reply("auth_private")
 		return
 	}
-	if caps := CapabilitiesOf(e.agent); !caps.Auth.Login && !caps.Auth.Status {
+	// The declaration alone is not enough: AgentAuthManager only drives Claude
+	// Code's URL + code login, so any other agent or flow must be refused here
+	// rather than routed into Claude's login.
+	caps := CapabilitiesOf(e.agent)
+	if e.agent == nil || !remoteAuthImplemented(e.agent.Name(), caps.Auth.Flow) {
 		reply("auth_unsupported")
 		return
 	}
@@ -371,6 +382,18 @@ func (e *Engine) cmdAuth(p Platform, msg *Message, args []string) {
 	if (action != "code" && len(args) > 1) || (action == "code" && len(args) != 2) {
 		reply("auth_usage")
 		return
+	}
+	switch action {
+	case "login", "code", "cancel":
+		if !caps.Auth.Login {
+			reply("auth_unsupported")
+			return
+		}
+	case "status":
+		if !caps.Auth.Status {
+			reply("auth_unsupported")
+			return
+		}
 	}
 	switch action {
 	case "login":

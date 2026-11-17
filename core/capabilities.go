@@ -142,8 +142,8 @@ func ValidateCapabilities(agent Agent) []error {
 		default:
 			fail("auth declared with unknown flow %q", declared.Auth.Flow)
 		}
-		if !supportsRemoteAuth(agent.Name()) {
-			fail("auth declared but no remote login implementation is registered")
+		if !remoteAuthImplemented(agent.Name(), declared.Auth.Flow) {
+			fail("auth declared but no remote login implementation exists for this agent and flow")
 		}
 	}
 	if declared.Models && !derived.Models {
@@ -193,13 +193,6 @@ func ValidateCapabilities(agent Agent) []error {
 		fail("ask_user declared but core has no ask-user interface yet")
 	}
 	return errs
-}
-
-// supportsRemoteAuth reports whether AgentAuthManager can drive the agent's
-// official login. Claude Code is the only implementation until P2 adds a
-// per-agent auth provider.
-func supportsRemoteAuth(agentName string) bool {
-	return agentName == "claudecode"
 }
 
 func containsFold(values []string, target string) bool {

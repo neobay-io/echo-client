@@ -297,10 +297,21 @@ Echo 侧（独立仓库，单独 PR）：
 **P0 实现记录（2026-11-17，分支 `feat/p0-agent-parity-foundation`）**
 
 - **T0.1**：`core/capabilities.go`（`AgentCapabilities`、`CapabilityProvider`、`CapabilitiesOf`、`ValidateCapabilities`）。`/auth` 按 `Auth` 能力放行，`/effort` 的 Qoder 提示改为 `EffortViaModel`；`/help` 隐藏当前 agent 不支持的命令块，末尾的权限模式提示换成 agent 自己的模式；`/status` 显示当前聊天的模型、强度、模式和能力摘要。Claude 声明 `Auth`，Qoder 声明 `EffortViaModel`。其余按名字区分的地方（native skills、extra work dirs、agent_upgrade、`shouldResetAgentSessionOnResult`）属于 P1 / P7 / P10，未改。
-- **T0.2**：`core/permission_mode.go` 是唯一的模式对照表，覆盖全部 7 个 agent。Claude 和 Codex 适配器、`isEchoYoloEquivalentMode` 都查这张表；旧 switch 接受的值全部保留（有回归单测）。`/mode` 遇到未知值报错，不再静默回到 default。Codex 的原生模式键改为规范值（`default / acceptEdits / auto / bypassPermissions`），`suggest / auto-edit / full-auto / yolo` 作为别名继续可用。Codex exec 没有 plan 模式，`/mode plan` 会报错（P4 后再支持）。
+- **T0.2**：`core/permission_mode.go` 是唯一的模式对照表，覆盖全部 7 个 agent。全部 7 个适配器（审查后补齐）和 `isEchoYoloEquivalentMode` 都查这张表；旧 switch 接受的值全部保留（有回归单测）。`/mode` 遇到未知值报错，不再静默回到 default。Codex 的原生模式键改为规范值（`default / acceptEdits / auto / bypassPermissions`），`suggest / auto-edit / full-auto / yolo` 作为别名继续可用。Codex exec 没有 plan 模式，`/mode plan` 会报错（P4 后再支持）。
 - **T0.3**：新增 `SessionOptionsInjector`；设置保存在 `Session.AgentSettings`，随会话文件持久化（顺带修复 `NeedsReplay` 一直没有写盘的问题），`/new` 沿用当前聊天的设置，`/switch` 恢复目标会话自己的设置。`/model`、`/effort`、`/mode` 不再清空会话，只把进程标记为 stale，下一轮用新设置续接同一个 agent 会话，正在运行的一轮不会被打断。cron 使用所绑定聊天的设置，relay 使用自己的会话，Echo 任务始终用项目默认值。没有实现该接口的 agent（gemini、qoder 等）保持原来的项目级行为，但同样不再清空会话。
 - **T0.4**：Codex 改用 `-c sandbox_mode / approval_policy / approvals_reviewer`。本机 0.153 实测：`exec resume` 拒绝 `--full-auto` 和 `--sandbox`（旧代码在续接时传的正是 `--full-auto`），而 `-c` 配置项能正常通过参数解析。`acceptEdits` 用 `approval_policy="never"`，因为 exec 无法转发审批（P4 再改为卡片审批）。Claude `/v1/models` 改为分页（`has_more / after_id`，最多 10 页），并改用不跟随重定向的 client，避免 API key 被转发到别的域名。
-- **`/delete` 与原文的偏差**：`SessionManager.DeleteSession` 的注释写明有意保留 agent transcript（2026-09 的决定，transcript-collector 也依赖这些文件），所以默认行为不变；新增 `/delete <序号> purge` 才调用 `SessionDeleter`。如果该 agent 会话仍被其他聊天引用，就不删 transcript。
+- **`/delete` 与原文的偏差**：`SessionManager.DeleteSession` 的注释写明有意保留 agent transcript（2026-09 的决定，transcript-collector 也依赖这些文件），所以默认行为不变；新增 `/delete <序号> purge` 才调用 `SessionDeleter`。如果该 transcript 仍被引用（范围见下方审查第 1 条），就只删本地记录、保留 transcript。
+- **P0 代码审查（2026-11-17，Codex + Kimi Code，使用仓库的 comprehensive-review 与 security-review skill）**：去重核实后 8 条成立，均已修复并补回归测试：
+  1. purge 的引用检查扩展到本进程内同类 agent 的所有项目会话、所有 cron 任务和正在运行的聊天（原来只查本项目的会话记录）。
+  2. 设置命令与 `/new`、`/switch` 共用会话切换锁，避免新会话继承旧的 bypass 模式。
+  3. Gemini、Qoder、OpenCode、iFlow、Cursor 的模式解析也改用共享表（原来 Cursor 不认 `bypassPermissions`，Echo 注册能通过但实际以 default 运行）。
+  4. purge 先删 transcript、成功后再删本地记录（失败可重试）；Claude 按 ID 在所有项目目录中精确查找，不再依赖当前 work_dir。
+  5. purge 的检查和删除与 `/attach` 共用进程级的 transcript 锁。
+  6. 删除前校验 agent 会话 ID 格式；Codex 从 `rollout-<时间戳>-<id>.jsonl` 中解析完整的 thread id 再比较（子串和后缀匹配都可能命中别的会话）。
+  7. `/auth` 运行时同时要求“该 agent 和流程确有登录实现”，并按 login / status 分别检查能力。
+  8. `/status` 和模型选择器按“聊天设置 → provider 模型 → 项目模型”显示，与实际启动一致。
+
+  剩余风险：purge 看不到另一个服务进程里的引用（Claude 服务和 Codex 服务各是一个进程）；切换设置会重置“本会话全部允许”的状态（与改动前的 `/mode` 一致，属于有意保留）；Codex 的模式参数只用假 CLI 和 `exec resume` 参数解析验证过，还没跑过真实的一轮。
 - **T0.5**：`core/agent_cli.go` 与新的 `echo-client doctor [agent-type...]` 子命令：按当前进程的 PATH 解析 CLI，输出版本、实际路径、符号链接目标，并标出 PATH 上的其他副本和损坏的安装；聊天里的 `/doctor` 用同一套逻辑。**Kimi Code CLI 尚未安装**：需要从 npm 安装第三方包，留到 P1 开始时由你确认后再装。
 
 ### P1 接入 agy 与 Kimi（约 3 天）

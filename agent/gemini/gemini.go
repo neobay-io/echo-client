@@ -74,16 +74,9 @@ func New(opts map[string]any) (core.Agent, error) {
 }
 
 func normalizeMode(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "yolo", "auto", "force", "bypasspermissions":
-		return "yolo"
-	case "auto_edit", "autoedit", "edit", "acceptedits":
-		return "auto_edit"
-	case "plan":
-		return "plan"
-	default:
-		return "default"
-	}
+	// Shared table in core/permission_mode.go, so Echo registration and the
+	// adapter always agree (canonical names like bypassPermissions included).
+	return core.NormalizePermissionMode("gemini", raw)
 }
 
 func normalizeReasoningLevel(raw string) string {

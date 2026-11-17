@@ -70,16 +70,9 @@ func New(opts map[string]any) (core.Agent, error) {
 }
 
 func normalizeMode(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "force", "yolo", "auto":
-		return "force"
-	case "plan":
-		return "plan"
-	case "ask":
-		return "ask"
-	default:
-		return "default"
-	}
+	// Shared table in core/permission_mode.go, so Echo registration and the
+	// adapter always agree (canonical names like bypassPermissions included).
+	return core.NormalizePermissionMode("cursor", raw)
 }
 
 func (a *Agent) Name() string { return "cursor" }

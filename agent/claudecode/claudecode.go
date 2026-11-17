@@ -560,24 +560,45 @@ func (a *Agent) ListAllSessions(ctx context.Context) ([]core.AgentSessionInfo, e
 	return sessions, nil
 }
 
+// DeleteSession removes the transcript <sessionID>.jsonl. The session may have
+// been created under a different work_dir than the current one (/dir,
+// /attach), so every Claude project directory is searched for the exact file.
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
+	if !core.ValidAgentSessionID(sessionID) {
+		return fmt.Errorf("claudecode: invalid session id")
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("claudecode: cannot determine home dir: %w", err)
 	}
-	absWorkDir, err := filepath.Abs(a.workDir)
+	path, err := findClaudeTranscript(homeDir, sessionID)
 	if err != nil {
-		return fmt.Errorf("claudecode: resolve work_dir: %w", err)
-	}
-	projectDir := findProjectDir(homeDir, absWorkDir)
-	if projectDir == "" {
-		return fmt.Errorf("session not found")
-	}
-	path := filepath.Join(projectDir, sessionID+".jsonl")
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("session file not found: %s", sessionID)
+		return err
 	}
 	return os.Remove(path)
+}
+
+// findClaudeTranscript returns ~/.claude/projects/<any>/<sessionID>.jsonl.
+// sessionID must already be validated (it is used in a glob).
+func findClaudeTranscript(homeDir, sessionID string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(homeDir, ".claude", "projects", "*", sessionID+".jsonl"))
+	if err != nil {
+		return "", fmt.Errorf("claudecode: search transcripts: %w", err)
+	}
+	var files []string
+	for _, match := range matches {
+		if info, err := os.Lstat(match); err == nil && info.Mode().IsRegular() {
+			files = append(files, match)
+		}
+	}
+	switch len(files) {
+	case 0:
+		return "", fmt.Errorf("session file not found: %s", sessionID)
+	case 1:
+		return files[0], nil
+	default:
+		return "", fmt.Errorf("session %s has transcripts in %d project directories; refusing to guess", sessionID, len(files))
+	}
 }
 
 func scanSessionMeta(path string) (string, int) {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -216,5 +218,41 @@ func TestCapabilitiesAreImplemented(t *testing.T) {
 	caps := core.CapabilitiesOf(a)
 	if !caps.Auth.Login || !caps.Models || !caps.Compact || !caps.Sessions.Delete || !slices.Contains(caps.Modes, "auto") {
 		t.Fatalf("claude capabilities = %#v", caps)
+	}
+}
+
+func TestDeleteSessionFindsTranscriptOutsideCurrentWorkDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	oldProject := filepath.Join(home, ".claude", "projects", "-old-project")
+	if err := os.MkdirAll(oldProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(oldProject, "51b25019-4af9-4a1d-9d3c-0123456789ab.jsonl")
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(oldProject, "other.jsonl")
+	if err := os.WriteFile(keep, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{workDir: t.TempDir(), activeIdx: -1} // /dir moved away from the session's project
+	if err := a.DeleteSession(context.Background(), "51b25019-4af9-4a1d-9d3c-0123456789ab"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if _, err := os.Stat(transcript); !os.IsNotExist(err) {
+		t.Fatal("transcript still exists")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatal("unrelated transcript was removed")
+	}
+	for _, bad := range []string{"../other", "*", "", "a/b"} {
+		if err := a.DeleteSession(context.Background(), bad); err == nil {
+			t.Errorf("DeleteSession(%q) succeeded", bad)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatal("malformed id removed a transcript")
 	}
 }
