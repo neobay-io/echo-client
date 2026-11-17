@@ -266,14 +266,16 @@ All agents support permission modes switchable at runtime via `/mode`.
 | **Plan Mode** | `plan` | Claude only plans — no execution until you approve. |
 | **YOLO** | `bypassPermissions` (alias: `yolo`) | All tool calls auto-approved. For trusted/sandboxed environments. |
 
-**Codex** modes (maps to `--ask-for-approval`):
+**Codex** modes (passed to `codex exec` / `exec resume` as `-c` overrides; legacy values still work):
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
-| **Suggest** | `suggest` | Only trusted commands (ls, cat...) run without approval. |
-| **Auto Edit** | `auto-edit` | Model decides when to ask; sandbox-protected. |
-| **Full Auto** | `full-auto` | Auto-approve with workspace sandbox. Recommended. |
-| **YOLO** | `yolo` | Bypass all approvals and sandbox. |
+| **Default** | `default` (alias: `suggest`) | Codex defaults (read-only sandbox in `exec`). |
+| **Accept Edits** | `acceptEdits` (alias: `auto-edit`) | Edit and run commands inside the workspace sandbox; no escalation. |
+| **Auto** | `auto` (alias: `full-auto`) | Workspace sandbox; escalation requests reviewed automatically (same as `--approve-for-me`). Recommended. |
+| **YOLO** | `bypassPermissions` (alias: `yolo`) | Bypass all approvals and sandbox. |
+
+`/model`, `/effort` and `/mode` apply to the current chat session only (saved across restarts, inherited by `/new`), keep the conversation context, and take effect from the next message. Echo worker tasks always use the project defaults.
 
 **Cursor Agent** modes (maps to `--force` / `--mode`):
 
@@ -324,7 +326,7 @@ mode = "default"
 
 # Codex
 [projects.agent.options]
-mode = "full-auto"
+mode = "auto"
 # model = "o3"
 
 # Cursor Agent
@@ -781,7 +783,7 @@ Each user gets an independent session with full conversation context. Manage ses
 /new [name]       Start a new session
 /list             List cc-connect sessions for this chat
 /switch <number>  Switch to a listed cc-connect session
-/delete <number>  Remove a cc-connect session (Agent transcript retained)
+/delete <number> [purge]  Remove a cc-connect session (Agent transcript retained; purge deletes it too)
 /current          Show current session info
 /history [n]      Show last n messages (default 10)
 /provider [...]   Manage API providers (list/add/remove/switch)
@@ -893,7 +895,7 @@ type = "codex"
 
 [projects.agent.options]
 work_dir = "/path/to/frontend"
-mode = "full-auto"
+mode = "auto"
 
 [[projects.platforms]]
 type = "telegram"

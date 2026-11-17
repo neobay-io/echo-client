@@ -23,9 +23,27 @@ type Session struct {
 	History        []HistoryEntry `json:"history"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
+	// AgentSettings holds this chat session's /model, /effort and /mode
+	// choices for agents that implement SessionOptionsInjector.
+	AgentSettings AgentSessionOptions `json:"agent_settings"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
+}
+
+// Settings returns a copy of the session's agent overrides.
+func (s *Session) Settings() AgentSessionOptions {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentSettings
+}
+
+// UpdateSettings applies fn to the session's agent overrides.
+func (s *Session) UpdateSettings(fn func(*AgentSessionOptions)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(&s.AgentSettings)
+	s.UpdatedAt = time.Now()
 }
 
 func (s *Session) TryLock() bool {
@@ -175,6 +193,16 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 	return sm.createLocked(userKey, "default")
 }
 
+// ActiveSession returns the active session for userKey without creating one.
+func (sm *SessionManager) ActiveSession(userKey string) *Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sid, ok := sm.activeSession[userKey]; ok {
+		return sm.sessions[sid]
+	}
+	return nil
+}
+
 func (sm *SessionManager) NewSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -191,6 +219,13 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 		Name:      name,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	// A new session in the same chat keeps the chat's latest model / effort /
+	// mode choices; /switch to an older session restores that session's own.
+	if prevID, ok := sm.activeSession[userKey]; ok {
+		if prev := sm.sessions[prevID]; prev != nil {
+			s.AgentSettings = prev.Settings()
+		}
 	}
 	sm.sessions[id] = s
 	sm.activeSession[userKey] = id
@@ -267,6 +302,14 @@ func (sm *SessionManager) DeleteSession(userKey, sessionID string) (*Session, er
 		return s, nil
 	}
 	return nil, fmt.Errorf("session %q not found", sessionID)
+}
+
+// HasAgentSessionReference reports whether any local session (in any chat)
+// still points at agentSessionID.
+func (sm *SessionManager) HasAgentSessionReference(agentSessionID string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.hasAgentSessionReferenceLocked(strings.TrimSpace(agentSessionID))
 }
 
 func (sm *SessionManager) hasAgentSessionReferenceLocked(agentSessionID string) bool {
@@ -401,9 +444,11 @@ func (sm *SessionManager) saveLocked() {
 			ID:             s.ID,
 			Name:           s.Name,
 			AgentSessionID: s.AgentSessionID,
+			NeedsReplay:    s.NeedsReplay,
 			History:        append([]HistoryEntry(nil), s.History...),
 			CreatedAt:      s.CreatedAt,
 			UpdatedAt:      s.UpdatedAt,
+			AgentSettings:  s.AgentSettings,
 		}
 		s.mu.Unlock()
 	}

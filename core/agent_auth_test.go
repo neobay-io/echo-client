@@ -252,6 +252,9 @@ func (p *authTestPlatform) Reply(ctx context.Context, rc any, text string) error
 type noRoutingAuthAgent struct{ stubAgent }
 
 func (a *noRoutingAuthAgent) Name() string { return "claudecode" }
+func (a *noRoutingAuthAgent) Capabilities() AgentCapabilities {
+	return AgentCapabilities{Auth: AuthCaps{Login: true, Status: true, Flow: AuthFlowURLCode}}
+}
 func (a *noRoutingAuthAgent) StartSession(context.Context, string) (AgentSession, error) {
 	panic("credential command must not reach Agent")
 }
@@ -357,13 +360,13 @@ func TestAuthRefreshPreservesSessionAndHistory(t *testing.T) {
 	session.AddHistory("user", "keep this history")
 	e.interactiveStates["chat"] = newInteractiveState(&stubAgentSession{}, nil, nil, false)
 	e.RefreshInteractiveAuth()
-	if !e.interactiveStates["chat"].authStale || e.sessions.ActiveSessionID("chat") != session.ID ||
+	if !e.interactiveStates["chat"].stale || e.sessions.ActiveSessionID("chat") != session.ID ||
 		session.AgentSessionID != "existing-transcript" || session.HistoryLen() != 1 {
 		t.Fatal("refresh must mark live state without clearing history or bindings")
 	}
 	old := e.interactiveStates["chat"]
 	next := e.getOrCreateInteractiveState("chat", nil, nil, session)
-	if next == old || next.authStale {
+	if next == old || next.stale {
 		t.Fatal("next turn reused stale credentials")
 	}
 }

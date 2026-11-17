@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestNormalizePermissionMode(t *testing.T) {
@@ -138,5 +140,81 @@ func TestAvailableModelsUsesAPIWhenAvailable(t *testing.T) {
 	}
 	if models[0].Name != "claude-opus-4-7" || models[1].Name != "claude-sonnet-4-6" {
 		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestAvailableModelsFollowsPagination(t *testing.T) {
+	var afterIDs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		afterIDs = append(afterIDs, r.URL.Query().Get("after_id"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("after_id") == "" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-a","display_name":"A"},{"id":"claude-b"}],"has_more":true,"last_id":"claude-b"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-c","display_name":"C"}],"has_more":false,"last_id":"claude-c"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
+
+	models := (&Agent{}).fetchModelsFromAPI(context.Background())
+	var names []string
+	for _, m := range models {
+		names = append(names, m.Name)
+	}
+	if !slices.Equal(names, []string{"claude-a", "claude-b", "claude-c"}) {
+		t.Fatalf("models = %#v", names)
+	}
+	if !slices.Equal(afterIDs, []string{"", "claude-b"}) {
+		t.Fatalf("after_id sequence = %#v", afterIDs)
+	}
+}
+
+func TestAvailableModelsDoesNotSendKeyAcrossRedirects(t *testing.T) {
+	leaked := false
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "" {
+			leaked = true
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"evil"}]}`))
+	}))
+	defer elsewhere.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/v1/models", http.StatusFound)
+	}))
+	defer redirector.Close()
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	t.Setenv("ANTHROPIC_BASE_URL", redirector.URL)
+
+	if models := (&Agent{}).fetchModelsFromAPI(context.Background()); len(models) != 0 {
+		t.Fatalf("models = %#v, want none from a redirect", models)
+	}
+	if leaked {
+		t.Fatal("API key followed the redirect")
+	}
+}
+
+func TestStartSettingsPrefersChatOverrides(t *testing.T) {
+	a := &Agent{model: "opus", reasoningLevel: "high", mode: "bypassPermissions", activeIdx: -1}
+	a.SetSessionOptions(core.AgentSessionOptions{Model: "sonnet", ReasoningLevel: "auto", Mode: "plan"})
+	model, level, mode := a.startSettingsLocked()
+	if model != "sonnet" || level != "" || mode != "plan" {
+		t.Fatalf("overrides = %q %q %q", model, level, mode)
+	}
+	a.SetSessionOptions(core.AgentSessionOptions{})
+	if model, level, mode = a.startSettingsLocked(); model != "opus" || level != "high" || mode != "bypassPermissions" {
+		t.Fatalf("defaults = %q %q %q", model, level, mode)
+	}
+}
+
+func TestCapabilitiesAreImplemented(t *testing.T) {
+	a := &Agent{activeIdx: -1}
+	if errs := core.ValidateCapabilities(a); len(errs) != 0 {
+		t.Fatalf("capabilities: %v", errs)
+	}
+	caps := core.CapabilitiesOf(a)
+	if !caps.Auth.Login || !caps.Models || !caps.Compact || !caps.Sessions.Delete || !slices.Contains(caps.Modes, "auto") {
+		t.Fatalf("claude capabilities = %#v", caps)
 	}
 }

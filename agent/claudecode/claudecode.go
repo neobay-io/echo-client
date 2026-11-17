@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,8 +43,9 @@ type Agent struct {
 	providers      []core.ProviderConfig
 	activeIdx      int // -1 = no provider set
 	sessionEnv     []string
-	routerURL      string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey   string // Claude Code Router API key (optional)
+	sessionOpts    core.AgentSessionOptions // per-chat overrides for the next StartSession
+	routerURL      string                   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey   string                   // Claude Code Router API key (optional)
 
 	providerProxy *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL string              // local URL of the proxy
@@ -94,23 +96,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	}, nil
 }
 
-// normalizePermissionMode maps user-friendly aliases to Claude CLI values.
+// normalizePermissionMode maps user-friendly aliases to Claude CLI values via
+// the shared core table; unknown values fall back to "default".
 func normalizePermissionMode(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "acceptedits", "accept-edits", "accept_edits", "edit":
-		return "acceptEdits"
-	case "plan":
-		return "plan"
-	case "auto":
-		return "auto"
-	case "bypasspermissions", "bypass-permissions", "bypass_permissions",
-		"yolo":
-		return "bypassPermissions"
-	case "dontask", "dont-ask", "dont_ask":
-		return "dontAsk"
-	default:
-		return "default"
-	}
+	return core.NormalizePermissionMode("claudecode", raw)
 }
 
 func normalizeReasoningLevel(raw string) string {
@@ -311,40 +300,76 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/v1/models", nil)
-	if err != nil {
-		return nil
-	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	// The key must never follow a redirect to another host, and /v1/models is
+	// paginated (has_more / last_id).
+	client := core.NoRedirectHTTPClient()
+	var models []core.ModelOption
+	seen := make(map[string]bool)
+	afterID := ""
+	for page := 0; page < claudeModelsMaxPages; page++ {
+		url := baseURL + "/v1/models?limit=" + fmt.Sprint(claudeModelsPageSize)
+		if afterID != "" {
+			url += "&after_id=" + neturl.QueryEscape(afterID)
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return models
+		}
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := http.DefaultClient.Do(req)
+		result, ok := fetchClaudeModelsPage(client, req)
+		if !ok {
+			// Keep what earlier pages returned; a first-page failure yields nil.
+			return models
+		}
+		for _, m := range result.Data {
+			if m.ID == "" || seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			models = append(models, core.ModelOption{Name: m.ID, Desc: m.DisplayName})
+		}
+		if !result.HasMore || result.LastID == "" || result.LastID == afterID {
+			break
+		}
+		afterID = result.LastID
+	}
+	return models
+}
+
+const (
+	claudeModelsPageSize = 100
+	claudeModelsMaxPages = 10
+)
+
+type claudeModelsPage struct {
+	Data []struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+	} `json:"data"`
+	HasMore bool   `json:"has_more"`
+	LastID  string `json:"last_id"`
+}
+
+func fetchClaudeModelsPage(client *http.Client, req *http.Request) (claudeModelsPage, bool) {
+	var page claudeModelsPage
+	resp, err := client.Do(req)
 	if err != nil {
 		slog.Debug("claudecode: failed to fetch models", "error", err)
-		return nil
+		return page, false
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		slog.Debug("claudecode: model list request failed", "status", resp.StatusCode)
+		return page, false
 	}
-
-	var result struct {
-		Data []struct {
-			ID          string `json:"id"`
-			DisplayName string `json:"display_name"`
-		} `json:"data"`
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		return page, false
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil
-	}
-
-	var models []core.ModelOption
-	for _, m := range result.Data {
-		models = append(models, core.ModelOption{Name: m.ID, Desc: m.DisplayName})
-	}
-	return models
+	return page, true
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -353,14 +378,27 @@ func (a *Agent) SetSessionEnv(env []string) {
 	a.sessionEnv = env
 }
 
+// SetSessionOptions sets the chat session's overrides for the next
+// StartSession (core.SessionOptionsInjector).
+func (a *Agent) SetSessionOptions(opts core.AgentSessionOptions) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionOpts = opts
+}
+
+// Capabilities declares what core cannot derive from optional interfaces.
+func (a *Agent) Capabilities() core.AgentCapabilities {
+	return core.AgentCapabilities{
+		Auth: core.AuthCaps{Login: true, Status: true, Flow: core.AuthFlowURLCode},
+	}
+}
+
 // StartSession creates a persistent interactive Claude Code session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	tools := make([]string, len(a.allowedTools))
 	copy(tools, a.allowedTools)
-	model := a.model
-	reasoningLevel := a.reasoningLevel
-	mode := a.mode
+	model, reasoningLevel, mode := a.startSettingsLocked()
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	workDir := core.SessionWorkDirFromEnv(extraEnv, a.workDir)
@@ -379,14 +417,33 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		extraEnv = append(extraEnv, "ANTHROPIC_API_KEY="+a.routerAPIKey)
 	}
 
+	a.mu.Unlock()
+
+	return newClaudeSession(ctx, workDir, model, reasoningLevel, sessionID, mode, tools, extraDirs, extraEnv)
+}
+
+// startSettingsLocked resolves the model, reasoning level and permission mode
+// for the next session: project defaults, then the active provider's model,
+// then the chat session's explicit /model, /effort or /mode choice.
+// Caller holds a.mu.
+func (a *Agent) startSettingsLocked() (model, reasoningLevel, mode string) {
+	model, reasoningLevel, mode = a.model, a.reasoningLevel, a.mode
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
 		}
 	}
-	a.mu.Unlock()
-
-	return newClaudeSession(ctx, workDir, model, reasoningLevel, sessionID, mode, tools, extraDirs, extraEnv)
+	opts := a.sessionOpts
+	if opts.Model != "" {
+		model = opts.Model
+	}
+	if opts.ReasoningLevel != "" {
+		reasoningLevel = normalizeReasoningLevel(opts.ReasoningLevel)
+	}
+	if opts.Mode != "" {
+		mode = normalizePermissionMode(opts.Mode)
+	}
+	return model, reasoningLevel, mode
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

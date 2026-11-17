@@ -255,6 +255,7 @@ func (e *Engine) startAgentSession(
 	sessionID string,
 	sessionKey string,
 	envVars []string,
+	opts AgentSessionOptions,
 ) (AgentSession, error) {
 	e.agentStartMu.Lock()
 	defer e.agentStartMu.Unlock()
@@ -266,6 +267,11 @@ func (e *Engine) startAgentSession(
 	e.storePreparedSkillMeta(sessionKey, SessionNativeSkillsMetaFromEnv(envVars))
 	if inj, ok := e.agent.(SessionEnvInjector); ok {
 		inj.SetSessionEnv(envVars)
+	}
+	// Always set (zero options included) so one chat's overrides never leak
+	// into the next session started on this shared agent.
+	if inj, ok := e.agent.(SessionOptionsInjector); ok {
+		inj.SetSessionOptions(opts)
 	}
 	return e.agent.StartSession(ctx, sessionID)
 }
@@ -283,8 +289,9 @@ func (e *Engine) runIsolatedCronTurn(
 	agentSessionID string,
 	prompt string,
 	env []string,
+	opts AgentSessionOptions,
 ) (finalSessionID string, output string, err error) {
-	agentSession, err := e.startAgentSession(ctx, agentSessionID, syntheticKey, env)
+	agentSession, err := e.startAgentSession(ctx, agentSessionID, syntheticKey, env, opts)
 	if err != nil {
 		return "", "", fmt.Errorf("start isolated cron session: %w", cronResumeError(err, agentSessionID, false))
 	}
@@ -377,7 +384,9 @@ func (e *Engine) StartJobSession(
 	if err := validateJobWorkspace(req.WorkspaceRef); err != nil {
 		return nil, err
 	}
-	return e.startAgentSession(ctx, "", sessionKey, e.jobEnv(req, jobID, sessionKey))
+	// Echo jobs always use the project defaults: chat-level /model, /effort and
+	// /mode choices must not leak into worker tasks.
+	return e.startAgentSession(ctx, "", sessionKey, e.jobEnv(req, jobID, sessionKey), AgentSessionOptions{})
 }
 
 func (e *Engine) sessionEnv(sessionKey string) []string {

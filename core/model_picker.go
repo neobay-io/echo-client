@@ -15,7 +15,7 @@ type modelPickerSnapshot struct {
 	Created time.Time
 }
 
-func (e *Engine) modelPickerContext() [32]byte {
+func (e *Engine) modelPickerContext(sessionKey string) [32]byte {
 	state := map[string]any{"agent": e.agent.Name()}
 	if provider, ok := e.agent.(ProviderSwitcher); ok {
 		state["provider"] = provider.GetActiveProvider()
@@ -23,8 +23,8 @@ func (e *Engine) modelPickerContext() [32]byte {
 	if dir, ok := e.agent.(WorkDirSwitcher); ok {
 		state["dir"] = dir.GetWorkDir()
 	}
-	if model, ok := e.agent.(ModelSwitcher); ok {
-		state["model"] = model.GetModel()
+	if _, ok := e.agent.(ModelSwitcher); ok {
+		state["model"] = e.effectiveModel(e.sessions.ActiveSession(sessionKey))
 	}
 	data, _ := json.Marshal(state)
 	return sha256.Sum256(data)

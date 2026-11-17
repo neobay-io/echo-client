@@ -1,0 +1,450 @@
+---
+status: accepted
+date: 2026-11-12
+---
+
+# Agent × Platform 能力拉齐（Claude Code / Codex / Antigravity / Kimi × Feishu / Telegram）
+
+## 0. 结论速览
+
+- **Agent 支持**：Claude Code、Codex 已有；**Antigravity CLI（`agy`）和 Kimi Code CLI 在本 fork 中不存在**，上游 cc-connect 已有适配器，已在 scratch 克隆中验证可以低成本移植（编译、单测均通过）。
+- **平台**：Feishu、Telegram 都已支持，但 Telegram 有明显缺口（agent → 用户发文件不可用、命令菜单丢掉带连字符的命令、卡片退化成文本）。
+- **功能拉齐**：大部分命令已经存在，但“能用”的程度差异很大：
+  - `/auth` 只支持 Claude（`core/agent_auth.go:362` 硬编码）；
+  - `/model`、`/effort` 会**清空当前会话**，且设置是整个 project 共享、不持久化；
+  - Codex 的 `auto-edit/full-auto/auto` 模式**目前已损坏**（本机 codex 0.153 已删除 `--full-auto`，实测 exit 2）；
+  - 所有 agent 都**不能在运行中的一轮里插入消息**，只能排队；`/stop` 是直接杀进程；
+  - `/loop` 只有固定间隔，没有自定节奏。
+- **空闲自动升级**：两个服务都开启了（`policy = "idle_only"`，每 24 小时），每天也确实在跑，但**对 Codex 实际无效**。升级器用登录 shell（`/bin/sh -lc`）探测和升级 npm 装的那份 codex，而 agent 进程按服务 PATH 实际执行的是 `~/.local/bin` 下的 standalone codex 0.153，npm 从来升级不到它。详见 §2.5。
+- **上游 CLI 的新能力足够支撑拉齐**：Claude 的 stream-json 控制协议、Codex 的 `app-server`、agy/Kimi 的 ACP 都支持热切换模型 / effort / 权限模式、轮内插入（steer）、远程登录（device code / URL + 粘贴 code）。
+- **建议策略**：**选择性移植上游，不全量合并**（全量合并有 579 个冲突块、83 个文件）。按第 6 节的阶段推进，总量约 5–6 人周。
+
+## 1. 目标与非目标
+
+**目标**
+
+1. 四个主力 agent（Claude Code、Codex、agy、Kimi Code）在 Feishu 和 Telegram 上提供一致的用户能力：
+   远程登录、最新模型列表与选择、思考强度、权限模式（至少 `bypassPermissions` 与 `auto`）、会话列表与切换、绑定同一会话的 cron、loop、排队与插入消息、以及 Claude Code 的其他常用能力（compact、usage、中断、提问卡片等）。
+2. 新 agent 能作为 Echo worker 注册并执行任务；Echo 能按任务指定模型 / effort / 模式 / 会话。
+3. 某个 agent 不支持某能力时，命令给出明确提示，而不是静默降级。
+
+**非目标**
+
+- 全量合并上游（见 §4）。
+- Gemini CLI、Qoder：保持现状不回归，不做新能力。
+- Telegram 换库（上游已改用 `go-telegram/bot`，本期不跟进）。
+- 上游的 management API / Web UI / bridge / observer / 其余 13 个平台。
+
+## 2. 现状盘点（main @ 25e72977）
+
+### 2.1 Agent × 功能
+
+| 功能 | Claude Code | Codex | agy | Kimi | 备注 |
+|---|---|---|---|---|---|
+| 接入 | ✅ 常驻进程，stream-json | ✅ 每轮一个 `codex exec --json` 进程 | ❌ | ❌ | 上游有 `agent/antigravity`、`agent/kimi` |
+| 远程登录 `/auth` | ⚠️ 只有 login/code/cancel/status，**无 logout**；PTY 驱动 `claude auth login --claudeai` | ❌ | ❌ | ❌ | `core/agent_auth.go:362` 硬编码 claudecode |
+| 模型列表 | ✅ 动态（`/v1/models` → `claude --print /model` → 静态） | ✅ `app-server model/list` | — | — | Claude 的 `/v1/models` 只取第一页、带 key 跟随重定向（`agent/claudecode/claudecode.go:321`） |
+| 思考强度 `/effort` | ⚠️ auto/low/medium/high/max，**缺 xhigh、ultracode** | ⚠️ low…xhigh，**缺 max/ultra**，不能回到默认 | — | — | 选项固定，不随模型变化 |
+| 权限模式 `/mode` | ✅ default/acceptEdits/plan/auto/bypassPermissions/dontAsk；能把权限请求转成卡片 | ❌ **auto-edit/full-auto 已损坏**（`agent/codex/session.go:104` 仍传 `--full-auto`）；只有 yolo 可用；无审批转发 | — | — | 非法值静默回到 default |
+| 会话 `/list /switch /new /name /delete` | ✅（另有 `/attach`） | ✅ | — | — | `/delete` 只删本地记录，从不调用 `SessionDeleter` |
+| Cron 绑定同一会话 | ⚠️ 支持 `/cron session` 绑定；但 cron 写入后，常驻的 Claude 进程看不到这些轮次 | ✅ | — | — | 本地 API `CronAddRequest` 无 `agent_session_id` |
+| `/loop` | ✅ 固定间隔 + `<loop-control>pause</loop-control>` | ✅ | — | — | 无自定节奏 / goal |
+| 排队 | ✅ `/queue`（按聊天，20 条） | ✅ | — | — | 设计文档写的“按 agent 会话共享队列”未实现 |
+| 轮内插入 | ❌ | ❌ | — | — | |
+| `/stop` | ⚠️ 杀进程 | ⚠️ 杀进程 | — | — | 无优雅中断 |
+| `/compact` | ✅ | ⚠️ 当普通文本发给 `codex exec` | — | — | |
+| 提问 / 计划审批卡片 | ⚠️ 只有通用 allow/deny；AskUserQuestion、ExitPlanMode 无专门处理 | ❌ | — | — | |
+| usage / context / cost | ❌ | ❌ | — | — | `/status` 不显示模型、effort、用量 |
+
+另外两个全局问题：
+
+- `/model`、`/effort` 会清空当前聊天的 agent 会话（`core/engine.go:5100, 5210`）；`/mode` 不会。
+- model / effort / mode 都是**整个 project 共享**，且不写回配置；重启丢失；Echo 任务会被聊天里的切换悄悄影响。
+
+### 2.2 平台 × 功能
+
+| 功能 | Feishu | Telegram |
+|---|---|---|
+| 卡片（`/list /cron /loop /queue /help`） | ✅ 原生卡片 | ⚠️ 文本 + inline keyboard 退化 |
+| 选择按钮（model/effort/mode/权限） | ✅ | ✅ |
+| `/auth`（仅私聊） | ✅ | ✅ |
+| agent → 用户发文件 | ✅ | ❌ 没有实现 `FileSender` |
+| 收图片 / 文件 / 语音 | ✅ | ✅ |
+| 原生命令菜单 | n/a | ⚠️ 带连字符或大写的命令被丢弃（如 `agent-upgrade`），`attach/loop/tts` 缺 i18n 描述 |
+| 模型选择器显示“不在列表中的当前模型” | ✅ | ❌ |
+
+### 2.3 Echo 协同现状
+
+- 协议：echo-client 主动 WebSocket 连到 `{server}/api/v1/workers/ws`，`hello → register_host → register_agents → heartbeat`，Echo 下发 `assign_task / cancel_task` 和一组工作区 / git 操作；进度通过每 500ms 轮询的全量快照 `task_progress / task_result` 回传（`core/worker_client.go`）。
+- Echo 侧**没有 agent_type 白名单**，新增 kimi/agy 不需要改 Echo 代码即可注册。
+- echo-client 侧有多处**硬编码的 agent 列表**需要更新：`isEchoYoloEquivalentMode`（`core/worker_client.go:912`）、`nativeSkillTargetKind`（`core/native_skills.go:31`）、`CC_EXTRA_WORK_DIRS`（`core/job_runner.go:468`）、doctor、agent_upgrade、config 等。
+- `assign_task` **没有** model / effort / mode / session 字段；每个 Echo 任务都新开会话，结果里的 `session_id` 也不回传给 Echo。
+- 可靠性问题：WebSocket 断开时结束的任务，其 `task_result` 只发一次就丢；进度发送失败后 watcher 永久退出；重连后不重新同步运行中的任务；`request()` 没有超时。
+
+### 2.4 顺带发现的问题
+
+1. Codex `--full-auto` 已从 CLI 删除，`auto-edit/full-auto/auto` 模式不可用。
+2. 本机 Codex CLI 是 0.153.0，最新稳定版 0.167.2；服务日志里的 ``Model metadata for `gpt-6-astra` not found`` 很可能就是 CLI 过旧。
+3. 本机只装了已归档的 legacy `kimi-cli` 1.22.0（`~/.local/bin/kimi-cli`），**没有** Kimi Code CLI（`kimi`）。
+4. 上游 agy 适配器有两处已过时：认为 agy 没有 `--model`（实际 1.3.4 起已支持）；把 plan 模式映射成 `--sandbox`（应为 `--mode plan`）。
+5. 上游 Kimi 适配器在 Kimi Code 2.x 上把 `--plan` 和 `--prompt` 一起传，会直接报错。
+
+### 2.5 Agent 空闲自动升级现状
+
+实现位于 `core/agent_upgrade.go`（`AgentUpgradeManager`），配置为 `[agent_updates]`，聊天命令是 `/agent-upgrade`。
+
+**两个服务的配置**
+
+| 服务 | policy | 启用的目标 |
+|---|---|---|
+| `com.echo-client.cc-connect` | `idle_only`，24h | claudecode |
+| `com.echo-client.cc-connect-codex` | `idle_only`，24h | codex、gemini（observe）、qoder |
+
+**日志里看到的实际情况（11-05 至 11-11）**
+
+- 每天都会触发一次 `agent upgrade auto-run`。
+- **Codex**：11-05 探测到的版本是 `codex-cli 0.166.0`。11-06 起，升级前和升级后的版本都是空的（探测失败），`changed=false`。
+- npm 日志显示每天都执行一次 `npm install -g @openai/codex@latest`，每次耗时 8–15 分钟。**即使已经是最新版也会重装。**
+- 11-11 那次安装中途中断：日志停在下载 tarball，没有 exit 行。结果 `/opt/homebrew/lib/node_modules/@openai/codex` 已经是 0.167.1，但 `/opt/homebrew/bin/codex` 这个 bin 链接不见了。
+
+**根因：升级的不是 agent 实际运行的那个二进制**
+
+1. **本机有两份 codex**：
+   - `~/.local/bin/codex`：standalone 安装，指向 `~/.codex/packages/standalone/current`，版本 0.153.0。它自带 `codex update`（自我升级）和 `codex doctor`，doctor 报告 `install consistent`，并提示 0.167.2 可升级。注意 `~/.codex/packages` 是指向外置卷 `/Volumes/extended/OffloadedHome/...` 的符号链接；
+   - npm 全局：`@openai/codex`。包目录是 0.167.1，但缺少平台依赖 `@openai/codex-darwin-arm64`，运行时直接报错，已经无法使用。
+2. **升级器和 agent 用的 PATH 不同**：
+   - 升级器通过 `/bin/sh -lc` 执行命令（`core/agent_upgrade.go:906`）。登录 shell 会经过 `path_helper` 和 `~/.profile` 重排 PATH，以前 `/opt/homebrew/bin` 排在前面，所以探测到的是 npm 那份。
+   - agent 进程直接用服务的 launchd PATH 执行 `codex`，`~/.local/bin` 排第一，**一直跑的是 standalone 0.153**。服务日志里的 ``Model metadata for `gpt-6-astra` not found`` 也是这个原因。
+   - 今天 09:51，Antigravity 安装器往 `~/.profile` 里加了 `export PATH="$HOME/.local/bin:$PATH"`，登录 shell 的解析结果也随之变了。PATH 顺序是由别的安装器顺手决定的，很脆弱。
+3. **Codex 不检测安装路线**：Claude 会识别 native / brew / npm（`resolveClaudeCodeUpgradeTarget`），Codex 固定用 npm。
+
+**其他缺陷**
+
+- **失败不可见**：
+  - `auto-run` 日志不打印 `Err` 和输出；
+  - 版本探测失败直接吞掉；
+  - 失败计数只在内存里，重启后清零。
+  - 所以 11-06 起探测为空的具体原因已经无法从日志还原。
+- **重复重装**：没有“检查最新版本”这一步，每天无条件跑 `@latest`，一次 10 分钟以上，中途被杀就会留下坏掉的安装。
+- **调度不可靠**：
+  - 下次运行时间 = 进程启动时间 + 24h，不持久化，每次重启都会重新计时；
+  - “空闲”只是触发那一刻没有忙碌的聊天会话。是否包含 Echo 任务和 cron 进程还没有确认；
+  - 没有可配置的静默时间窗；
+  - 升级过程中不会阻止新的轮次开始。
+- **两个服务互不协调**：同一台机器上两个服务各自升级同一套二进制，没有锁。
+- **升级之后**：
+  - 常驻的 Claude 进程不会重启，会继续跑旧版本；
+  - 模型缓存、能力探测不会刷新；
+  - 没有升级后的冒烟检查，也不会通知任何人。
+- **覆盖面**：
+  - 没有 Kimi、agy 的升级目标；
+  - Telegram 菜单里丢掉了 `agent-upgrade` 命令（§2.2）。
+
+## 3. 各 agent 最新能力与透传方式
+
+> 调研日期 2026-11-12。本机版本：Claude Code 2.1.322（最新）、Codex 0.153.0（最新 0.167.2）、agy 1.5.6（最新）、Kimi Code 未安装（最新 2.5.3）。
+
+### 3.1 能力对照
+
+| 能力 | Claude Code | Codex | agy | Kimi Code |
+|---|---|---|---|---|
+| **推荐接入方式** | `claude -p --input-format stream-json --output-format stream-json` + `control_request` 控制协议（现有方式，扩展使用） | `codex app-server`（JSON-RPC over stdio；官方 SDK 也基于它） | 第一期：每轮 `agy -p --output-format stream-json`；第二期：`agy acp` | 第一期：每轮 `kimi -p --output-format stream-json`；第二期：`kimi acp` |
+| **远程登录** | PTY 跑 `claude auth login`，转发 URL，用户回贴 code（现有）；`claude auth status --json`；`claude auth logout`。另有未公开的 `claude_authenticate` 控制请求 | `account/login/start {type:"chatgptDeviceCode"}` → `verificationUrl + userCode`，等待 `account/login/completed`；或 `codex login --device-auth`；`codex login status`；`codex logout`。设备码需在 ChatGPT 安全设置中启用 | PTY 跑 `agy acp --login`，转发 URL、回贴 code；无 status/logout 子命令，可用 `agy -p /usage --output-format json` 探测 | `kimi login` 设备码流程，URL 和 code 打到 stderr，最容易转发；无 status/logout 子命令（ACP 有 logout） |
+| **模型列表** | 控制请求 `list_models`（返回 `supportedEffortLevels`、`supportsAutoMode`） | `model/list`（返回默认模型、`supportedReasoningEfforts`） | `agy models`（`id<TAB>label`，id 带 effort 后缀） | `kimi provider list --json`（**含密钥，禁止记日志**）；或静态别名表 |
+| **切换模型** | 控制请求 `set_model`，热切换，不丢会话 | `turn/start {model}`，对后续轮次生效 | `--model` | `-m <alias>` |
+| **思考强度** | `--effort` / `apply_flag_settings {effortLevel}`：low/medium/high/xhigh/max/ultracode（随模型） | `turn/start {effort}`：low…max/ultra（随模型） | `--effort low…max`（随模型） | 无 CLI 参数；需 `KIMI_MODEL_THINKING_EFFORT` 或每会话 `KIMI_CODE_HOME` 配置；ACP 有 config option |
+| **权限模式** | `set_permission_mode` 热切换：default/acceptEdits/plan/auto/dontAsk/bypassPermissions | `turn/start {approvalPolicy, sandboxPolicy, approvalsReviewer}`：on-request（转发审批）/ auto_review（“替我审批”）/ yolo；`collaborationMode: plan` | `--mode accept-edits\|auto\|plan`、`--dangerously-skip-permissions`；默认模式下需审批的操作会被软拒绝（上游用 PreToolUse hook 转发到聊天） | `-p` 下**固定为自动通过**，不能和 `--yolo/--auto/--plan` 同用；只有 ACP 能切换 |
+| **会话** | `--resume`，transcript 在 `~/.claude/projects/` | `thread/list / resume / fork / name/set / archive / delete` | `--conversation <id>`；无非交互列表命令（扫描本地文件） | `kimi session list --json`、`-S <id>` |
+| **轮内插入** | stream-json 用户消息带 `priority:"next"`（当前工具调用结束后读入）、`"later"`（排到下一轮）、`"now"` | `turn/steer`；另有 `thread/queue/*` 原生队列 | 仅 ACP（运行中发 prompt 即 steer）；`-p` 不支持 | 仅 ACP / `kimi web` API（`prompts:steer`）；`-p` 不支持 |
+| **中断** | 控制请求 `interrupt` | `turn/interrupt` | ACP `cancel`；`-p` 只能杀进程 | ACP `cancel` |
+| **loop / 调度** | `/loop`、`ScheduleWakeup`、`/goal`（会话内 Cron 工具，但 stream-json 模式下进程不会等待唤醒） | 无 cron；`thread/goal/set` | `/schedule`、`/goal`；`-p` 会等后台任务 | Cron 工具、`/goal`；`-p` 会等后台任务 |
+| **用量** | `result.total_cost_usd`、`rate_limit_event`、控制请求 `get_usage`（5h / 7d）、`get_context_usage` | `account/rateLimits/read`、`thread/tokenUsage/updated` | `-p /usage`；结果里有 token 用量 | 仅 TUI `/usage` |
+| **提问 / 计划审批** | `can_use_tool` 里的 AskUserQuestion、ExitPlanMode | `item/tool/requestUserInput`、`item/*/requestApproval` | `-p` 自动跳过 | `-p` 下 plan 不可用 |
+| **compact** | `/compact` | `thread/compact/start` | `/compact` | `/compact` |
+
+### 3.2 透传原则
+
+1. **能热切换的就热切换**：Claude 用控制协议、Codex 用 `turn/start` 参数，切换模型 / effort / 模式不再重建会话。
+2. **每轮一个进程的 agent（第一期的 agy、Kimi）**：把设置作为下一轮的启动参数，在下一条消息生效，并在回复里说明。
+3. **选项从 CLI 实时获取**：模型及其支持的 effort 列表来自 `list_models` / `model/list` / `agy models`，不再硬编码。
+4. **标注不稳定接口**：Claude 的 `list_models`、`get_usage`、`claude_authenticate` 等控制请求未写入文档。使用时必须有回退路径，且调用失败不能影响主流程。
+
+## 4. 上游 cc-connect：取舍
+
+上游（chenhg5/cc-connect）自 2026-03-10 分叉后有 1341 个新提交；本 fork 有 209 个独有提交（Echo worker、jobs、review 流程、prompt queue、`/auth`、cron 会话绑定、模型发现等）。试合并结果：**579 个冲突块，83 个文件**，`core/engine.go` 一个文件就有 116 处；还有同一功能两套实现（队列、reasoning 接口、cron 会话模式、多工作区）以及 `AgentSession.Send`、`FileSender` 等接口签名变化。
+
+**结论：选择性移植。**
+
+| 上游能力 | 处理 |
+|---|---|
+| `agent/kimi`、`agent/antigravity` + `antigravityhook` | **移植**（需补 4 个 core 小改动，已在 scratch 克隆验证编译与单测通过），并修正 §2.4 的问题 |
+| `/timer`（一次性定时任务） | 移植，复用 fork 的 cron 投递路径 |
+| `/cancel`（停止并新开会话） | 移植 |
+| `max_turn_time_mins`、`agent_session_idle_timeout_mins` | 移植 |
+| Claude `LiveModeSwitcher` | 用控制协议重新实现（见 T3.1） |
+| `/ps` 轮内插入 | 思路参考，按 §3 各 agent 原生能力重新实现 |
+| 生命周期 hooks、webhook | 可选（P5 之后） |
+| Feishu 稳定性修复（open_id 拉取失败即拒绝、名字查询 5 秒超时、连发图片合并、大文件分块下载、瞬时错误重试） | 逐个 PR 挑选移植 |
+| `agent/acp` 通用 ACP 适配器 | 第二期移植，用于 agy / Kimi 的轮内插入与热切换 |
+| management API / Web UI / bridge / observer / heartbeat / 其他平台 / Telegram 换库 | 不做 |
+
+上游**没有**通用的远程登录能力（`core/setup.go` 只是 Feishu / 微信扫码建应用），这部分只能自己做。
+
+## 5. 设计
+
+### 5.1 Agent 能力声明（Capabilities）
+
+新增可选接口，代替散落各处的 `agent.Name() == "xxx"` 判断：
+
+```go
+// core/capabilities.go（P0 已实现）
+type AgentCapabilities struct {
+    Auth           AuthCaps    // login / status / logout，Flow: url_code | device_code
+    Models         bool        // 由 ModelSwitcher 推导
+    LiveModel      bool        // 不重启进程即可切换（P3/P4 声明）
+    Efforts        []string    // 由 ReasoningLevelSwitcher 推导；按模型变化留到 P3
+    EffortViaModel bool        // 思考强度由模型档位决定（Qoder），/effort 提示改用 /model
+    Modes          []string    // 由 ModeSwitcher 推导；规范值与别名见 core/permission_mode.go
+    LiveMode       bool
+    Sessions       SessionCaps // list / delete / history，由接口推导
+    Steer          bool        // 轮内插入
+    Interrupt      bool        // 优雅中断
+    Compact        bool        // 由 ContextCompressor 推导
+    Usage          bool
+    AskUser        bool        // 提问 / 计划审批卡片
+}
+```
+
+能推导的字段（模型、强度、模式、会话、compact）一律从 agent 实现的接口推导，声明不能把它们关掉；只有无法推导的字段（Auth、Live*、Steer、Interrupt、Usage、AskUser、EffortViaModel）通过 `CapabilityProvider` 声明。`core.ValidateCapabilities` 检查“声明即实现”：Steer / Interrupt / Usage / AskUser 在 core 有对应接口之前一律不允许声明为 true。
+
+用途：`/help` 和各命令据此显示或隐藏选项；不支持时给出明确提示；Echo 注册时作为 metadata 上报（§5.6）；单元测试据此校验“声明即实现”。
+
+### 5.2 统一的权限模式
+
+聊天中只暴露五个规范值，各 agent 映射到原生参数：
+
+| 规范值 | Claude | Codex（app-server） | agy | Kimi（-p） |
+|---|---|---|---|---|
+| `default` | `default` | `approvalPolicy=on-request`，审批转发为卡片 | 默认 + PreToolUse hook 转发 | 不支持 |
+| `acceptEdits` | `acceptEdits` | `sandbox=workspace-write` + on-request | `--mode accept-edits` | 不支持 |
+| `plan` | `plan` | `collaborationMode=plan` | `--mode plan` | 不支持（第二期 ACP） |
+| `auto` | `auto` | `approvalsReviewer=auto_review`（`--approve-for-me`） | `--mode auto` | ✅（`-p` 的固有行为） |
+| `bypassPermissions` | `bypassPermissions` | `--yolo` 等价 | `--dangerously-skip-permissions` | ✅（同上） |
+
+已有别名继续兼容（`yolo` → `bypassPermissions`，Codex 的 `full-auto` → `auto`）。非法值报错，不再静默回到 default。`isEchoYoloEquivalentMode` 改为查这张表。
+
+### 5.3 设置的作用域与持久化
+
+- model / effort / mode **改为按聊天会话保存**，并持久化到 session 存储；project 配置只作为默认值。
+- `/model`、`/effort` **不再清空会话**：能热切换的立即生效，每轮新进程的 agent 从下一轮生效。
+- Echo 任务不再受聊天中切换的影响，而是用任务自带的选项或 project 默认值（§5.6）。
+
+### 5.4 命令语义（四个 agent 统一）
+
+| 命令 | 语义 | 说明 |
+|---|---|---|
+| `/auth login\|code\|status\|logout\|cancel [agent]` | 远程登录 | 仅私聊、仅白名单用户；URL / 设备码以卡片发送；code 与 token 一律脱敏，不写日志 |
+| `/model` | 列出当前账号可用的最新模型（卡片），选择即生效 | 来源见 §3.1 |
+| `/effort` | 选项随当前模型变化 | 不支持的 agent 给出提示 |
+| `/mode` | §5.2 的五个规范值 | |
+| `/list /switch /new /name /delete` | 会话管理 | `/delete` 同时调用 agent 的 `SessionDeleter` |
+| `/cron` | 支持绑定会话；新增每个任务自己的 model / effort / mode | 本地 API 增加 `agent_session_id` |
+| `/timer` | 一次性定时任务 | 移植自上游 |
+| `/loop` | 固定间隔；新增自定节奏：agent 输出 `<loop-control>next 20m</loop-control>` 决定下一次运行时间 | 复用现有 loop-control 解析 |
+| `/goal <条件>` | 透传原生 goal（Claude `/goal`、Codex `thread/goal/set`、agy/Kimi `/goal`） | |
+| 忙时新消息 | 默认：支持 steer 的 agent **插入当前轮**，否则排队；卡片提供“插入 / 排队 / 取消”按钮 | 新增 `/steer <消息>` 强制插入、`/queue` 管理队列 |
+| `/stop` | 优雅中断（Claude `interrupt`、Codex `turn/interrupt`），超时后再杀进程 | |
+| `/cancel` | 停止并新开会话 | |
+| `/compact` | 各 agent 原生 compact | |
+| `/usage`、`/context` | 用量 / 额度 / 上下文占用 | Claude、Codex 先做 |
+| `/status` | 增加 agent、CLI 版本、模型、effort、模式、登录状态、用量 | |
+
+### 5.5 平台拉齐
+
+- **Telegram**：实现 `FileSender`；命令菜单把 `-` 转成 `_` 注册并做反向映射；补 i18n 描述；模型选择器显示当前模型；改进 `/list /cron /queue` 的 keyboard 呈现。
+- **Feishu**：挑选移植上游的稳定性修复（§4）；AskUserQuestion、计划审批、登录、插入 / 排队 都使用卡片。
+- 每个新能力都要在两个平台各过一遍验收清单（§7）。
+
+### 5.6 与 Echo 协同
+
+echo-client 侧：
+
+1. `register_agents` 的 `metadata` 增加 `capabilities`（§5.1）、`cli_version`、`auth_status`、`default_model / effort / mode`。
+2. `assign_task` 增加可选 `agent_options {model, effort, mode, resume_session_id}`；按任务生效，不修改共享 agent 状态。
+3. `task_result` 回传 `agent_session_id`，Echo 下次可以续接同一会话。
+4. 可靠性：`task_result` 在重连后补发；重连后重新同步运行中的任务；`request()` 加超时；进度发送失败时 watcher 不退出。
+5. kimi / agy 加入 yolo 等价表、native skills 目录、extra work dirs、doctor、agent_upgrade。
+
+Echo 侧（独立仓库，单独 PR）：
+
+- 接受新 agent_type **不需要改代码**。
+- 可选：调度时按 `agent_type` / capabilities 选择 agent；从 `task.input` 透传 `agent_options`；`AgentSessionSummary.source` 增加 `kimi`；更新部署脚本与文档中的 agent 列表。
+
+## 6. 任务列表
+
+> 估时按一人计；依赖关系标在“依赖”列。第 0 阶段之后，P1、P2、P3、P4 基本可以并行。
+
+### P0 基础与修复（约 3 天）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T0.1 | 新增 `AgentCapabilities` 接口；`/help`、`/status` 按能力显示；去掉 `agent_auth.go:362`、`engine.go:5131` 等处的硬编码判断 | — | 能力矩阵单测通过 |
+| T0.2 | 规范化权限模式（§5.2）；非法值报错；`isEchoYoloEquivalentMode` 改为查表 | T0.1 | 各 agent 的模式映射单测 |
+| T0.3 | model / effort / mode 按聊天会话保存并持久化；`/model`、`/effort` 不再清空会话 | T0.1 | 切换后继续对话，上下文仍在；重启后设置仍在 |
+| T0.4 | 修复：Codex `--full-auto`（先用 `--sandbox workspace-write` + approval 参数替代）；`/delete` 调用 `SessionDeleter`；Claude 模型发现的分页与重定向 | — | 回归测试 |
+| T0.5 | 运维：本机 Codex 只保留 standalone（§8 问题 9 已定）。**2026-11-12 已完成**：删掉 npm 那份（先清掉 11-10 中断安装留下的 0.167.0 暂存目录 `.codex-QDftHxCm`，否则 npm 卸载报 `ENOTEMPTY`）；`~/.cc-connect-codex/config.toml` 的 `[agent_updates.codex]` 改为 `strategy = "observe"` 加 `version_command = "/Users/edward/.local/bin/codex --version"`（备份为 `config.toml.bak-20261112-codex-standalone`），已重启服务。`codex update` 报 “Could not detect the Codex installation method”，因为 `~/.codex/packages` 链接到外置卷，安装被识别为 “other”，所以不能用它升级。**2026-11-17**：`[agent_updates.codex]` 改为 `strategy = "custom"`，`update_command` 先把官方安装脚本 `https://chatgpt.com/codex/install.sh` 下载到临时文件，再以 `CODEX_NON_INTERACTIVE=1` 执行。没有用 `curl \| sh`，是为了让下载失败能返回非零退出码。已是最新时脚本不会重新下载。备份为 `config.toml.bak-20261117-codex-installer`，已重启服务。**待确认**：下一次自动运行（约 11-18 10:57，空闲时）后，版本应从 0.153.0 变成最新。另外安装 Kimi Code CLI 2.5.x；doctor 显示 CLI 版本、实际解析到的路径、PATH 上的重复安装 | — | `echo-client doctor` 输出四个 agent 的版本与路径；服务实际执行的 codex 是最新版 |
+
+**P0 实现记录（2026-11-17，分支 `feat/p0-agent-parity-foundation`）**
+
+- **T0.1**：`core/capabilities.go`（`AgentCapabilities`、`CapabilityProvider`、`CapabilitiesOf`、`ValidateCapabilities`）。`/auth` 按 `Auth` 能力放行，`/effort` 的 Qoder 提示改为 `EffortViaModel`；`/help` 隐藏当前 agent 不支持的命令块，末尾的权限模式提示换成 agent 自己的模式；`/status` 显示当前聊天的模型、强度、模式和能力摘要。Claude 声明 `Auth`，Qoder 声明 `EffortViaModel`。其余按名字区分的地方（native skills、extra work dirs、agent_upgrade、`shouldResetAgentSessionOnResult`）属于 P1 / P7 / P10，未改。
+- **T0.2**：`core/permission_mode.go` 是唯一的模式对照表，覆盖全部 7 个 agent。Claude 和 Codex 适配器、`isEchoYoloEquivalentMode` 都查这张表；旧 switch 接受的值全部保留（有回归单测）。`/mode` 遇到未知值报错，不再静默回到 default。Codex 的原生模式键改为规范值（`default / acceptEdits / auto / bypassPermissions`），`suggest / auto-edit / full-auto / yolo` 作为别名继续可用。Codex exec 没有 plan 模式，`/mode plan` 会报错（P4 后再支持）。
+- **T0.3**：新增 `SessionOptionsInjector`；设置保存在 `Session.AgentSettings`，随会话文件持久化（顺带修复 `NeedsReplay` 一直没有写盘的问题），`/new` 沿用当前聊天的设置，`/switch` 恢复目标会话自己的设置。`/model`、`/effort`、`/mode` 不再清空会话，只把进程标记为 stale，下一轮用新设置续接同一个 agent 会话，正在运行的一轮不会被打断。cron 使用所绑定聊天的设置，relay 使用自己的会话，Echo 任务始终用项目默认值。没有实现该接口的 agent（gemini、qoder 等）保持原来的项目级行为，但同样不再清空会话。
+- **T0.4**：Codex 改用 `-c sandbox_mode / approval_policy / approvals_reviewer`。本机 0.153 实测：`exec resume` 拒绝 `--full-auto` 和 `--sandbox`（旧代码在续接时传的正是 `--full-auto`），而 `-c` 配置项能正常通过参数解析。`acceptEdits` 用 `approval_policy="never"`，因为 exec 无法转发审批（P4 再改为卡片审批）。Claude `/v1/models` 改为分页（`has_more / after_id`，最多 10 页），并改用不跟随重定向的 client，避免 API key 被转发到别的域名。
+- **`/delete` 与原文的偏差**：`SessionManager.DeleteSession` 的注释写明有意保留 agent transcript（2026-09 的决定，transcript-collector 也依赖这些文件），所以默认行为不变；新增 `/delete <序号> purge` 才调用 `SessionDeleter`。如果该 agent 会话仍被其他聊天引用，就不删 transcript。
+- **T0.5**：`core/agent_cli.go` 与新的 `echo-client doctor [agent-type...]` 子命令：按当前进程的 PATH 解析 CLI，输出版本、实际路径、符号链接目标，并标出 PATH 上的其他副本和损坏的安装；聊天里的 `/doctor` 用同一套逻辑。**Kimi Code CLI 尚未安装**：需要从 npm 安装第三方包，留到 P1 开始时由你确认后再装。
+
+### P1 接入 agy 与 Kimi（约 3 天）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T1.1 | 移植 core 小改动：`core/cmdopts.go`、`GetProviderModel(s)` + `ProviderConfig.Models`、`ContinueSession`、`Event.ToolStatus/ToolSuccess` | — | `go build ./...` |
+| T1.2 | 移植 `agent/antigravity`、`agent/antigravityhook`、`_agy-permission-hook` 子命令；修正：`--model` 透传、`--effort`、`--mode accept-edits\|auto\|plan`、用 `agy models` 列模型 | T1.1 | 真实 agy 冒烟：对话、续接、切模型、切 effort、默认模式下审批卡片 |
+| T1.3 | 移植 `agent/kimi`，只保留 Kimi Code 2.x（legacy 已归档）；修正：`-p` 下不传 `--plan/--yolo`，只声明 `auto / bypassPermissions`；用 `kimi session list --json` 列会话；模型列表读取时脱敏；effort 先做 spike（`KIMI_MODEL_THINKING_EFFORT` 或每会话 `KIMI_CODE_HOME`） | T1.1, T0.5 | 真实 kimi 冒烟：对话、续接、切模型、图片 |
+| T1.4 | 更新硬编码列表：main.go 导入、doctor、agent_upgrade、`config.AgentUpdates`、native skills、`job_runner` extra dirs、yolo 等价表、`config.example.toml`、README | T1.2, T1.3 | 两个 agent 都能作为 Echo worker 注册 |
+
+### P2 通用远程登录（约 3 天）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T2.1 | 把 `AgentAuthManager` 抽象为 `AgentAuthenticator`：`Start → {url, user_code?, needs_code}`、`SubmitCode`、`Status`、`Logout`、`Cancel`；`/auth` 支持指定 agent | T0.1 | 单测覆盖状态机与超时 |
+| T2.2 | Claude：保留 PTY 登录；新增 `status`（`claude auth status --json`，含过期时间）与 `logout` | T2.1 | 真实登出 / 登录一轮 |
+| T2.3 | Codex：设备码登录（`codex login --device-auth`；P4 之后改走 `account/login/start`）；`status`、`logout` | T2.1 | 真实设备码流程 |
+| T2.4 | Kimi：解析 `kimi login` 的 stderr，发出 URL + code；status 用 spike 确定的方式探测；不支持 logout 时明确提示 | T2.1, T1.3 | 真实登录一轮 |
+| T2.5 | agy：PTY 跑 `agy acp --login`，转发 URL、回贴 code；status 用 `agy -p /usage` 探测 | T2.1, T1.2 | 真实登录一轮 |
+| T2.6 | Feishu、Telegram 私聊登录卡片；code / token 脱敏审计 | T2.1 | 两个平台各走通一次 |
+
+### P3 Claude Code 深度能力（约 4 天）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T3.1 | 用控制协议热切换：`set_model`、`apply_flag_settings{effortLevel}`、`set_permission_mode` | T0.3 | 切换后同一进程继续，无重启 |
+| T3.2 | 用 `list_models` 列模型，effort 选项随模型变化（含 xhigh、max、ultracode）；失败时回退到现有发现逻辑 | T3.1 | 卡片显示 Opus 5.5 / Fable 5.2 等最新模型 |
+| T3.3 | 轮内插入：忙时发送 `priority:"next"`；卡片提供“插入 / 排队”；新增 `/steer` | T0.1 | 长任务中插话，agent 在同一轮内看到 |
+| T3.4 | `/stop` 改为 `interrupt` 控制请求，超时后再杀进程 | — | 中断后会话可继续 |
+| T3.5 | AskUserQuestion、ExitPlanMode 专用卡片（选项按钮 / 批准计划） | — | 两个平台都能回答问题、批准计划 |
+| T3.6 | `/usage`（`get_usage` + `rate_limit_event`）、`/context`（`get_context_usage`）；`/status` 显示花费 | T0.1 | |
+| T3.7 | cron 写入同一会话后，常驻 Claude 进程检测到 transcript 变化就重新 resume | — | cron 跑完后，聊天里能接着 cron 的上下文继续 |
+
+### P4 Codex 迁移到 app-server（约 5 天）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T4.1 | 新的 Codex 会话实现：`initialize` → `thread/start\|resume` → `turn/start`，事件映射到 core 的 `Event`；`codex exec` 作为旧版 CLI 的回退，用配置开关切换 | T0.5 | 现有 Codex 冒烟测试全部通过 |
+| T4.2 | 轮内插入 `turn/steer`；中断 `turn/interrupt` | T4.1 | 同 T3.3、T3.4 |
+| T4.3 | 每轮的 model / effort / approval / sandbox；按 §5.2 映射模式（auto = `auto_review`，plan = `collaborationMode`）；effort 增加 max / ultra | T4.1, T0.2 | 五种模式都能用 |
+| T4.4 | 审批转发（`requestApproval`）、提问（`requestUserInput`）卡片 | T4.1 | default 模式下聊天内审批 |
+| T4.5 | `thread/list`、`name/set`、`delete`；`thread/compact/start`；`account/rateLimits/read` 用于 `/usage`；登录改走 `account/login/start` | T4.1 | |
+
+### P5 通用功能拉齐（约 4 天）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T5.1 | `/timer` 一次性定时任务（移植上游，复用 cron 投递） | — | |
+| T5.2 | `/loop` 自定节奏（`<loop-control>next …</loop-control>`）；`/goal` 透传 | — | |
+| T5.3 | cron：本地 API 增加 `agent_session_id`；每个任务自己的 model / effort / mode；卡片显示绑定的会话 | T0.3 | |
+| T5.4 | `/cancel`；`max_turn_time_mins`；`agent_session_idle_timeout_mins`（移植上游） | — | |
+| T5.5 | 队列 key 与设计文档对齐（按 agent 会话共享）或修订设计文档；更新 `2026-07-22-prompt-queue.md` 的状态 | — | |
+| T5.6 | `/compact` 对四个 agent 都走原生实现 | T4.1 | |
+
+### P6 agy / Kimi 进阶：ACP（约 5 天，可选）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T6.1 | 移植上游 `agent/acp` 通用适配器 | T1.* | |
+| T6.2 | agy、Kimi 改走 ACP（配置开关）：轮内插入、热切换 model / thinking / mode、审批转发、Kimi 的 plan 模式 | T6.1 | 两个 agent 达到与 Claude / Codex 相同的能力矩阵 |
+
+### P7 Echo 协同（echo-client 约 3 天，Echo 仓库另计）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T7.1 | 注册 metadata 上报 capabilities、CLI 版本、登录状态、默认设置 | T0.1 | Echo 仪表盘能看到 |
+| T7.2 | `assign_task.agent_options`（model / effort / mode / resume_session_id），按任务生效；`task_result` 回传 `agent_session_id` | T0.3 | 用 kimi / agy 跑通一次 Echo 任务 |
+| T7.3 | 可靠性：结果补发、重连后同步、请求超时、watcher 不因发送失败退出 | — | 断网重连测试 |
+| T7.4 | Echo 仓库：透传 `agent_options`、按能力调度（可选）、`AgentSessionSummary` 增加 kimi、更新文档 | T7.2 | 独立 PR |
+
+### P8 平台拉齐（约 3 天）
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T8.1 | Telegram：`FileSender`、命令菜单 `-`→`_`、i18n 描述、模型选择器显示当前模型、卡片退化效果 | — | |
+| T8.2 | Feishu：挑选移植上游稳定性修复（§4） | — | |
+| T8.3 | 两个平台的验收清单与回归记录 | 全部 | |
+
+### P10 Agent 空闲自动升级（约 3 天）
+
+目标：每个 agent 在空闲时自动升级到最新版；**升级的就是 agent 实际运行的那个二进制**；失败可见；升级后新版本马上生效。
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
+| T10.1 | **对准目标**：用 agent 启动时的同一份环境（服务 PATH，不经过登录 shell）解析二进制的绝对路径；版本探测与升级都针对这个路径；按路径识别安装路线：Codex 区分 standalone / npm / brew，Claude 沿用现有的识别；发现 PATH 上有多份安装时告警 | — | 在本机复现“两份 codex”，升级后 agent 实际运行的版本变成最新 |
+| T10.2 | **先检查再升级**：先查最新版本（npm `view`、GitHub releases、CLI 自带的检查），已经最新就跳过；升级超时或中断后检查安装是否完整（bin 链接、`--version`），不完整就修复或回滚到上一版本 | T10.1 | 已是最新时不再重装；人为中断安装后能自动修好 |
+| T10.3 | **可观测**：日志打印错误和输出尾部；把每个目标的上次运行时间、前后版本、错误、连续失败次数持久化到磁盘；`/agent-upgrade status` 展示这些信息；升级成功或失败时通知管理员会话（可配置） | — | 失败原因能在聊天和日志里直接看到；重启后状态还在 |
+| T10.4 | **调度**：持久化下次运行时间；支持静默时间窗配置（如 `window = "03:00-06:00"`）；空闲判定包括聊天会话、Echo 任务、cron/loop 进程，并要求最近 N 分钟没有轮次；升级期间新消息进入队列；同一台机器的多个服务用文件锁互斥 | — | 两个服务不会同时升级同一个 CLI；忙碌时推迟到下一个窗口 |
+| T10.5 | **升级后生效**：重启空闲的常驻 agent 进程（Claude），下一轮 resume 原会话；刷新模型缓存与能力探测（§5.1）；跑一次冒烟检查（`--version` + 能力探测），失败就回滚并告警 | T0.1 | 升级后不用重启服务，新版本马上生效 |
+| T10.6 | **新目标**：Kimi Code（npm `@moonshot-ai/kimi-code` 或 CLI 自带的更新命令，待 spike 确认）、agy（安装器或 CLI 自带的更新命令，待 spike 确认；agy 几乎每天发版，默认每天一次足够）；清理 legacy `kimi-cli` | T1.2, T1.3 | 四个主力 agent 都纳入自动升级 |
+| T10.7 | **Echo 联动**：heartbeat / 注册 metadata 带上各 CLI 的版本；Echo 任务运行中不升级 | T7.1 | Echo 仪表盘能看到每台主机的 CLI 版本 |
+
+### P9 文档与测试（贯穿）
+
+- 能力矩阵单测：每个 agent 声明的能力都要有实现，没有声明的命令要给出提示。
+- 每个 agent 一个真实 CLI 冒烟脚本（打 build tag，不进 CI 默认集合）。
+- 更新 README、`config.example.toml`、`docs/feishu.md`、`docs/telegram.md`；本文档发布后改为 `accepted`，完成后改为 `shipped`。
+
+**总量**：P0–P5 + P7 + P8 + P10 约 28 人日；加上可选的 P6 约 33 人日。
+
+## 7. 测试与验收
+
+每个 agent × 平台组合都按以下清单走一遍：
+
+1. `/auth status` → `/auth logout` → `/auth login` → 回贴 code → `status` 显示已登录
+2. `/model` 列表包含最新模型 → 选择 → 继续对话，上下文仍在
+3. `/effort` 只显示当前模型支持的选项 → 选择生效
+4. `/mode auto`、`/mode bypassPermissions` 都能完成一个会写文件、跑命令的任务；`default` 下能在聊天里审批
+5. `/new` → `/list` → `/switch` 回到旧会话 → 上下文正确
+6. `/cron` 绑定当前会话 → 运行后，聊天里能接着 cron 的结果继续
+7. `/loop` 固定间隔与自定节奏各跑 3 次 → 暂停
+8. 长任务中插话：支持 steer 的 agent 当轮看到，其余进队列；`/queue` 可调整顺序
+9. `/stop` 后会话可以继续；`/compact`、`/usage`、`/status` 输出正确
+10. 作为 Echo worker 注册，执行一个带 `agent_options` 的任务
+
+## 8. 待决问题（需要你确认）
+
+> 2026-11-17：文档已确认，1–6、8 按建议执行；7（Echo 协议扩展的时机与 Echo 仓库由谁改）仍待定，到 P7 前再确认。
+
+1. **策略**：选择性移植上游，不全量合并？（建议：是）
+2. **设置作用域**：model / effort / mode 按聊天会话保存并持久化？（建议：是）
+3. **Codex 迁移到 app-server（P4）**：这是 Codex 获得插入、热切换、审批、设备码登录的前提。（建议：做，保留 `exec` 回退）
+4. **agy / Kimi**：先用每轮进程接入，ACP 作为第二期？还是直接上 ACP？（建议：先每轮进程，P6 再上 ACP）
+5. **Kimi**：只支持 Kimi Code 2.x，放弃已归档的 legacy kimi-cli？（建议：是）
+6. **Claude 未公开控制请求**（`list_models`、`get_usage`、`claude_authenticate`）：允许使用（带回退）？（建议：`list_models`、`get_usage` 用；登录仍走 PTY）
+7. **Echo 协议扩展（P7）**：本期做，还是等 agent 拉齐之后再做？Echo 仓库的改动是否也由我来做？
+8. **执行顺序**：建议 P0 → P10（T10.1–T10.5，先修好现有升级） → P1（含 T10.6） → P2 → P3 / P4 → P5 → P8 → P7 → P6。
+9. ~~**本机 Codex 保留哪一份安装**~~ **已决定（2026-11-12）：保留 standalone**（`~/.local/bin/codex`，agent 实际在用），npm 那份已删除。standalone 的升级方式是官方安装脚本（`codex update` 内部调用的也是它，但本机因为外置卷符号链接识别不到安装方式）。执行情况见 T0.5；T10.1 识别 standalone 时，要把 `~/.codex/packages` 被符号链接到别处的情况也算进去。
+
+## 9. 风险
+
+- **CLI 变化快**：agy 几乎每天发版，Kimi Code 2.x 刚推出，Codex 每周都有版本。对策：启动时探测 `--help` 能力（沿用上游 kimi 的做法），doctor 提示版本，冒烟脚本每次升级后跑一遍。
+- **自动升级可能把能用的 CLI 升坏**：新版本删掉旧参数的情况已经发生过（Codex 删除 `--full-auto`，Kimi Code 删除 `--print` 等）。对策：T10.5 升级后冒烟检查加回滚；结合启动时探测 `--help` 能力。
+- **CLI 装在外置卷上**：standalone codex 的 `~/.codex/packages` 链接到 `/Volumes/extended/...`。开机时外置卷还没挂载的话，服务找不到 codex。对策：T0.5 的 doctor 检查二进制能不能解析、所在卷有没有挂载；T10.3 在探测失败时发通知。
+- **未公开接口**：Claude 的部分控制请求随时可能变。对策：只作为增强，失败就回退。
+- **设备码登录的前置条件**：Codex 需要在 ChatGPT 安全设置中启用设备码；Kimi `provider list --json` 会输出密钥。对策：在文档中写明；读取结果一律脱敏。
+- **改动面大**：`core/engine.go` 9000 行。对策：新逻辑尽量放进新文件（capabilities、auth、steer），engine 只做接线；每个阶段单独 PR。
+
+## 附录：资料来源
+
+- Claude Code：code.claude.com/docs（headless、cli-reference、authentication、permission-modes、model-config、scheduled-tasks、goal、agent-sdk）；anthropics/claude-code CHANGELOG；本机 2.1.322 实测。
+- Codex：github.com/openai/codex releases（0.159–0.167.2）；learn.chatgpt.com/docs（app-server、auth、models、permission-modes）；本机 0.153 生成的 app-server schema 与 `model/list` 实测。
+- agy：antigravity.google/docs（cli/headless、ACP、install、models、hooks）；google-antigravity/antigravity-cli releases；本机 1.5.6 实测（只读 slash 命令）。
+- Kimi Code：github.com/MoonshotAI/kimi-code（`apps/kimi-code/src/cli`）、moonshotai.github.io/kimi-code 文档；legacy MoonshotAI/kimi-cli（已归档）。
+- 上游 cc-connect：`upstream/main` @ b62c735a（2026-11-11），CHANGELOG 与 `agent/kimi`、`agent/antigravity`、`core/timer.go` 等源码。
+- Echo：`~/Projects/echo` 的 `src/echo_server/api/worker_gateway.py`、`core/worker_gateway.py`、`docs/designs/*echo-v2-extension.md`。

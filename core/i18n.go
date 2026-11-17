@@ -734,11 +734,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "🔔 Modo silencioso global desactivado — todas las sesiones mostrarán los mensajes de progreso.",
 	},
 	MsgModeChanged: {
-		LangEnglish:            "🔄 Permission mode switched to **%s**. New sessions will use this mode.",
-		LangChinese:            "🔄 权限模式已切换为 **%s**，新会话将使用此模式。",
-		LangTraditionalChinese: "🔄 權限模式已切換為 **%s**，新會話將使用此模式。",
-		LangJapanese:           "🔄 権限モードを **%s** に切り替えました。新しいセッションで有効になります。",
-		LangSpanish:            "🔄 Modo de permisos cambiado a **%s**. Las nuevas sesiones usarán este modo.",
+		LangEnglish:            "🔄 Permission mode switched to **%s**. It applies from your next message; the conversation continues.",
+		LangChinese:            "🔄 权限模式已切换为 **%s**，从下一条消息起生效，当前对话的上下文会保留。",
+		LangTraditionalChinese: "🔄 權限模式已切換為 **%s**，從下一條訊息起生效，當前對話的上下文會保留。",
+		LangJapanese:           "🔄 権限モードを **%s** に切り替えました。次のメッセージから適用され、会話は継続します。",
+		LangSpanish:            "🔄 Modo de permisos cambiado a **%s**. Se aplica desde tu próximo mensaje; la conversación continúa.",
 	},
 	MsgModeNotSupported: {
 		LangEnglish:            "This agent does not support permission mode switching.",
@@ -748,11 +748,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Este agente no soporta el cambio de modo de permisos.",
 	},
 	MsgEffortChanged: {
-		LangEnglish:            "Reasoning effort switched to `%s`. New sessions will use this level.",
-		LangChinese:            "推理强度已切换为 `%s`，新会话将使用此级别。",
-		LangTraditionalChinese: "推理強度已切換為 `%s`，新會話將使用此級別。",
-		LangJapanese:           "推論強度を `%s` に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "El nivel de razonamiento cambió a `%s`. Las nuevas sesiones usarán este nivel.",
+		LangEnglish:            "Reasoning effort switched to `%s`. It applies from your next message; the conversation continues.",
+		LangChinese:            "推理强度已切换为 `%s`，从下一条消息起生效，当前对话的上下文会保留。",
+		LangTraditionalChinese: "推理強度已切換為 `%s`，從下一條訊息起生效，當前對話的上下文會保留。",
+		LangJapanese:           "推論強度を `%s` に切り替えました。次のメッセージから適用され、会話は継続します。",
+		LangSpanish:            "El nivel de razonamiento cambió a `%s`. Se aplica desde tu próximo mensaje; la conversación continúa.",
 	},
 	MsgEffortNotSupported: {
 		LangEnglish:            "This agent does not support reasoning effort switching.",
@@ -817,7 +817,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  List cc-connect sessions for this chat\n\n" +
 			"/search <keyword>\n  Search cc-connect sessions by name, ID, or message\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
-			"/delete <number>\n  Remove a cc-connect session; keep the Agent transcript\n\n" +
+			"/delete <number> [purge]\n  Remove a cc-connect session; keep the Agent transcript (purge also deletes it)\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
@@ -859,7 +859,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  列出当前聊天的 cc-connect 会话\n\n" +
 			"/search <关键词>\n  按名称、ID 或消息搜索 cc-connect 会话\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
-			"/delete <序号>\n  删除 cc-connect 会话记录；保留 Agent transcript\n\n" +
+			"/delete <序号> [purge]\n  删除 cc-connect 会话记录；保留 Agent transcript（purge 会一并删除）\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
@@ -901,7 +901,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/list\n  列出目前聊天的 cc-connect 會話\n\n" +
 			"/search <關鍵詞>\n  按名稱、ID 或訊息搜尋 cc-connect 會話\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
-			"/delete <序號>\n  刪除 cc-connect 會話記錄；保留 Agent transcript\n\n" +
+			"/delete <序號> [purge]\n  刪除 cc-connect 會話記錄；保留 Agent transcript（purge 會一併刪除）\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
@@ -1693,11 +1693,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelo actual: %s",
 	},
 	MsgModelChanged: {
-		LangEnglish:            "Model switched to `%s`. New sessions will use this model.",
-		LangChinese:            "模型已切换为 `%s`，新会话将使用此模型。",
-		LangTraditionalChinese: "模型已切換為 `%s`，新會話將使用此模型。",
-		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
+		LangEnglish:            "Model switched to `%s`. It applies from your next message; the conversation continues.",
+		LangChinese:            "模型已切换为 `%s`，从下一条消息起生效，当前对话的上下文会保留。",
+		LangTraditionalChinese: "模型已切換為 `%s`，從下一條訊息起生效，當前對話的上下文會保留。",
+		LangJapanese:           "モデルを `%s` に切り替えました。次のメッセージから適用され、会話は継続します。",
+		LangSpanish:            "Modelo cambiado a `%s`. Se aplica desde tu próximo mensaje; la conversación continúa.",
 	},
 	MsgModelNotSupported: {
 		LangEnglish:            "This agent does not support model switching.",
@@ -2295,9 +2295,9 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ Nueva sesión creada: **%s**",
 	},
 	MsgDeleteUsage: {
-		LangEnglish:            "Usage: `/delete <number>` — remove a cc-connect session by its list number. The Agent transcript is retained.\nUse `/list` to see session numbers.",
-		LangChinese:            "用法：`/delete <序号>` — 按列表序号删除 cc-connect 会话记录，Agent transcript 会保留。\n使用 `/list` 查看会话序号。",
-		LangTraditionalChinese: "用法：`/delete <序號>` — 按列表序號刪除 cc-connect 會話記錄，Agent transcript 會保留。\n使用 `/list` 查看會話序號。",
+		LangEnglish:            "Usage: `/delete <number>` — remove a cc-connect session by its list number. The Agent transcript is retained.\n`/delete <number> purge` also deletes the Agent transcript (cannot be undone).\nUse `/list` to see session numbers.",
+		LangChinese:            "用法：`/delete <序号>` — 按列表序号删除 cc-connect 会话记录，Agent transcript 会保留。\n`/delete <序号> purge` 同时删除 Agent transcript（不可恢复）。\n使用 `/list` 查看会话序号。",
+		LangTraditionalChinese: "用法：`/delete <序號>` — 按列表序號刪除 cc-connect 會話記錄，Agent transcript 會保留。\n`/delete <序號> purge` 同時刪除 Agent transcript（不可恢復）。\n使用 `/list` 查看會話序號。",
 		LangJapanese:           "使い方：`/delete <番号>` — リスト番号で cc-connect セッションを削除します。Agent transcript は保持されます。\n`/list` で番号を確認できます。",
 		LangSpanish:            "Uso: `/delete <número>` — eliminar una sesión de cc-connect por número. El transcript del Agent se conserva.\nUse `/list` para ver los números.",
 	},
@@ -2613,8 +2613,54 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "请在管理员与机器人的私聊中使用 /auth。不接受转发、引用或带附件的授权消息。",
 	},
 	MsgKey("auth_unsupported"): {
-		LangEnglish: "Remote login currently supports Claude Code projects only.",
-		LangChinese: "远程登录目前仅支持 Claude Code 项目。",
+		LangEnglish: "Remote login is not available for this project's agent yet.",
+		LangChinese: "当前项目的 Agent 暂不支持远程登录。",
+	},
+	MsgKey("mode_unknown"): {
+		LangEnglish:            "❌ Unknown permission mode `%s`; the mode was not changed.",
+		LangChinese:            "❌ 未知的权限模式 `%s`，权限模式未改变。",
+		LangTraditionalChinese: "❌ 未知的權限模式 `%s`，權限模式未改變。",
+	},
+	MsgKey("status_model"): {
+		LangEnglish:            "Model: %s\n",
+		LangChinese:            "模型: %s\n",
+		LangTraditionalChinese: "模型: %s\n",
+		LangJapanese:           "モデル: %s\n",
+		LangSpanish:            "Modelo: %s\n",
+	},
+	MsgKey("status_effort"): {
+		LangEnglish:            "Reasoning effort: %s\n",
+		LangChinese:            "推理强度: %s\n",
+		LangTraditionalChinese: "推理強度: %s\n",
+		LangJapanese:           "推論強度: %s\n",
+		LangSpanish:            "Razonamiento: %s\n",
+	},
+	MsgKey("status_capabilities"): {
+		LangEnglish:            "Agent supports: %s\n",
+		LangChinese:            "Agent 支持: %s\n",
+		LangTraditionalChinese: "Agent 支援: %s\n",
+		LangJapanese:           "エージェント対応: %s\n",
+		LangSpanish:            "El agente admite: %s\n",
+	},
+	MsgKey("delete_purged"): {
+		LangEnglish:            "🗑️ cc-connect session removed: %s. The agent transcript was deleted as well.",
+		LangChinese:            "🗑️ cc-connect 会话记录已删除：%s。Agent transcript 也已删除。",
+		LangTraditionalChinese: "🗑️ cc-connect 會話記錄已刪除：%s。Agent transcript 也已刪除。",
+	},
+	MsgKey("delete_purge_shared"): {
+		LangEnglish:            "🗑️ cc-connect session removed: %s. The agent transcript was kept because another cc-connect session still uses it.",
+		LangChinese:            "🗑️ cc-connect 会话记录已删除：%s。Agent transcript 仍被其他 cc-connect 会话使用，已保留。",
+		LangTraditionalChinese: "🗑️ cc-connect 會話記錄已刪除：%s。Agent transcript 仍被其他 cc-connect 會話使用，已保留。",
+	},
+	MsgKey("delete_purge_failed"): {
+		LangEnglish:            "🗑️ cc-connect session removed: %s, but deleting the agent transcript failed: %v",
+		LangChinese:            "🗑️ cc-connect 会话记录已删除：%s，但删除 Agent transcript 失败：%v",
+		LangTraditionalChinese: "🗑️ cc-connect 會話記錄已刪除：%s，但刪除 Agent transcript 失敗：%v",
+	},
+	MsgKey("delete_purge_unsupported"): {
+		LangEnglish:            "This agent cannot delete its transcripts; use `/delete <number>` to remove only the cc-connect session.",
+		LangChinese:            "当前 Agent 不支持删除 transcript，请用 `/delete <序号>` 只删除 cc-connect 会话记录。",
+		LangTraditionalChinese: "當前 Agent 不支援刪除 transcript，請用 `/delete <序號>` 只刪除 cc-connect 會話記錄。",
 	},
 	MsgKey("auth_busy"): {
 		LangEnglish: "Another login is in progress. Finish it or cancel it from the private chat that started it.",

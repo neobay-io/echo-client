@@ -264,14 +264,16 @@ app_secret = "your-app-secret"
 | **计划模式** | `plan` | Claude 只做规划不执行，审批计划后再执行。 |
 | **YOLO 模式** | `bypassPermissions`（别名: `yolo`）| 所有工具调用自动通过。适用于可信/沙箱环境。 |
 
-**Codex** 模式（对应 `--ask-for-approval`）：
+**Codex** 模式（以 `-c` 配置项传给 `codex exec` / `exec resume`；旧的配置值仍然可用）：
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
-| **建议** | `suggest` | 仅受信命令（ls、cat...）自动执行，其余需确认。 |
-| **自动编辑** | `auto-edit` | 模型自行决定何时请求批准，沙箱保护。 |
-| **全自动** | `full-auto` | 自动通过，工作区沙箱。推荐日常使用。 |
-| **YOLO 模式** | `yolo` | 跳过所有审批和沙箱。 |
+| **默认** | `default`（别名 `suggest`） | Codex 默认设置（`exec` 下为只读沙箱）。 |
+| **接受编辑** | `acceptEdits`（别名 `auto-edit`） | 可在工作区沙箱内编辑和执行命令，不允许越权。 |
+| **自动** | `auto`（别名 `full-auto`） | 工作区沙箱，越权请求由 Codex 自动审核（等同 `--approve-for-me`）。推荐日常使用。 |
+| **YOLO 模式** | `bypassPermissions`（别名 `yolo`） | 跳过所有审批和沙箱。 |
+
+`/model`、`/effort`、`/mode` 只作用于当前聊天会话（重启后保留，`/new` 会沿用），不清空对话上下文，从下一条消息起生效。Echo worker 任务始终使用项目默认值。
 
 **Cursor Agent** 模式（对应 `--force` / `--mode`）：
 
@@ -322,7 +324,7 @@ mode = "default"
 
 # Codex
 [projects.agent.options]
-mode = "full-auto"
+mode = "auto"
 # model = "o3"
 
 # Cursor Agent
@@ -727,7 +729,7 @@ cc-connect daemon uninstall
 /new [名称]            创建新会话
 /list                  列出当前聊天的 cc-connect 会话
 /switch <序号>         切换到列表中的 cc-connect 会话
-/delete <序号>         删除 cc-connect 会话记录（保留 Agent transcript）
+/delete <序号> [purge] 删除 cc-connect 会话记录（保留 Agent transcript；purge 会一并删除）
 /current               查看当前活跃会话
 /history [n]           查看最近 n 条消息（默认 10）
 /provider [list|add|remove|switch] 管理 API Provider
@@ -834,7 +836,7 @@ type = "codex"
 
 [projects.agent.options]
 work_dir = "/path/to/frontend"
-mode = "full-auto"
+mode = "auto"
 
 [[projects.platforms]]
 type = "telegram"

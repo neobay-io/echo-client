@@ -909,26 +909,10 @@ func isEchoReviewerRole(role string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(role)), "review")
 }
 
+// isEchoYoloEquivalentMode reports whether a configured mode skips every
+// approval for agentType, using the shared permission mode table.
 func isEchoYoloEquivalentMode(agentType string, mode string) bool {
-	normalizedAgentType := strings.ToLower(strings.TrimSpace(agentType))
-	normalizedMode := strings.ToLower(strings.TrimSpace(mode))
-	switch normalizedAgentType {
-	case "claudecode":
-		return normalizedMode == "yolo" || normalizedMode == "bypasspermissions"
-	case "codex":
-		return normalizedMode == "yolo"
-	case "qoder":
-		return normalizedMode == "yolo" ||
-			normalizedMode == "bypass" ||
-			normalizedMode == "dangerously-skip-permissions"
-	case "gemini", "opencode", "iflow":
-		return normalizedMode == "yolo" ||
-			normalizedMode == "auto" ||
-			normalizedMode == "force" ||
-			normalizedMode == "bypasspermissions"
-	default:
-		return normalizedMode == "yolo"
-	}
+	return IsBypassPermissionMode(agentType, mode)
 }
 
 func resolveEchoProjectEnabled(proj config.ProjectConfig) (bool, string) {

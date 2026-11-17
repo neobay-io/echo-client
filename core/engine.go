@@ -216,7 +216,7 @@ type Engine struct {
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession AgentSession
-	authStale    bool // guarded by Engine.interactiveMu; retire before the next turn
+	stale        bool // guarded by Engine.interactiveMu; retire the process before the next turn (re-auth, settings change)
 	platform     Platform
 	replyCtx     any
 	mu           sync.Mutex
@@ -947,7 +947,12 @@ func (e *Engine) runCronIsolatedTurn(ctx context.Context, jobID string, job *Cro
 		defer release()
 	}
 
-	finalID, output, runErr := e.runIsolatedCronTurn(ctx, syntheticKey, resumeID, prompt, e.sessionEnv(syntheticKey))
+	// A cron run uses the bound chat's current model / effort / mode.
+	var cronOpts AgentSessionOptions
+	if s := e.sessions.ActiveSession(sessionKey); s != nil {
+		cronOpts = s.Settings()
+	}
+	finalID, output, runErr := e.runIsolatedCronTurn(ctx, syntheticKey, resumeID, prompt, e.sessionEnv(syntheticKey), cronOpts)
 
 	if !job.UsesNewSessionPerRun() && e.cronScheduler != nil {
 		if runErr != nil && resumeID != "" && isResumeFailure(runErr) {
@@ -2730,7 +2735,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	e.interactiveMu.Lock()
 	quietMode := e.defaultQuiet
 	state, ok := e.interactiveStates[sessionKey]
-	if ok && state.authStale {
+	if ok && state.stale {
 		state.mu.Lock()
 		quietMode = state.quiet
 		state.mu.Unlock()
@@ -2774,6 +2779,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		session.AgentSessionID,
 		sessionKey,
 		envVars,
+		session.Settings(),
 	)
 	startElapsed := time.Since(startAt)
 	if err != nil {
@@ -4500,13 +4506,20 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	cur := e.i18n.CurrentLang()
 	langStr := fmt.Sprintf("%s (%s)", string(cur), langDisplayName(cur))
 
-	// Mode (optional)
+	// Model / effort / mode of this chat session, then what the agent supports.
+	activeSession := e.sessions.ActiveSession(msg.SessionKey)
 	var modeStr string
-	if ms, ok := e.agent.(ModeSwitcher); ok {
-		mode := ms.GetMode()
-		if mode != "" {
-			modeStr = e.i18n.Tf(MsgStatusMode, mode)
-		}
+	if model := e.effectiveModel(activeSession); model != "" {
+		modeStr += e.i18n.Tf(MsgKey("status_model"), model)
+	}
+	if level := e.effectiveReasoningLevel(activeSession); level != "" {
+		modeStr += e.i18n.Tf(MsgKey("status_effort"), level)
+	}
+	if mode := e.effectiveMode(activeSession); mode != "" {
+		modeStr += e.i18n.Tf(MsgStatusMode, mode)
+	}
+	if summary := formatCapabilitySummary(CapabilitiesOf(e.agent)); summary != "" {
+		modeStr += e.i18n.Tf(MsgKey("status_capabilities"), summary)
 	}
 
 	// Quiet mode
@@ -4724,7 +4737,52 @@ func (e *Engine) cmdHelp(p Platform, msg *Message) {
 		e.replyWithCard(p, msg.ReplyCtx, e.renderHelpCard())
 		return
 	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHelp))
+	e.reply(p, msg.ReplyCtx, e.helpText())
+}
+
+// helpText is the localized help with commands the current agent cannot run
+// removed, and the permission-mode hint replaced by the agent's own modes.
+func (e *Engine) helpText() string {
+	return filterHelpText(e.i18n.T(MsgHelp), capabilityCommands(CapabilitiesOf(e.agent)), CapabilitiesOf(e.agent).Modes)
+}
+
+// filterHelpText drops "/cmd ..." blocks (blank-line separated) whose command
+// is unsupported and rewrites the trailing "Permission modes" hint.
+func filterHelpText(help string, supported map[string]bool, modes []string) string {
+	blocks := strings.Split(help, "\n\n")
+	out := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		trimmed := strings.TrimSpace(block)
+		if strings.HasPrefix(trimmed, "/") {
+			cmd := strings.TrimPrefix(strings.Fields(trimmed)[0], "/")
+			if ok, gated := supported[cmd]; gated && !ok {
+				continue
+			}
+		}
+		if isPermissionModeHint(trimmed) {
+			if len(modes) == 0 || !supported["mode"] {
+				continue
+			}
+			// Keep the localized label and its colon style (":" or "：").
+			if idx := strings.IndexAny(trimmed, ":："); idx > 0 {
+				sep, _ := utf8.DecodeRuneInString(trimmed[idx:])
+				prefix := trimmed[:idx] + string(sep)
+				if sep == ':' {
+					prefix += " "
+				}
+				block = prefix + strings.Join(modes, " / ")
+			}
+		}
+		out = append(out, block)
+	}
+	return strings.Join(out, "\n\n")
+}
+
+// isPermissionModeHint matches the last help line in every language
+// ("Permission modes: default / edit / plan / yolo").
+func isPermissionModeHint(block string) bool {
+	return !strings.HasPrefix(block, "/") && !strings.Contains(block, "\n") &&
+		strings.Contains(block, "default / edit / plan / yolo")
 }
 
 func (e *Engine) cmdQueue(p Platform, msg *Message, args []string) {
@@ -4880,7 +4938,7 @@ func (e *Engine) promptQueueAttachmentSummary(msg Message) string {
 func (e *Engine) renderHelpCard() *Card {
 	return NewCard().
 		Title("Help", "blue").
-		Markdown(e.i18n.T(MsgHelp)).
+		Markdown(e.helpText()).
 		ButtonsEqual(
 			DefaultBtn("/cron", "nav:/cron"),
 			DefaultBtn("/queue", "nav:/queue"),
@@ -4965,8 +5023,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	current := switcher.GetModel()
-	contextID := e.modelPickerContext()
+	current := e.effectiveModel(e.sessions.ActiveSession(msg.SessionKey))
+	contextID := e.modelPickerContext(msg.SessionKey)
 	snapshot, valid := e.modelPickerSnapshotFor(msg.SessionKey, contextID)
 	reject := func() { e.reply(p, msg.ReplyCtx, "Model selection expired or invalid. Run /models again.") }
 
@@ -4986,7 +5044,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
 			models := switcher.AvailableModels(fetchCtx)
 			cancel()
-			if contextID != e.modelPickerContext() {
+			if contextID != e.modelPickerContext(msg.SessionKey) {
 				reject()
 				return
 			}
@@ -5093,13 +5151,9 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 	delete(e.modelPickers, msg.SessionKey)
 
-	switcher.SetModel(target)
-	e.cleanupInteractiveState(msg.SessionKey)
-
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.AgentSessionID = ""
-	s.ClearHistory()
-	e.sessions.Save()
+	e.applySessionSetting(msg.SessionKey,
+		func(o *AgentSessionOptions) { o.Model = target },
+		func() { switcher.SetModel(target) })
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 }
@@ -5128,7 +5182,7 @@ func containsModelOption(options []ModelOption, name string) bool {
 func (e *Engine) cmdEffort(p Platform, msg *Message, args []string) {
 	switcher, ok := e.agent.(ReasoningLevelSwitcher)
 	if !ok {
-		if strings.EqualFold(e.agent.Name(), "qoder") {
+		if CapabilitiesOf(e.agent).EffortViaModel {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgEffortUseModel))
 			return
 		}
@@ -5137,7 +5191,7 @@ func (e *Engine) cmdEffort(p Platform, msg *Message, args []string) {
 	}
 
 	levels := switcher.AvailableReasoningLevels()
-	current := strings.TrimSpace(switcher.GetReasoningLevel())
+	current := strings.TrimSpace(e.effectiveReasoningLevel(e.sessions.ActiveSession(msg.SessionKey)))
 
 	if len(args) == 0 {
 		var sb strings.Builder
@@ -5203,13 +5257,9 @@ func (e *Engine) cmdEffort(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	switcher.SetReasoningLevel(resolved)
-	e.cleanupInteractiveState(msg.SessionKey)
-
-	s := e.sessions.GetOrCreateActive(msg.SessionKey)
-	s.AgentSessionID = ""
-	s.ClearHistory()
-	e.sessions.Save()
+	e.applySessionSetting(msg.SessionKey,
+		func(o *AgentSessionOptions) { o.ReasoningLevel = resolved },
+		func() { switcher.SetReasoningLevel(resolved) })
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgEffortChanged, resolved))
 }
@@ -5231,7 +5281,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 	}
 
 	if len(args) == 0 {
-		current := switcher.GetMode()
+		current := e.effectiveMode(e.sessions.ActiveSession(msg.SessionKey))
 		modes := switcher.PermissionModes()
 		var sb strings.Builder
 		zhLike := e.i18n.IsZhLike()
@@ -5271,13 +5321,18 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	target := strings.ToLower(args[0])
-	switcher.SetMode(target)
-	newMode := switcher.GetMode()
-
-	e.cleanupInteractiveState(msg.SessionKey)
-
 	modes := switcher.PermissionModes()
+	newMode, ok := resolveModeForSwitcher(e.agent.Name(), switcher, args[0])
+	if !ok {
+		// Unknown values used to fall back to "default" silently.
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgKey("mode_unknown"), args[0])+"\n"+e.modeUsageText(modes))
+		return
+	}
+
+	e.applySessionSetting(msg.SessionKey,
+		func(o *AgentSessionOptions) { o.Mode = newMode },
+		func() { switcher.SetMode(newMode) })
+
 	displayName := newMode
 	zhLike := e.i18n.IsZhLike()
 	for _, m := range modes {
@@ -7877,6 +7932,21 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	// By default the agent transcript is kept; "purge" opts into deleting it.
+	purge := false
+	if last := strings.ToLower(args[len(args)-1]); len(args) > 1 && (last == "purge" || last == "--purge") {
+		purge = true
+		args = args[:len(args)-1]
+	}
+	var deleter SessionDeleter
+	if purge {
+		var ok bool
+		if deleter, ok = e.agent.(SessionDeleter); !ok {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgKey("delete_purge_unsupported")))
+			return
+		}
+	}
+
 	query := strings.TrimSpace(strings.Join(args, " "))
 	matched := matchLocalSession(e.localSessionList(msg.SessionKey), query)
 	if matched == nil {
@@ -7889,7 +7959,8 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	if _, err := e.sessions.DeleteSession(msg.SessionKey, matched.ID); err != nil {
+	removed, err := e.sessions.DeleteSession(msg.SessionKey, matched.ID)
+	if err != nil {
 		if err == errCannotDeleteActiveSession {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDeleteActiveDenied))
 			return
@@ -7898,7 +7969,31 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), localSessionDisplayName(*matched)))
+	name := localSessionDisplayName(*matched)
+	agentSessionID := ""
+	if removed != nil {
+		removed.mu.Lock()
+		agentSessionID = strings.TrimSpace(removed.AgentSessionID)
+		removed.mu.Unlock()
+	}
+	if !purge || agentSessionID == "" {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgDeleteSuccess), name))
+		return
+	}
+	// Another chat (or /attach) may still resume this transcript.
+	if e.sessions.HasAgentSessionReference(agentSessionID) {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgKey("delete_purge_shared"), name))
+		return
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
+	defer cancel()
+	if err := deleter.DeleteSession(ctx, agentSessionID); err != nil {
+		slog.Warn("delete: agent transcript purge failed", "agent", e.agent.Name(), "agent_session", agentSessionID, "error", err)
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgKey("delete_purge_failed"), name, err))
+		return
+	}
+	slog.Info("delete: agent transcript purged", "agent", e.agent.Name(), "agent_session", agentSessionID)
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgKey("delete_purged"), name))
 }
 
 func (e *Engine) deleteSessionByID(sessionKey, id string) string {
@@ -8764,7 +8859,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	agentSessionID := session.AgentSessionID
 	session.mu.Unlock()
 
-	agentSession, err := e.startAgentSession(ctx, agentSessionID, relaySessionKey, envVars)
+	agentSession, err := e.startAgentSession(ctx, agentSessionID, relaySessionKey, envVars, session.Settings())
 	if err != nil {
 		return "", fmt.Errorf("start relay session: %w", err)
 	}

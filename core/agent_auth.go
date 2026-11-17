@@ -304,7 +304,7 @@ func (e *Engine) RefreshInteractiveAuth() {
 	// Do not stop an in-flight turn. The next turn retires its cached process
 	// before sending, under the same startup serialization used by queues.
 	for _, state := range e.interactiveStates {
-		state.authStale = true
+		state.stale = true
 	}
 }
 
@@ -359,7 +359,7 @@ func (e *Engine) cmdAuth(p Platform, msg *Message, args []string) {
 		reply("auth_private")
 		return
 	}
-	if e.agent == nil || e.agent.Name() != "claudecode" {
+	if caps := CapabilitiesOf(e.agent); !caps.Auth.Login && !caps.Auth.Status {
 		reply("auth_unsupported")
 		return
 	}

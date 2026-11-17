@@ -112,47 +112,8 @@ func checkConfigFile(configPath string) []DoctorCheckResult {
 	}}
 }
 
-var agentBinMap = map[string]string{
-	"claudecode": "claude",
-	"cursor":     "agent",
-	"codex":      "codex",
-	"gemini":     "gemini",
-	"iflow":      "iflow",
-	"opencode":   "opencode",
-	"qoder":      "qodercli",
-}
-
 func checkAgentBinary(ctx context.Context, agent Agent) []DoctorCheckResult {
-	name := agent.Name()
-	bin, ok := agentBinMap[name]
-	if !ok {
-		bin = name
-	}
-
-	path, err := exec.LookPath(bin)
-	if err != nil {
-		return []DoctorCheckResult{{
-			Name:   fmt.Sprintf("Agent CLI (%s)", bin),
-			Status: DoctorFail,
-			Detail: "not found in PATH",
-		}}
-	}
-
-	detail := path
-	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(tctx, bin, "--version").Output(); err == nil {
-		ver := strings.TrimSpace(string(out))
-		if len(ver) > 80 {
-			ver = ver[:80]
-		}
-		detail = ver
-	}
-	return []DoctorCheckResult{{
-		Name:   fmt.Sprintf("Agent CLI (%s)", bin),
-		Status: DoctorPass,
-		Detail: detail,
-	}}
+	return []DoctorCheckResult{AgentCLIDoctorResult(InspectAgentCLI(ctx, agent.Name()))}
 }
 
 func checkAgentAuth(ctx context.Context, agent Agent) []DoctorCheckResult {

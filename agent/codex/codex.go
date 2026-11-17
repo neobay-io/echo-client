@@ -25,19 +25,23 @@ func init() {
 
 // Agent drives OpenAI Codex CLI using `codex exec --json`.
 //
-// Modes (maps to codex exec flags):
-//   - "suggest":   default, no special flags (safe commands only)
-//   - "auto-edit": --full-auto (sandbox-protected auto execution)
-//   - "full-auto": --full-auto (sandbox-protected auto execution)
-//   - "yolo":      --dangerously-bypass-approvals-and-sandbox
+// Modes use the canonical names from core (legacy aliases in parentheses).
+// `codex exec resume` rejects --sandbox / --approve-for-me, so everything is
+// passed as -c overrides that both `exec` and `exec resume` accept:
+//   - "default" (suggest): no flags; Codex defaults apply
+//   - "acceptEdits" (auto-edit): sandbox_mode=workspace-write, approval_policy=never
+//   - "auto" (full-auto): what --approve-for-me sets: workspace-write sandbox,
+//     approval_policy=on-request, approvals_reviewer=auto_review
+//   - "bypassPermissions" (yolo): --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
 	workDir        string
 	model          string
 	reasoningLevel string
-	mode           string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	mode           string // canonical: "default" | "acceptEdits" | "auto" | "bypassPermissions"
 	providers      []core.ProviderConfig
 	activeIdx      int // -1 = no provider set
 	sessionEnv     []string
+	sessionOpts    core.AgentSessionOptions // per-chat overrides for the next StartSession
 	modelRunner    codexModelRunner
 	mu             sync.Mutex
 }
@@ -68,17 +72,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	}, nil
 }
 
+// normalizeMode maps config values and legacy aliases (suggest, auto-edit,
+// full-auto, yolo) to canonical mode keys; unknown values become "default".
 func normalizeMode(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "auto-edit", "autoedit", "auto_edit", "edit":
-		return "auto-edit"
-	case "full-auto", "fullauto", "full_auto", "auto":
-		return "full-auto"
-	case "yolo", "bypass", "dangerously-bypass":
-		return "yolo"
-	default:
-		return "suggest"
-	}
+	return core.NormalizePermissionMode("codex", raw)
 }
 
 func normalizeReasoningLevel(raw string) string {
@@ -393,23 +390,48 @@ func (a *Agent) SetSessionEnv(env []string) {
 	a.sessionEnv = env
 }
 
+// SetSessionOptions sets the chat session's overrides for the next
+// StartSession (core.SessionOptionsInjector).
+func (a *Agent) SetSessionOptions(opts core.AgentSessionOptions) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionOpts = opts
+}
+
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
-	mode := a.mode
-	model := a.model
-	reasoningLevel := a.reasoningLevel
+	model, reasoningLevel, mode := a.startSettingsLocked()
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	workDir := core.SessionWorkDirFromEnv(extraEnv, a.workDir)
 	extraDirs := core.SessionExtraDirsFromEnv(extraEnv)
+	a.mu.Unlock()
+
+	return newCodexSession(ctx, workDir, model, reasoningLevel, mode, sessionID, extraDirs, extraEnv)
+}
+
+// startSettingsLocked resolves the model, reasoning level and permission mode
+// for the next session: project defaults, then the active provider's model,
+// then the chat session's explicit /model, /effort or /mode choice.
+// Caller holds a.mu.
+func (a *Agent) startSettingsLocked() (model, reasoningLevel, mode string) {
+	model, reasoningLevel, mode = a.model, a.reasoningLevel, a.mode
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
 		}
 	}
-	a.mu.Unlock()
-
-	return newCodexSession(ctx, workDir, model, reasoningLevel, mode, sessionID, extraDirs, extraEnv)
+	opts := a.sessionOpts
+	if opts.Model != "" {
+		model = opts.Model
+	}
+	if opts.ReasoningLevel != "" {
+		reasoningLevel = normalizeReasoningLevel(opts.ReasoningLevel)
+	}
+	if opts.Mode != "" {
+		mode = normalizeMode(opts.Mode)
+	}
+	return model, reasoningLevel, mode
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -564,9 +586,9 @@ func (a *Agent) providerEnvLocked() []string {
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "suggest", Name: "Suggest", NameZh: "建议", Desc: "Ask permission for every tool call", DescZh: "每次工具调用都需确认"},
-		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑", Desc: "Auto-approve file edits, ask for shell commands", DescZh: "自动允许文件编辑，Shell 命令需确认"},
-		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动", Desc: "Auto-approve with workspace sandbox", DescZh: "自动通过（工作区沙箱）"},
-		{Key: "yolo", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},
+		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Codex defaults (read-only sandbox in exec)", DescZh: "Codex 默认设置（exec 下为只读沙箱）"},
+		{Key: "acceptEdits", Name: "Accept Edits", NameZh: "接受编辑", Desc: "Edit and run commands inside the workspace sandbox; no escalation", DescZh: "可在工作区沙箱内编辑和执行命令，不允许越权"},
+		{Key: "auto", Name: "Auto", NameZh: "自动模式", Desc: "Workspace sandbox; escalation requests reviewed automatically (--approve-for-me)", DescZh: "工作区沙箱，越权请求由 Codex 自动审核（--approve-for-me）"},
+		{Key: "bypassPermissions", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},
 	}
 }

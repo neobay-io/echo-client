@@ -79,6 +79,9 @@ func main() {
 		case "daemon":
 			runDaemon(os.Args[2:])
 			return
+		case "doctor":
+			runDoctor(os.Args[2:])
+			return
 		}
 	}
 
@@ -817,6 +820,9 @@ Commands:
     list             List providers (--project)
     remove           Remove a provider (--project, --name)
     import           Import providers from cc-switch
+
+  doctor             Show agent CLI versions, resolved paths and duplicate installs
+                     ([agent-type...], default: claudecode codex antigravity kimi gemini qoder)
 
   update             Check for updates and upgrade the binary (--pre for beta)
   check-update       Check if a newer version is available

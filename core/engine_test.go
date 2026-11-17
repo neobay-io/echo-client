@@ -1206,9 +1206,15 @@ func TestCmdEffort_FeishuPickerAndSelection(t *testing.T) {
 	}
 }
 
+type effortViaModelAgent struct{ namedStubAgent }
+
+func (a *effortViaModelAgent) Capabilities() AgentCapabilities {
+	return AgentCapabilities{EffortViaModel: true}
+}
+
 func TestCmdEffort_QoderSuggestsModel(t *testing.T) {
 	p := &stubButtonPlatform{n: "feishu"}
-	e := NewEngine("qoder", &namedStubAgent{name: "qoder"}, []Platform{p}, "", LangEnglish)
+	e := NewEngine("qoder", &effortViaModelAgent{namedStubAgent{name: "qoder"}}, []Platform{p}, "", LangEnglish)
 
 	e.cmdEffort(p, &Message{SessionKey: "feishu:chat:user", ReplyCtx: "ctx"}, nil)
 

@@ -135,7 +135,7 @@ mode = "default"
 # allowed_tools = ["Read", "Grep", "Glob"]  # optional: pre-approve specific tools
 
 # --- Codex mode options ---
-# "suggest" (default), "auto-edit", "full-auto", "yolo"
+# "default", "acceptEdits", "auto", "bypassPermissions" (legacy: suggest, auto-edit, full-auto, yolo)
 # model = "o3"  # optional: specify model
 
 # --- Qoder CLI mode options ---
@@ -510,7 +510,7 @@ type = "codex"
 
 [projects.agent.options]
 work_dir = "/path/to/frontend"
-mode = "full-auto"
+mode = "auto"
 
 [[projects.platforms]]
 type = "telegram"

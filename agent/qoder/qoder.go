@@ -87,6 +87,12 @@ func parseThinkingBudget(raw any) int {
 
 func (a *Agent) Name() string { return "qoder" }
 
+// Capabilities: Qoder expresses reasoning depth through model tiers, so
+// /effort points users to /model.
+func (a *Agent) Capabilities() core.AgentCapabilities {
+	return core.AgentCapabilities{EffortViaModel: true}
+}
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

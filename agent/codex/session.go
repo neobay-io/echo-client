@@ -99,12 +99,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 		args = []string{"exec", "--json", "--skip-git-repo-check"}
 	}
 
-	switch cs.mode {
-	case "auto-edit", "full-auto":
-		args = append(args, "--full-auto")
-	case "yolo":
-		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-	}
+	args = append(args, codexModeArgs(cs.mode)...)
 
 	if cs.model != "" {
 		args = append(args, "--model", cs.model)
@@ -614,4 +609,29 @@ func (cs *codexSession) killRunningProcessGroup() error {
 		return nil
 	}
 	return killCommandProcessGroup(cmd, pgid)
+}
+
+// codexModeArgs maps a canonical permission mode to `codex exec` arguments.
+// --full-auto was removed from the CLI and `exec resume` rejects --sandbox and
+// --approve-for-me, so sandbox and approval settings go through -c overrides,
+// which both `exec` and `exec resume` accept.
+func codexModeArgs(mode string) []string {
+	switch normalizeMode(mode) {
+	case "acceptEdits":
+		return []string{
+			"-c", `sandbox_mode="workspace-write"`,
+			"-c", `approval_policy="never"`,
+		}
+	case "auto":
+		// Equivalent of --approve-for-me.
+		return []string{
+			"-c", `sandbox_mode="workspace-write"`,
+			"-c", `approval_policy="on-request"`,
+			"-c", `approvals_reviewer="auto_review"`,
+		}
+	case "bypassPermissions":
+		return []string{"--dangerously-bypass-approvals-and-sandbox"}
+	default:
+		return nil
+	}
 }

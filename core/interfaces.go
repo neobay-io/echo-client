@@ -41,6 +41,28 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// AgentSessionOptions are per-chat-session overrides applied when an agent
+// session starts. Empty fields fall back to the agent's configured defaults.
+type AgentSessionOptions struct {
+	Model          string `json:"model,omitempty"`
+	ReasoningLevel string `json:"reasoning_level,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+}
+
+// IsZero reports whether no override is set.
+func (o AgentSessionOptions) IsZero() bool {
+	return o.Model == "" && o.ReasoningLevel == "" && o.Mode == ""
+}
+
+// SessionOptionsInjector is implemented by agents that honor per-session
+// model / reasoning / mode overrides. Like SessionEnvInjector, the engine
+// calls it under agentStartMu immediately before every StartSession, passing
+// zero options for sessions that use the project defaults. Agents that do not
+// implement it keep the legacy project-wide behavior of /model, /effort, /mode.
+type SessionOptionsInjector interface {
+	SetSessionOptions(opts AgentSessionOptions)
+}
+
 // AgentSystemPrompt returns the system prompt fragment that informs agents about
 // echo-client capabilities (cron scheduling, etc.).
 // The prompt is designed to be appended to the agent's existing system prompt.

@@ -146,3 +146,13 @@ func TestNew_WarnsWhenReasoningOptionsAreIgnored(t *testing.T) {
 		t.Fatalf("logs = %q, want thinking_budget warning", logs)
 	}
 }
+
+func TestQoderDeclaresEffortViaModel(t *testing.T) {
+	a := &Agent{}
+	if errs := core.ValidateCapabilities(a); len(errs) != 0 {
+		t.Fatalf("capabilities: %v", errs)
+	}
+	if !core.CapabilitiesOf(a).EffortViaModel {
+		t.Fatal("qoder should point /effort to /model")
+	}
+}

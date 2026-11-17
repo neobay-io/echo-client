@@ -802,13 +802,13 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# mode = "default"  # "default" | "acceptEdits" | "auto" | "bypassPermissions"
 #
-# Mode options / 模式说明:
-# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
-# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
-# - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
-# - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
+# Mode options / 模式说明 (legacy values suggest / auto-edit / full-auto / yolo still work):
+# - "default":           Codex defaults, read-only sandbox in exec (alias: suggest) / Codex 默认设置，exec 下为只读沙箱
+# - "acceptEdits":       edit and run commands inside the workspace sandbox, no escalation (alias: auto-edit) / 工作区沙箱内可编辑和执行，不允许越权
+# - "auto":              workspace sandbox, escalations auto-reviewed like --approve-for-me (alias: full-auto) / 工作区沙箱，越权请求自动审核
+# - "bypassPermissions": bypass all approvals and sandbox, dangerous (alias: yolo) / 跳过所有审批和沙箱（危险）
 #
 # Optional: specify a model / 可选：指定模型
 # model = "o3"
