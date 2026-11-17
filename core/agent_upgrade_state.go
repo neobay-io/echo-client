@@ -82,6 +82,8 @@ func (m *AgentUpgradeManager) SetNotifier(fn func(project, sessionKey, text stri
 }
 
 func (m *AgentUpgradeManager) saveState() {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	m.mu.Lock()
 	path := m.statePath
 	state := agentUpgradeState{

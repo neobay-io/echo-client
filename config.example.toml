@@ -168,7 +168,7 @@ level = "info" # debug, info, warn, error
 # policy = "idle_only"         # off | check_only | idle_only
 # interval_secs = 86400        # 24h; the schedule is kept in <data_dir>/agent-upgrade-state.json, so restarts do not reset it
 # timeout_secs = 1200
-# window = "02:00-06:00"       # optional local time range for automatic runs (may wrap midnight)
+# window = "02:00-06:00"       # optional local time range for automatic runs (may wrap midnight); a malformed value fails config loading
 #
 # Each target's CLI is located on the service's own PATH (the copy agents
 # actually run). Leave version_command / update_command unset to use the
@@ -951,8 +951,9 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# mode = "bypassPermissions"  # the only mode: `kimi -p` runs every tool without asking
-#                             # 唯一可用的模式：`kimi -p` 不经确认执行所有工具
+# mode = "bypassPermissions"  # required, and the only mode: `kimi -p` runs every tool without asking;
+#                             # echo-client refuses to start Kimi without it
+#                             # 必填且唯一的模式：`kimi -p` 不经确认执行所有工具；不写就不会启动
 #                             # (plan/default/auto need ACP, planned) / 其他模式需要 ACP（规划中）
 # model = "kimi-code/k3"      # optional; /model lists the aliases from `kimi provider list`
 # reasoning_level = "high"    # optional; low | high | max, per model (passed as KIMI_MODEL_THINKING_EFFORT)

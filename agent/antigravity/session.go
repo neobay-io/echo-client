@@ -41,6 +41,9 @@ type antigravitySession struct {
 	wg               sync.WaitGroup
 	alive            atomic.Bool
 	permissionBridge *agyPermissionBridge
+	// startMu orders a Send's admission (alive check + wg.Add) against Close,
+	// so Close never closes events while a turn it did not wait for runs.
+	startMu sync.Mutex
 }
 
 func newAntigravitySession(ctx context.Context, cfg sessionConfig, resumeID string) (*antigravitySession, error) {
@@ -104,10 +107,22 @@ func (as *antigravitySession) buildArgs(prompt string) []string {
 }
 
 func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	as.startMu.Lock()
 	if !as.alive.Load() {
+		as.startMu.Unlock()
 		return fmt.Errorf("session is closed")
 	}
+	as.wg.Add(1)
+	as.startMu.Unlock()
+
 	imagePaths := core.SaveImagesToDisk(as.cfg.workDir, images)
+	started := false
+	defer func() {
+		if !started {
+			removeFiles(imagePaths)
+			as.wg.Done()
+		}
+	}()
 	filePaths := core.SaveFilesToDisk(as.cfg.workDir, files)
 	if strings.TrimSpace(prompt) == "" && len(imagePaths) > 0 {
 		prompt = "Please analyze the attached image(s)."
@@ -125,6 +140,7 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 	args := as.buildArgs(prompt)
 	slog.Debug("antigravitySession: launching", "resume", as.CurrentSessionID() != "", "args", core.RedactArgs(args))
 	cmd := exec.CommandContext(ctx, as.cfg.cmd, args...)
+	core.UseProcessGroup(cmd) // stopping the turn also stops the commands its tools started
 	cmd.WaitDelay = time.Second
 	cmd.Dir = as.cfg.workDir
 	env := core.MergeEnv(os.Environ(), as.cfg.extraEnv)
@@ -146,19 +162,26 @@ func (as *antigravitySession) Send(prompt string, images []core.ImageAttachment,
 		return fmt.Errorf("antigravitySession: start: %w", err)
 	}
 
-	as.wg.Add(1)
+	started = true
+
 	go func() {
+		defer as.wg.Done()
 		defer cancel()
-		as.readLoop(ctx, cmd, stdout, &stderrBuf)
-		for _, path := range imagePaths {
-			_ = os.Remove(path)
-		}
+		defer removeFiles(imagePaths)
+		as.readLoop(ctx, cancel, cmd, stdout, &stderrBuf)
 	}()
 	return nil
 }
 
-func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	defer as.wg.Done()
+func removeFiles(paths []string) {
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
+}
+
+// readLoop streams one turn and ends it with exactly one terminal event: an
+// error or a result. A closed session gets none.
+func (as *antigravitySession) readLoop(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	go func() {
 		<-ctx.Done()
 		_ = stdout.Close()
@@ -184,6 +207,11 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		}
 	}
 	scanErr := scanner.Err()
+	if scanErr != nil {
+		// Nothing drains stdout any more; a CLI still writing would block on
+		// the full pipe and the turn would never end.
+		cancel()
+	}
 	waitErr := cmd.Wait()
 
 	if as.ctx.Err() != nil {
@@ -195,13 +223,13 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		failure = fmt.Sprintf("agy turn timed out after %s", as.cfg.timeout)
 	case parser.failure != "":
 		failure = parser.failure
+	case scanErr != nil:
+		failure = "read stdout: " + scanErr.Error()
 	case waitErr != nil:
 		failure = strings.TrimSpace(stderrBuf.String())
 		if failure == "" {
 			failure = waitErr.Error()
 		}
-	case scanErr != nil:
-		failure = "read stdout: " + scanErr.Error()
 	}
 	if failure != "" {
 		slog.Error("antigravitySession: turn failed", "error", waitErr, "detail", truncate(failure, 500))
@@ -238,7 +266,9 @@ func (as *antigravitySession) CurrentSessionID() string {
 func (as *antigravitySession) Alive() bool { return as.alive.Load() }
 
 func (as *antigravitySession) Close() error {
+	as.startMu.Lock()
 	as.alive.Store(false)
+	as.startMu.Unlock()
 	as.cancel()
 	if as.permissionBridge != nil {
 		as.permissionBridge.Close()

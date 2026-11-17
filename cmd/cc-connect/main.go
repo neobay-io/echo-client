@@ -554,10 +554,11 @@ func main() {
 			startErrors = append(startErrors, err)
 		}
 	}
-	// Only exit if ALL engines failed to start
+	// Engines whose platforms all failed keep retrying them in the background
+	// (Engine.Start), so stay up: exiting here would cancel those retries and
+	// turn a network blip at boot into an outage.
 	if len(startErrors) > 0 && len(startErrors) == len(engines) {
-		slog.Error("all engines failed to start, exiting")
-		os.Exit(1)
+		slog.Error("no platform could start yet; retrying in the background")
 	}
 
 	if cronSched != nil {

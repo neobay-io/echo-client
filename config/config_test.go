@@ -669,3 +669,18 @@ type = "codex"
 [[projects.platforms]]
 type = "telegram"
 `
+
+// Review finding 9: a malformed window fails at load time instead of lifting
+// the restriction.
+func TestValidateUpgradeWindow(t *testing.T) {
+	for _, ok := range []string{"", "02:00-06:00", "22:00-06:00", " 9:30 - 17:00 "} {
+		if err := validateUpgradeWindow(ok); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"25:00-06:00", "02:00", "02:00-02:00", "2am-6am", "02:00-06:61"} {
+		if err := validateUpgradeWindow(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

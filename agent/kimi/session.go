@@ -41,6 +41,9 @@ type kimiSession struct {
 	wg        sync.WaitGroup
 	alive     atomic.Bool
 	closeOnce sync.Once
+	// startMu orders a Send's admission (alive check + wg.Add) against Close,
+	// so Close never closes events while a turn it did not wait for runs.
+	startMu sync.Mutex
 
 	pendingMsgs []string // assistant text not yet known to be final
 }
@@ -89,11 +92,23 @@ func (ks *kimiSession) buildEnv() []string {
 	return core.MergeEnv(os.Environ(), extra)
 }
 
-func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) (err error) {
+	ks.startMu.Lock()
 	if !ks.alive.Load() {
+		ks.startMu.Unlock()
 		return fmt.Errorf("session is closed")
 	}
+	ks.wg.Add(1)
+	ks.startMu.Unlock()
+
 	imagePaths := core.SaveImagesToDisk(ks.cfg.workDir, images)
+	started := false
+	defer func() {
+		if !started {
+			removeFiles(imagePaths)
+			ks.wg.Done()
+		}
+	}()
 	filePaths := core.SaveFilesToDisk(ks.cfg.workDir, files)
 	if strings.TrimSpace(prompt) == "" && len(imagePaths) > 0 {
 		prompt = "Please analyze the attached image(s)."
@@ -111,6 +126,7 @@ func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files 
 	args := ks.buildArgs(prompt)
 	slog.Debug("kimiSession: launching", "resume", ks.CurrentSessionID() != "", "args", core.RedactArgs(args))
 	cmd := exec.CommandContext(ctx, ks.cfg.cmd, args...)
+	core.UseProcessGroup(cmd) // stopping the turn also stops the commands its tools started
 	cmd.WaitDelay = time.Second
 	cmd.Dir = ks.cfg.workDir
 	cmd.Env = ks.buildEnv()
@@ -126,20 +142,26 @@ func (ks *kimiSession) Send(prompt string, images []core.ImageAttachment, files 
 		cancel()
 		return fmt.Errorf("kimiSession: start: %w", err)
 	}
+	started = true
 
-	ks.wg.Add(1)
 	go func() {
+		defer ks.wg.Done()
 		defer cancel()
-		ks.readLoop(ctx, cmd, stdout, &stderrBuf)
-		for _, path := range imagePaths {
-			_ = os.Remove(path)
-		}
+		defer removeFiles(imagePaths)
+		ks.readLoop(ctx, cancel, cmd, stdout, &stderrBuf)
 	}()
 	return nil
 }
 
-func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	defer ks.wg.Done()
+func removeFiles(paths []string) {
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
+}
+
+// readLoop streams one turn and ends it with exactly one terminal event: an
+// error or a result. A closed session gets none.
+func (ks *kimiSession) readLoop(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	go func() {
 		<-ctx.Done()
 		_ = stdout.Close()
@@ -154,31 +176,37 @@ func (ks *kimiSession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.Re
 		}
 		var raw map[string]any
 		if err := json.Unmarshal(line, &raw); err != nil {
-			slog.Debug("kimiSession: non-JSON line", "line", truncate(string(line), 200))
+			slog.Debug("kimiSession: non-JSON line", "len", len(line))
 			continue
 		}
 		ks.handleEvent(raw)
 	}
 	scanErr := scanner.Err()
-
-	// Wait for the process before the terminal event so the engine never
-	// sees an error after the turn's result.
-	waitErr := cmd.Wait()
-	if scanErr != nil && ctx.Err() == nil {
-		ks.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)})
+	if scanErr != nil {
+		// Nothing drains stdout any more; a CLI still writing would block on
+		// the full pipe and the turn would never end.
+		cancel()
 	}
-	if waitErr != nil {
-		msg := strings.TrimSpace(stderrBuf.String())
-		switch {
-		case ctx.Err() == context.DeadlineExceeded:
-			msg = fmt.Sprintf("kimi turn timed out after %s", ks.cfg.timeout)
-		case msg == "":
-			msg = waitErr.Error()
+	waitErr := cmd.Wait()
+
+	if ks.ctx.Err() != nil {
+		return // closed
+	}
+	var failure string
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		failure = fmt.Sprintf("kimi turn timed out after %s", ks.cfg.timeout)
+	case scanErr != nil:
+		failure = "read stdout: " + scanErr.Error()
+	case waitErr != nil:
+		failure = strings.TrimSpace(stderrBuf.String())
+		if failure == "" {
+			failure = waitErr.Error()
 		}
-		if ks.ctx.Err() == nil {
-			slog.Error("kimiSession: process failed", "error", waitErr, "stderr", truncate(msg, 500))
-			ks.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", msg)})
-		}
+	}
+	if failure != "" {
+		slog.Error("kimiSession: turn failed", "error", waitErr, "detail", truncate(failure, 500))
+		ks.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", failure)})
 		return
 	}
 	ks.flushPendingAsText()
@@ -313,7 +341,9 @@ func (ks *kimiSession) CurrentSessionID() string {
 func (ks *kimiSession) Alive() bool { return ks.alive.Load() }
 
 func (ks *kimiSession) Close() error {
+	ks.startMu.Lock()
 	ks.alive.Store(false)
+	ks.startMu.Unlock()
 	ks.cancel()
 	done := make(chan struct{})
 	go func() {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -425,6 +426,9 @@ func (c *Config) validate() error {
 	if c.AgentUpdates.IntervalSecs < 0 {
 		return fmt.Errorf("config: agent_updates.interval_secs must be >= 0")
 	}
+	if err := validateUpgradeWindow(c.AgentUpdates.Window); err != nil {
+		return fmt.Errorf("config: agent_updates.window: %w", err)
+	}
 	if c.AgentUpdates.Policy != "" {
 		switch strings.ToLower(strings.TrimSpace(c.AgentUpdates.Policy)) {
 		case "off", "check_only", "idle_only":
@@ -823,4 +827,30 @@ func GetProjectProviders(projectName string) ([]ProviderConfig, string, error) {
 		}
 	}
 	return nil, "", fmt.Errorf("project %q not found", projectName)
+}
+
+// validateUpgradeWindow checks a local "HH:MM-HH:MM" range (it may wrap
+// midnight). An empty window means no restriction. It mirrors the scheduler's
+// parser so a typo fails at load time instead of lifting the restriction.
+func validateUpgradeWindow(window string) error {
+	window = strings.TrimSpace(window)
+	if window == "" {
+		return nil
+	}
+	from, to, ok := strings.Cut(window, "-")
+	if !ok {
+		return fmt.Errorf("%q: want HH:MM-HH:MM", window)
+	}
+	start, err := time.Parse("15:04", strings.TrimSpace(from))
+	if err != nil {
+		return fmt.Errorf("%q: bad start time", window)
+	}
+	end, err := time.Parse("15:04", strings.TrimSpace(to))
+	if err != nil {
+		return fmt.Errorf("%q: bad end time", window)
+	}
+	if start.Equal(end) {
+		return fmt.Errorf("%q is empty", window)
+	}
+	return nil
 }

@@ -102,6 +102,14 @@ func applyInstallRoute(name string, target AgentUpgradeTargetConfig, info AgentC
 	if target.UpdateCommandSet || target.Strategy == "custom" {
 		return target, ""
 	}
+	// The route picks the command. It may switch between the two upgrading
+	// strategies, but never turns observe or disabled into an upgrade.
+	setStrategy := func(strategy string) {
+		switch target.Strategy {
+		case "", "builtin", "package_manager":
+			target.Strategy = strategy
+		}
+	}
 	switch name {
 	case "codex":
 		switch route {
@@ -110,12 +118,12 @@ func applyInstallRoute(name string, target AgentUpgradeTargetConfig, info AgentC
 				return target, "pin_version is not supported for the standalone codex install"
 			}
 			target.UpdateCommand = codexStandaloneInstallCommand
-			target.Strategy = "builtin"
+			setStrategy("builtin")
 		case installRouteBrew:
 			target.UpdateCommand = "brew upgrade --cask codex"
-			target.Strategy = "package_manager"
+			setStrategy("package_manager")
 		case installRouteNPM:
-			target.Strategy = "package_manager"
+			setStrategy("package_manager")
 		}
 	case "gemini":
 		if route == installRouteBrew && target.Strategy == "package_manager" {
@@ -124,7 +132,7 @@ func applyInstallRoute(name string, target AgentUpgradeTargetConfig, info AgentC
 	case "kimi":
 		if route == installRouteNPM {
 			target.UpdateCommand = "npm install -g @moonshot-ai/kimi-code@latest"
-			target.Strategy = "package_manager"
+			setStrategy("package_manager")
 			break
 		}
 		fallthrough

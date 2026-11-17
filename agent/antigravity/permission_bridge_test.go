@@ -105,7 +105,7 @@ func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan
 	if event.RequestID == "" || event.ToolName != "run_command" {
 		t.Fatalf("event = %#v, want run_command permission request", event)
 	}
-	if event.ToolInput != "touch /tmp/permission-test" {
+	if event.ToolInput != "touch /tmp/permission-test\n(in /tmp)" {
 		t.Fatalf("ToolInput = %q", event.ToolInput)
 	}
 

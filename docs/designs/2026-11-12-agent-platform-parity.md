@@ -339,6 +339,16 @@ Echo 侧（独立仓库，单独 PR）：
 - **顺带修复**：Codex、Kimi、agy 在每轮提示里附带的“选项按钮”说明会出现在 `/list` 摘要和历史里（Codex 一直如此）；现在统一用 `core.StripInteractionOptions` 去掉。Kimi 和 agy 把这段说明放在用户消息之后，因为 agy 只保存消息开头的一小段预览。
 - **尚未做**：两个 agent 的轮内插入、热切换、Kimi 的其他模式都等 P6（ACP）；agy 会话历史（`/history`）需要解析 protobuf，没做；聊天里的卡片和按钮还需要在飞书 / Telegram 上手动过一遍。
 
+**第二轮 review（2026-11-17，Codex + Kimi Code，范围 `adf799f7..abe2bb9c`）**：16 个问题全部修复，主要行为变化：
+
+- Kimi 必须在配置里明确写 `mode = "bypassPermissions"`，否则不启动；聊天会话里存着、但当前 agent 不提供的模式（比如换 agent 之前存的 `plan`）既不生效也不在 `/status` 里显示。
+- Kimi、agy 的 `/stop`、超时和关闭会杀掉整个进程组（工具起的命令一起停）；`Send` 与 `Close` 并发不再可能 panic；每轮只有一个结束事件；输出读取出错时结束这一轮而不是卡住；启动失败时删除已保存的图片；日志里的提示内容只保留长度。
+- agy 审批卡片显示命令所在目录。
+- relay 每轮结束都关闭 agent 会话，取消时立即返回；Echo 任务、cron、relay 启动 agent 前会等待正在进行的升级。
+- 升级器：配置为 `observe` / `disabled` 的目标不会再被安装路线改成升级；拿不到跨进程锁就跳过；状态文件按顺序保存；Homebrew 装的 Codex 设置 `pin_version` 会被拒绝而不是改用 npm；`window` 写错在加载配置时报错，运行中遇到也会暂停自动升级。
+- 所有平台都起不来时服务继续运行并在后台重试；第一次启动平台的过程中关闭服务，平台不会在关闭后又跑起来。
+- 未处理：`go test -race ./core` 有 25 个测试报数据竞争，修复前就存在（多数在测试桩里，`core/job.go` 有一处在生产代码中）。
+
 ### P2 通用远程登录（约 3 天）
 
 | ID | 任务 | 依赖 | 验收 |

@@ -407,3 +407,36 @@ func TestNextPlatformRetryDelayCapsAtMax(t *testing.T) {
 		}
 	}
 }
+
+// Review finding 16: Stop during a platform's first Start (not a retry) must
+// not leave it running once that Start returns.
+func TestEngineStopDuringInitialStartStopsPlatformWhenStartReturns(t *testing.T) {
+	gate := make(chan struct{})
+	slow := &flakyPlatform{name: "telegram", gate: gate, gateCall: 1, entered: make(chan int, 4)}
+	e := newPlatformRetryTestEngine(slow)
+	e.platformRetryStopWait = 20 * time.Millisecond
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- e.Start() }()
+	waitForStartCall(t, slow.entered, 1) // first Start is blocked
+
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop() = %v", err)
+	}
+	if got := slow.snapshot().stopCalls; got != 0 {
+		t.Fatalf("Stop called %d times while Start was in flight, want 0", got)
+	}
+	close(gate) // the first Start now succeeds, after the engine stopped
+	select {
+	case <-startDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Engine.Start did not return")
+	}
+	got := slow.snapshot()
+	if got.stopCalls != 1 || got.running || got.registered != 0 {
+		t.Fatalf("after late first start: stop calls %d, running %v, registered %d; want 1, false, 0", got.stopCalls, got.running, got.registered)
+	}
+	if e.platformRunning(0) {
+		t.Fatal("platformRunning = true for a platform that came up after Stop")
+	}
+}

@@ -306,7 +306,7 @@ app_secret = "your-app-secret"
 | **自动模式** | `auto` | `--mode auto`：由 agy 自己审批。 |
 | **YOLO** | `bypassPermissions`（别名 `yolo`）| `--dangerously-skip-permissions`。 |
 
-**Kimi Code** 模式：只有 `bypassPermissions`（别名 `yolo`）。prompt 模式（`kimi -p`）不经确认执行所有工具，也不接受 `--plan`、`--yolo`、`--auto`；其他模式需要 Kimi 的 ACP 服务（规划中）。
+**Kimi Code** 模式：只有 `bypassPermissions`（别名 `yolo`），而且必须在配置里明确写上，否则 Kimi 不会启动。prompt 模式（`kimi -p`）不经确认执行所有工具，也不接受 `--plan`、`--yolo`、`--auto`；其他模式需要 Kimi 的 ACP 服务（规划中）。
 
 **Qoder CLI** 模式：
 

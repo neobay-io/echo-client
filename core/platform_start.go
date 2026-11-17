@@ -60,16 +60,25 @@ func (e *Engine) beginPlatformRuns() (context.Context, error) {
 	if e.platformRuns != nil {
 		return nil, fmt.Errorf("[%s] engine already started", e.name)
 	}
+	if e.ctx.Err() != nil {
+		return nil, fmt.Errorf("[%s] engine already stopped", e.name)
+	}
 	e.platformRuns = make([]platformRun, len(e.platforms))
 	ctx, cancel := context.WithCancel(e.ctx)
 	e.platformRetryCancel = cancel
 	return ctx, nil
 }
 
-func (e *Engine) markPlatformRunning(idx int) {
+// beginInitialStart moves a platform into starting for its first Start call.
+// It reports false if Engine.Stop already ran.
+func (e *Engine) beginInitialStart(idx int) bool {
 	e.platformRunMu.Lock()
-	e.platformRuns[idx].state = platformStateRunning
-	e.platformRunMu.Unlock()
+	defer e.platformRunMu.Unlock()
+	if e.platformRuns[idx].state == platformStateStopped {
+		return false
+	}
+	e.platformRuns[idx].state = platformStateStarting
+	return true
 }
 
 // afterPlatformStarted runs the steps that follow a successful Platform.Start,

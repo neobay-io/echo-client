@@ -277,3 +277,21 @@ func TestSessionReportsCLIFailure(t *testing.T) {
 		t.Fatalf("last event = %+v, want error with stderr", last)
 	}
 }
+
+// Review finding 2: Kimi starts only with an explicit bypass mode.
+func TestNewRequiresExplicitBypassMode(t *testing.T) {
+	cmd := filepath.Join(t.TempDir(), "kimi")
+	if err := os.WriteFile(cmd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"", "default", "plan", "auto"} {
+		if _, err := New(map[string]any{"cmd": cmd, "mode": mode}); err == nil || !strings.Contains(err.Error(), "bypassPermissions") {
+			t.Errorf("mode %q: err = %v, want a bypassPermissions error", mode, err)
+		}
+	}
+	for _, mode := range []string{"bypassPermissions", "yolo"} {
+		if _, err := New(map[string]any{"cmd": cmd, "mode": mode}); err != nil {
+			t.Errorf("mode %q rejected: %v", mode, err)
+		}
+	}
+}

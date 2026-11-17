@@ -304,3 +304,18 @@ func TestFailedResultBecomesOneError(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// Review finding 10: a command approval names the directory it runs in.
+func TestCommandApprovalNamesDirectory(t *testing.T) {
+	args := map[string]any{"CommandLine": "git clean -fdx"}
+	if got := formatAgyApproval(args, "/repo/a"); got != "git clean -fdx\n(in /repo/a)" {
+		t.Fatalf("session cwd: %q", got)
+	}
+	args["Cwd"] = "/repo/b"
+	if got := formatAgyApproval(args, "/repo/a"); got != "git clean -fdx\n(in /repo/b)" {
+		t.Fatalf("tool cwd should win: %q", got)
+	}
+	if got := formatAgyApproval(map[string]any{"Path": "a.txt"}, "/repo/a"); strings.Contains(got, "(in ") {
+		t.Fatalf("non-command preview changed: %q", got)
+	}
+}

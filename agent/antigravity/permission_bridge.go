@@ -44,6 +44,7 @@ var agyReadOnlyTools = map[string]bool{
 type agyHookInput struct {
 	ConversationID string `json:"conversationId"`
 	StepIndex      int    `json:"stepIdx"`
+	Cwd            string `json:"cwd"` // the conversation's working directory
 	ToolCall       struct {
 		Name string         `json:"name"`
 		Args map[string]any `json:"args"`
@@ -281,7 +282,7 @@ func (b *agyPermissionBridge) handleConnection(conn net.Conn) {
 		b.pendingMu.Unlock()
 	}()
 
-	preview := formatAgyToolInput(input.ToolCall.Args)
+	preview := formatAgyApproval(input.ToolCall.Args, input.Cwd)
 	event := core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -310,6 +311,25 @@ func (b *agyPermissionBridge) handleConnection(conn net.Conn) {
 	case <-b.ctx.Done():
 		b.writeResponse(conn, antigravityhook.BridgeResponse{Decision: "deny", Reason: "cc-connect session closed"})
 	}
+}
+
+// formatAgyApproval is what the user approves. For a command it names the
+// directory it runs in: the same command can be harmless in one checkout and
+// destructive in another.
+func formatAgyApproval(args map[string]any, sessionCwd string) string {
+	preview := formatAgyToolInput(args)
+	command, _ := args["CommandLine"].(string)
+	if strings.TrimSpace(command) == "" {
+		return preview
+	}
+	dir, _ := args["Cwd"].(string)
+	if strings.TrimSpace(dir) == "" {
+		dir = sessionCwd
+	}
+	if strings.TrimSpace(dir) == "" {
+		return preview
+	}
+	return preview + "\n(in " + strings.TrimSpace(dir) + ")"
 }
 
 func formatAgyToolInput(input map[string]any) string {

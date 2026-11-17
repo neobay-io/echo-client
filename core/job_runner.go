@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,6 +259,9 @@ func (e *Engine) startAgentSession(
 	envVars []string,
 	opts AgentSessionOptions,
 ) (AgentSession, error) {
+	if err := e.waitForAgentUpgrade(ctx); err != nil {
+		return nil, err
+	}
 	e.agentStartMu.Lock()
 	defer e.agentStartMu.Unlock()
 
@@ -272,6 +276,12 @@ func (e *Engine) startAgentSession(
 	// Always set (zero options included) so one chat's overrides never leak
 	// into the next session started on this shared agent.
 	if inj, ok := e.agent.(SessionOptionsInjector); ok {
+		if mode := e.offeredMode(opts.Mode); mode != opts.Mode {
+			if opts.Mode != "" && mode == "" {
+				slog.Warn("ignoring per-chat mode this agent does not offer", "agent", e.agent.Name(), "mode", opts.Mode, "session_key", sessionKey)
+			}
+			opts.Mode = mode
+		}
 		inj.SetSessionOptions(opts)
 	}
 	return e.agent.StartSession(ctx, sessionID)
@@ -563,4 +573,30 @@ func summarizeJobOutput(output string) string {
 	}
 	runes := []rune(summary)
 	return "..." + string(runes[len(runes)-(maxJobSummaryLen-3):])
+}
+
+// agentUpgradePollInterval is how often a waiting turn rechecks the upgrade.
+var agentUpgradePollInterval = time.Second
+
+// waitForAgentUpgrade holds a new agent session while this agent's CLI is
+// being upgraded (here or by another echo-client service). Chat messages are
+// turned away earlier with a notice; this catches Echo jobs, cron runs and
+// relay turns, and chats that raced the start of an upgrade. Background turns
+// register as active work (trackBackgroundTurn) before they get here, so an
+// upgrade either sees them and skips, or has already started and they wait.
+func (e *Engine) waitForAgentUpgrade(ctx context.Context) error {
+	if !e.agentUpgradeBlocksNewTurns() {
+		return nil
+	}
+	slog.Info("agent upgrade in progress; waiting before starting the agent", "project", e.name, "agent", e.agent.Name())
+	ticker := time.NewTicker(agentUpgradePollInterval)
+	defer ticker.Stop()
+	for e.agentUpgradeBlocksNewTurns() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for %s upgrade: %w", e.agent.Name(), ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	return nil
 }

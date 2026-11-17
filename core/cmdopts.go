@@ -36,20 +36,22 @@ func ParseCmdOpts(opts map[string]any, defaultBin string) (cmd string, extraArgs
 	}
 
 	if v, ok := opts["cli_path"].(string); ok && strings.TrimSpace(v) != "" {
+		// Log only the binary: the rest may hold a token.
 		slog.Warn("DEPRECATED: 'cli_path' is deprecated, use 'cmd' instead",
 			"deprecated_key", "cli_path",
 			"new_key", "cmd",
-			"value", v)
+			"binary", firstField(v))
 		if parts := splitCmdString(v); parts != nil {
 			return parts[0], parts[1:]
 		}
 	}
 
 	if v, ok := opts["command"].(string); ok && strings.TrimSpace(v) != "" {
+		// Log only the binary: the rest may hold a token.
 		slog.Warn("DEPRECATED: 'command' is deprecated, use 'cmd' instead",
 			"deprecated_key", "command",
 			"new_key", "cmd",
-			"value", v)
+			"binary", firstField(v))
 		if parts := splitCmdString(v); parts != nil {
 			return parts[0], parts[1:]
 		}
@@ -142,4 +144,11 @@ func ParseConfigEnv(opts map[string]any) []string {
 	default:
 		return nil
 	}
+}
+
+func firstField(s string) string {
+	if fields := strings.Fields(s); len(fields) > 0 {
+		return fields[0]
+	}
+	return ""
 }

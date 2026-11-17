@@ -49,7 +49,7 @@ func liveTurn(t *testing.T, s core.AgentSession, prompt string, images []core.Im
 
 func TestLiveKimiTurnsResumeModelSwitchEffortAndImage(t *testing.T) {
 	workDir := t.TempDir()
-	agent, err := New(map[string]any{"work_dir": workDir})
+	agent, err := New(map[string]any{"work_dir": workDir, "mode": "bypassPermissions"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

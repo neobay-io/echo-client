@@ -63,3 +63,15 @@ func TestRedactArgs_Empty(t *testing.T) {
 		t.Errorf("expected empty, got %v", out)
 	}
 }
+
+// Review finding 13: prompts can hold pasted secrets; logs keep their length.
+func TestRedactArgs_Prompts(t *testing.T) {
+	out := RedactArgs([]string{"--output-format", "stream-json", "--prompt=my key is sk-123", "-p", "deploy with token abc", "-p", "--next"})
+	joined := strings.Join(out, " ")
+	if strings.Contains(joined, "sk-123") || strings.Contains(joined, "abc") {
+		t.Fatalf("prompt leaked: %q", out)
+	}
+	if out[2] != "--prompt=<prompt: 16 chars>" || out[4] != "<prompt: 21 chars>" || out[6] != "--next" {
+		t.Fatalf("out = %q", out)
+	}
+}

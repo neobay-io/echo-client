@@ -187,8 +187,11 @@ func TestParseCmdOpts_DeprecatedCliPath(t *testing.T) {
 	if rec["new_key"] != "cmd" {
 		t.Errorf("new_key: got %v, want %q", rec["new_key"], "cmd")
 	}
-	if rec["value"] != "old-cli --flag" {
-		t.Errorf("value: got %v, want %q", rec["value"], "old-cli --flag")
+	if rec["binary"] != "old-cli" {
+		t.Errorf("binary: got %v, want %q", rec["binary"], "old-cli")
+	}
+	if _, ok := rec["value"]; ok {
+		t.Errorf("the raw value may hold a token and must not be logged: %v", rec["value"])
 	}
 }
 

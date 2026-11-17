@@ -315,7 +315,7 @@ All agents support permission modes switchable at runtime via `/mode`.
 | **Auto** | `auto` | `--mode auto`: agy reviews its own actions. |
 | **YOLO** | `bypassPermissions` (alias: `yolo`) | `--dangerously-skip-permissions`. |
 
-**Kimi Code** modes: only `bypassPermissions` (alias `yolo`). Prompt mode (`kimi -p`) runs every tool without asking and does not accept `--plan`, `--yolo` or `--auto`; the other modes need Kimi's ACP server (planned).
+**Kimi Code** modes: only `bypassPermissions` (alias `yolo`), and it must be set explicitly: Kimi does not start without it. Prompt mode (`kimi -p`) runs every tool without asking and does not accept `--plan`, `--yolo` or `--auto`; the other modes need Kimi's ACP server (planned).
 
 **OpenCode** modes:
 

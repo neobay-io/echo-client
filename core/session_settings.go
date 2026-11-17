@@ -46,7 +46,7 @@ func (e *Engine) effectiveReasoningLevel(s *Session) string {
 // effectiveMode is the permission mode the given chat session runs with.
 func (e *Engine) effectiveMode(s *Session) string {
 	if s != nil && e.perSessionSettings() {
-		if mode := strings.TrimSpace(s.Settings().Mode); mode != "" {
+		if mode := e.offeredMode(s.Settings().Mode); mode != "" {
 			return mode
 		}
 	}
@@ -85,4 +85,24 @@ func (e *Engine) retireInteractiveState(sessionKey string) {
 	if state, ok := e.interactiveStates[sessionKey]; ok && state != nil {
 		state.stale = true
 	}
+}
+
+// offeredMode returns the agent's key for a stored per-chat mode, or "" when
+// the agent does not offer it (it was chosen under another agent type, or the
+// agent has fewer modes, like Kimi). Such a mode is neither applied nor shown,
+// so /status never claims a safer mode than the one in effect.
+func (e *Engine) offeredMode(mode string) string {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return ""
+	}
+	ms, ok := e.agent.(ModeSwitcher)
+	if !ok {
+		return mode
+	}
+	native, ok := resolveModeForSwitcher(e.agent.Name(), ms, mode)
+	if !ok {
+		return ""
+	}
+	return native
 }

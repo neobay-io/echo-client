@@ -63,8 +63,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	reasoningLevel, _ := opts["reasoning_level"].(string)
-	if mode, _ := opts["mode"].(string); strings.TrimSpace(mode) != "" && !core.IsBypassPermissionMode("kimi", mode) {
-		slog.Warn("kimi: prompt mode runs every tool without asking; configured mode ignored", "mode", mode)
+	// Require an explicit opt-in: a missing or safer-sounding mode must not
+	// silently become "run everything".
+	if mode, _ := opts["mode"].(string); !core.IsBypassPermissionMode("kimi", mode) {
+		return nil, fmt.Errorf(`kimi: set mode = "bypassPermissions" (got %q): kimi -p runs every tool without asking and has no other modes yet`, strings.TrimSpace(mode))
 	}
 
 	cmd, extraArgs, err := resolveCommand(opts)

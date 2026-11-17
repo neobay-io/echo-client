@@ -1094,13 +1094,25 @@ func (e *Engine) Start() error {
 
 	var startErrs []error
 	for i, p := range e.platforms {
-		if err := p.Start(e.handleMessage); err != nil {
+		// The first start goes through the same starting/stopped states as
+		// retries, so an Engine.Stop during it is not lost.
+		if !e.beginInitialStart(i) {
+			continue // the engine stopped before this platform's turn
+		}
+		err := p.Start(e.handleMessage)
+		if _, stopped := e.endStartAttempt(i, err == nil); stopped {
+			// Stop skipped this in-flight platform; stopping it is ours.
+			if stopErr := p.Stop(); stopErr != nil {
+				slog.Warn("platform stop after cancelled start failed", "project", e.name, "platform", p.Name(), "error", stopErr)
+			}
+			continue
+		}
+		if err != nil {
 			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err, "retry_in", e.platformRetryInitialDelay())
 			startErrs = append(startErrs, fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err))
 			e.scheduleStartRetry(retryCtx, i, p)
 			continue
 		}
-		e.markPlatformRunning(i)
 		e.afterPlatformStarted(p, 0)
 	}
 
@@ -9005,6 +9017,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	if err != nil {
 		return "", fmt.Errorf("start relay session: %w", err)
 	}
+	// One session per relay turn: close it (before the turn lock is released)
+	// so its process, and agy's permission bridge, do not outlive the turn.
+	defer func() { _ = agentSession.Close() }()
 	e.bindAgentSessionID(session, agentSession.CurrentSessionID())
 	if err := agentTurn.Bind(ctx, agentSession.CurrentSessionID()); err != nil {
 		return "", err
@@ -9015,9 +9030,19 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	}
 
 	var textParts []string
-	for event := range agentSession.Events() {
-		if ctx.Err() != nil {
+	events := agentSession.Events()
+	for {
+		var event Event
+		var ok bool
+		// Select on ctx too: an agent whose turn was cancelled may never send
+		// a terminal event, and the relay must not wait forever.
+		select {
+		case <-ctx.Done():
 			return "", ctx.Err()
+		case event, ok = <-events:
+		}
+		if !ok {
+			break
 		}
 		switch event.Type {
 		case EventText:

@@ -99,7 +99,10 @@ type agentUpgradeFailureState struct {
 type AgentUpgradeCommandRunner func(ctx context.Context, cmd string) (string, error)
 
 type AgentUpgradeManager struct {
-	mu          sync.Mutex
+	mu sync.Mutex
+	// saveMu serializes state saves from snapshot to rename, so an older
+	// snapshot can never overwrite a newer one.
+	saveMu      sync.Mutex
 	cfg         AgentUpgradeConfig
 	runCommand  AgentUpgradeCommandRunner
 	busyCountFn func(string) int
@@ -372,7 +375,13 @@ func (m *AgentUpgradeManager) loop(ctx context.Context) {
 	nextRun := time.Time{}
 	for {
 		cfg := m.Snapshot()
-		if !cfg.Enabled || cfg.Policy == "off" {
+		window, werr := parseUpgradeWindow(cfg.Window)
+		if werr != nil {
+			// Config validation rejects bad windows; if one gets here anyway,
+			// never run outside the hours the operator meant to allow.
+			slog.Error("agent upgrade: automatic runs paused, invalid window", "error", werr)
+		}
+		if !cfg.Enabled || cfg.Policy == "off" || werr != nil {
 			nextRun = time.Time{}
 			m.updateScheduleState(time.Time{}, nextRun)
 			select {
@@ -388,10 +397,6 @@ func (m *AgentUpgradeManager) loop(ctx context.Context) {
 			interval = defaultAgentUpgradeInterval
 		}
 		if nextRun.IsZero() && cfg.Enabled && cfg.Policy != "off" {
-			window, werr := parseUpgradeWindow(cfg.Window)
-			if werr != nil {
-				slog.Warn("agent upgrade: ignoring invalid window", "error", werr)
-			}
 			m.mu.Lock()
 			persistedNext, lastRun, grace := m.nextAutoRun, m.lastAutoRun, m.startupGrace
 			m.mu.Unlock()
@@ -604,8 +609,13 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 			// Another echo-client service may be upgrading the same CLI.
 			release, locked, lockErr := acquireUpgradeLock(m.lockDirPath(), name)
 			if lockErr != nil {
-				slog.Warn("agent upgrade: cross-process lock unavailable; continuing", "agent", name, "error", lockErr)
-				release, locked = func() {}, true
+				// Without the lock another service could upgrade the same
+				// CLI at the same time, so do not upgrade.
+				slog.Warn("agent upgrade: cross-process lock unavailable; skipping", "agent", name, "error", lockErr)
+				res.Skipped = true
+				res.Reason = "upgrade lock unavailable: " + lockErr.Error()
+				results = append(results, res)
+				return
 			}
 			if !locked {
 				res.Skipped = true
@@ -712,6 +722,12 @@ func (m *AgentUpgradeManager) resolveTargetRules(ctx context.Context, name strin
 			return resolved
 		}
 		if target.PinVersion != "" && target.Strategy == "package_manager" && !target.UpdateCommandSet {
+			if route == installRouteBrew {
+				// Pinning through npm would install a second copy the
+				// service does not run.
+				resolved.blockedReason = "pin_version is not supported for Homebrew codex installs"
+				return resolved
+			}
 			resolved.cfg.UpdateCommand = fmt.Sprintf("npm install -g %s", shellQuote("@openai/codex@"+strings.TrimSpace(target.PinVersion)))
 		}
 		return resolved
