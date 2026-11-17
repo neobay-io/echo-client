@@ -413,19 +413,18 @@ func (e *Engine) beginCronTurnOrEnqueue(job *CronJob, sessionKey string, msg *Me
 }
 
 func (e *Engine) platformAndReplyContextForQueuedPrompt(item queuedPrompt) (Platform, any, error) {
-	for _, p := range e.platforms {
-		if p.Name() == item.OriginPlatform {
-			if item.Message.ReplyCtx != nil {
-				return p, item.Message.ReplyCtx, nil
-			}
-			if rc, ok := p.(ReplyContextReconstructor); ok {
-				replyCtx, err := rc.ReconstructReplyCtx(item.OriginSessionKey)
-				return p, replyCtx, err
-			}
-			return p, nil, nil
-		}
+	p, err := e.runningPlatform(item.OriginPlatform)
+	if err != nil {
+		return nil, nil, err
 	}
-	return nil, nil, fmt.Errorf("platform %q not found", item.OriginPlatform)
+	if item.Message.ReplyCtx != nil {
+		return p, item.Message.ReplyCtx, nil
+	}
+	if rc, ok := p.(ReplyContextReconstructor); ok {
+		replyCtx, err := rc.ReconstructReplyCtx(item.OriginSessionKey)
+		return p, replyCtx, err
+	}
+	return p, nil, nil
 }
 
 func (e *Engine) processInteractiveMessageAndDrainQueue(p Platform, msg *Message, session *Session, queueKey string) {

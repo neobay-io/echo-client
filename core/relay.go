@@ -237,23 +237,22 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 
 // sendToGroup sends a message to the group chat for visibility.
 func (rm *RelayManager) sendToGroup(ctx context.Context, e *Engine, platform, sessionKey, content string) {
-	for _, p := range e.platforms {
-		if p.Name() != platform {
-			continue
-		}
-		rc, ok := p.(ReplyContextReconstructor)
-		if !ok {
-			continue
-		}
-		rctx, err := rc.ReconstructReplyCtx(sessionKey)
-		if err != nil {
-			slog.Debug("relay: failed to reconstruct reply ctx", "error", err)
-			continue
-		}
-		if err := p.Send(ctx, rctx, content); err != nil {
-			slog.Debug("relay: failed to send group message", "error", err)
-		}
+	p, err := e.runningPlatform(platform)
+	if err != nil {
+		slog.Debug("relay: cannot send group message", "error", err)
 		return
+	}
+	rc, ok := p.(ReplyContextReconstructor)
+	if !ok {
+		return
+	}
+	rctx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		slog.Debug("relay: failed to reconstruct reply ctx", "error", err)
+		return
+	}
+	if err := p.Send(ctx, rctx, content); err != nil {
+		slog.Debug("relay: failed to send group message", "error", err)
 	}
 }
 

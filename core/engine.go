@@ -75,30 +75,32 @@ func ConsumeRestartNotify(dataDir string) *RestartRequest {
 }
 
 // SendRestartNotification sends a "restart successful" message to the
-// platform/session that initiated the restart.
+// platform/session that initiated the restart. If that platform failed to
+// start and is being retried, the message is sent once a retry succeeds.
 func (e *Engine) SendRestartNotification(platformName, sessionKey string) {
-	for _, p := range e.platforms {
-		if p.Name() != platformName {
-			continue
-		}
-		rc, ok := p.(ReplyContextReconstructor)
-		if !ok {
-			slog.Debug("restart notify: platform does not support ReconstructReplyCtx", "platform", platformName)
-			return
-		}
-		rctx, err := rc.ReconstructReplyCtx(sessionKey)
-		if err != nil {
-			slog.Debug("restart notify: reconstruct failed", "error", err)
-			return
-		}
-		text := e.i18n.T(MsgRestartSuccess)
-		if CurrentVersion != "" {
-			text += fmt.Sprintf(" (%s)", CurrentVersion)
-		}
-		if err := p.Send(e.ctx, rctx, text); err != nil {
-			slog.Debug("restart notify: send failed", "error", err)
-		}
+	send := func(p Platform) { e.sendRestartNotification(p, sessionKey) }
+	if e.whenPlatformRunning(platformName, send) {
+		slog.Info("restart notify: platform not running yet; will send once it starts", "platform", platformName)
+	}
+}
+
+func (e *Engine) sendRestartNotification(p Platform, sessionKey string) {
+	rc, ok := p.(ReplyContextReconstructor)
+	if !ok {
+		slog.Debug("restart notify: platform does not support ReconstructReplyCtx", "platform", p.Name())
 		return
+	}
+	rctx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		slog.Debug("restart notify: reconstruct failed", "error", err)
+		return
+	}
+	text := e.i18n.T(MsgRestartSuccess)
+	if CurrentVersion != "" {
+		text += fmt.Sprintf(" (%s)", CurrentVersion)
+	}
+	if err := p.Send(e.ctx, rctx, text); err != nil {
+		slog.Debug("restart notify: send failed", "error", err)
 	}
 }
 
@@ -211,6 +213,16 @@ type Engine struct {
 
 	preparedSkillMetaMu sync.Mutex
 	preparedSkillMeta   map[string]map[string]any
+
+	// Background start retries for platforms whose Start failed. See
+	// platform_start.go.
+	platformRunMu         sync.Mutex
+	platformRuns          []platformRun // parallel to platforms; nil until Start
+	platformRetryCancel   context.CancelFunc
+	platformRetryWG       sync.WaitGroup
+	platformRetryInitial  time.Duration
+	platformRetryMax      time.Duration
+	platformRetryStopWait time.Duration
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -336,6 +348,10 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		eventIdleTimeout:   defaultEventIdleTimeout,
 		firstEventTimeout:  defaultFirstEventTimeout,
 		turnTimeout:        defaultTurnTimeout,
+
+		platformRetryInitial:  defaultPlatformRetryInitialDelay,
+		platformRetryMax:      defaultPlatformRetryMaxDelay,
+		platformRetryStopWait: defaultPlatformRetryStopWait,
 	}
 
 	if cp, ok := ag.(CommandProvider); ok {
@@ -798,15 +814,9 @@ func (e *Engine) ExecuteCronJob(ctx context.Context, job *CronJob) error {
 		platformName = sessionKey[:idx]
 	}
 
-	var targetPlatform Platform
-	for _, p := range e.platforms {
-		if p.Name() == platformName {
-			targetPlatform = p
-			break
-		}
-	}
-	if targetPlatform == nil {
-		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
+	targetPlatform, err := e.runningPlatform(platformName)
+	if err != nil {
+		return fmt.Errorf("cron session %q: %w", sessionKey, err)
 	}
 
 	rc, ok := targetPlatform.(ReplyContextReconstructor)
@@ -1046,25 +1056,27 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 	return nil
 }
 
+// Start starts every platform. A platform whose Start fails is retried in the
+// background with capped exponential backoff until it starts or the engine
+// stops, so a network blip at boot does not leave it down until the next
+// restart. Start returns an error only when every platform failed; those
+// platforms are still retried.
 func (e *Engine) Start() error {
+	retryCtx, err := e.beginPlatformRuns()
+	if err != nil {
+		return err
+	}
+
 	var startErrs []error
-	for _, p := range e.platforms {
+	for i, p := range e.platforms {
 		if err := p.Start(e.handleMessage); err != nil {
-			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err)
+			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err, "retry_in", e.platformRetryInitialDelay())
 			startErrs = append(startErrs, fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err))
+			e.scheduleStartRetry(retryCtx, i, p)
 			continue
 		}
-		slog.Info("platform started", "project", e.name, "platform", p.Name())
-
-		// Register commands on platforms that support it (e.g. Telegram setMyCommands)
-		if registrar, ok := p.(CommandRegistrar); ok {
-			commands := e.GetAllCommands()
-			if err := registrar.RegisterCommands(commands); err != nil {
-				slog.Error("platform command registration failed", "project", e.name, "platform", p.Name(), "error", err)
-			} else {
-				slog.Debug("platform commands registered", "project", e.name, "platform", p.Name(), "count", len(commands))
-			}
-		}
+		e.markPlatformRunning(i)
+		e.afterPlatformStarted(p, 0)
 	}
 
 	// Log summary
@@ -1083,13 +1095,23 @@ func (e *Engine) Start() error {
 }
 
 func (e *Engine) Stop() error {
+	// Cancel start retries before stopping platforms so no retry can start a
+	// platform after it has been stopped. A platform whose retry Start call is
+	// still in flight is skipped here; its retry goroutine stops it as soon as
+	// that call returns.
+	inFlight := e.stopPlatformRetries()
+
 	// Stop platforms first to prevent new incoming messages
 	var errs []error
-	for _, p := range e.platforms {
+	for i, p := range e.platforms {
+		if inFlight[i] {
+			continue
+		}
 		if err := p.Stop(); err != nil {
 			errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
 		}
 	}
+	e.waitPlatformRetries()
 
 	// Now cancel context and clean up sessions
 	e.cancel()
@@ -1490,21 +1512,19 @@ func (e *Engine) reconstructPlatformReply(sessionKey string) (Platform, any, err
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, p := range e.platforms {
-		if p.Name() != platformName {
-			continue
-		}
-		rc, ok := p.(ReplyContextReconstructor)
-		if !ok {
-			return nil, nil, fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
-		}
-		replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
-		if err != nil {
-			return nil, nil, err
-		}
-		return p, replyCtx, nil
+	p, err := e.runningPlatform(platformName)
+	if err != nil {
+		return nil, nil, err
 	}
-	return nil, nil, fmt.Errorf("platform %q not found", platformName)
+	rc, ok := p.(ReplyContextReconstructor)
+	if !ok {
+		return nil, nil, fmt.Errorf("platform %q does not support reply context reconstruction", platformName)
+	}
+	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return p, replyCtx, nil
 }
 
 func (e *Engine) sendCardToSession(sessionKey string, card *Card) error {
@@ -7593,7 +7613,7 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.dataDir, e.configPath)
+	results := RunDoctorChecks(e.ctx, e.agent, e.platforms, e.platformNotRunningNames(), e.dataDir, e.configPath)
 	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
 }

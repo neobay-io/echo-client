@@ -46,13 +46,14 @@ type DoctorChecker interface {
 	DoctorChecks(ctx context.Context) []DoctorCheckResult
 }
 
-// RunDoctorChecks performs all diagnostic checks.
-func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform, dataDir, configPath string) []DoctorCheckResult {
+// RunDoctorChecks performs all diagnostic checks. notRunning names platforms
+// that failed to start and are still being retried.
+func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform, notRunning map[string]bool, dataDir, configPath string) []DoctorCheckResult {
 	var results []DoctorCheckResult
 
 	results = append(results, checkAgentBinary(ctx, agent)...)
 	results = append(results, checkAgentAuth(ctx, agent)...)
-	results = append(results, checkPlatforms(platforms)...)
+	results = append(results, checkPlatforms(platforms, notRunning)...)
 	results = append(results, checkSystem(ctx)...)
 	results = append(results, checkDependencies()...)
 	results = append(results, checkNetwork(ctx)...)
@@ -170,9 +171,17 @@ func checkCLIAuth(ctx context.Context, bin string, args []string, label string) 
 	}}
 }
 
-func checkPlatforms(platforms []Platform) []DoctorCheckResult {
+func checkPlatforms(platforms []Platform, notRunning map[string]bool) []DoctorCheckResult {
 	var results []DoctorCheckResult
 	for _, p := range platforms {
+		if notRunning[p.Name()] {
+			results = append(results, DoctorCheckResult{
+				Name:   fmt.Sprintf("Platform (%s)", p.Name()),
+				Status: DoctorFail,
+				Detail: "failed to start; retrying in background",
+			})
+			continue
+		}
 		results = append(results, DoctorCheckResult{
 			Name:   fmt.Sprintf("Platform (%s)", p.Name()),
 			Status: DoctorPass,
