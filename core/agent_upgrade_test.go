@@ -49,8 +49,8 @@ func TestAgentUpgradeManagerStatuses(t *testing.T) {
 	})
 
 	statuses := mgr.Statuses(context.Background())
-	if len(statuses) != 4 {
-		t.Fatalf("len(statuses) = %d, want 4", len(statuses))
+	if len(statuses) != 6 {
+		t.Fatalf("len(statuses) = %d, want 6", len(statuses))
 	}
 
 	var codex *AgentUpgradeStatus
@@ -155,8 +155,8 @@ func TestAgentUpgradeManagerRunAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run(all): %v", err)
 	}
-	if len(results) != 4 {
-		t.Fatalf("len(results) = %d, want 4", len(results))
+	if len(results) != 6 {
+		t.Fatalf("len(results) = %d, want 6", len(results))
 	}
 
 	var claude, codex, gemini, qoder *AgentUpgradeRunResult

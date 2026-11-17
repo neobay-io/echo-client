@@ -177,6 +177,18 @@ func DefaultAgentUpgradeConfig() AgentUpgradeConfig {
 				VersionCommand: "qodercli --version",
 				UpdateCommand:  "qodercli update",
 			},
+			"kimi": {
+				Enabled:        true,
+				Strategy:       "builtin",
+				VersionCommand: "kimi --version",
+				UpdateCommand:  "kimi upgrade --yes",
+			},
+			"antigravity": {
+				Enabled:        true,
+				Strategy:       "builtin",
+				VersionCommand: "agy --version",
+				UpdateCommand:  "agy update",
+			},
 		},
 	}
 }
@@ -712,12 +724,13 @@ func (m *AgentUpgradeManager) resolveTargetRules(ctx context.Context, name strin
 			resolved.cfg.UpdateCommand = fmt.Sprintf("npm install -g %s", shellQuote("@google/gemini-cli@"+strings.TrimSpace(target.PinVersion)))
 		}
 		return resolved
-	case "qoder":
+	case "qoder", "kimi", "antigravity":
+		// Self-updating CLIs: no channels, and they always install the latest.
 		if target.Channel != "" {
-			resolved.blockedReason = fmt.Sprintf("channel %q is not supported for qoder", target.Channel)
+			resolved.blockedReason = fmt.Sprintf("channel %q is not supported for %s", target.Channel, name)
 		}
-		if target.PinVersion != "" {
-			resolved.blockedReason = joinBlockedReasons(resolved.blockedReason, "pin_version is not supported for qoder")
+		if target.PinVersion != "" && !target.UpdateCommandSet {
+			resolved.blockedReason = joinBlockedReasons(resolved.blockedReason, "pin_version is not supported for "+name)
 		}
 		return resolved
 	default:
@@ -909,6 +922,10 @@ func normalizeAgentUpgradeTarget(v string) string {
 		return "gemini"
 	case "qoder":
 		return "qoder"
+	case "kimi", "kimi-code":
+		return "kimi"
+	case "antigravity", "agy":
+		return "antigravity"
 	default:
 		return ""
 	}

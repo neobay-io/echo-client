@@ -32,7 +32,7 @@ func nativeSkillTargetKind(agentName string) string {
 	switch strings.ToLower(strings.TrimSpace(agentName)) {
 	case "claudecode":
 		return ".claude/skills"
-	case "codex", "gemini":
+	case "codex", "gemini", "kimi", "antigravity":
 		return ".agents/skills"
 	case "qoder":
 		return ".qoder/skills"

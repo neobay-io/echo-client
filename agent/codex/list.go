@@ -133,7 +133,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 					// Pick the last content block that looks like a real prompt.
 					for _, c := range item.Content {
 						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
-							summary = c.Text
+							summary = strings.TrimSpace(core.StripInteractionOptions(c.Text))
 						}
 					}
 				case "assistant":
@@ -271,7 +271,7 @@ func getSessionHistory(sessionID string, limit int) ([]core.HistoryEntry, error)
 			for _, c := range item.Content {
 				if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
 					entries = append(entries, core.HistoryEntry{
-						Role: "user", Content: c.Text, Timestamp: ts,
+						Role: "user", Content: strings.TrimSpace(core.StripInteractionOptions(c.Text)), Timestamp: ts,
 					})
 				}
 			}

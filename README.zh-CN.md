@@ -33,7 +33,7 @@ cc-connect 把运行在你机器上的 AI Agent 桥接到你日常使用的即�
 
 > 是时候卸载 OpenClaw 了 — cc-connect 让你同时拥有最强的那几个 AI Agent，而不只是一个。
 
-- **7 大 AI Agent** — Claude Code、Codex、Cursor Agent、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI，按需选用，也可以同时使用
+- **9 大 AI Agent** — Claude Code、Codex、Antigravity CLI（agy）、Kimi Code、Cursor Agent、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI，按需选用，也可以同时使用
 - **9 大聊天平台** — 飞书、钉钉、Slack、Telegram、Discord、企业微信、LINE、QQ、QQ 官方机器人，大部分无需公网 IP
 - **多机器人中继** — 在群聊中绑定多个机器人，让它们相互协作。问 Claude，再听 Gemini 的见解 — 同一个对话搞定
 - **聊天即控制** — 切换模型 `/model`、切换权限 `/mode`、管理会话，全部通过斜杠命令完成
@@ -58,6 +58,8 @@ cc-connect 把运行在你机器上的 AI Agent 桥接到你日常使用的即�
 |------|------|------|
 | Agent | Claude Code | ✅ 已支持 |
 | Agent | Codex (OpenAI) | ✅ 已支持 |
+| Agent | Antigravity CLI / agy (Google) | ✅ 已支持 |
+| Agent | Kimi Code (月之暗面) | ✅ 已支持 |
 | Agent | Cursor Agent | ✅ 已支持 |
 | Agent | Gemini CLI (Google) | ✅ 已支持 |
 | Agent | Qoder CLI | ✅ 已支持 |
@@ -65,7 +67,6 @@ cc-connect 把运行在你机器上的 AI Agent 桥接到你日常使用的即�
 | Agent | iFlow CLI | ✅ 已支持 |
 | Agent | Goose (Block) | 🔜 计划中 |
 | Agent | Aider | 🔜 计划中 |
-| Agent | Kimi Code (月之暗面) | 🔭 探索中 |
 | Agent | GLM Code / CodeGeeX (智谱AI) | 🔭 探索中 |
 | Agent | MiniMax Code | 🔭 探索中 |
 | Platform | 飞书 (Lark) | ✅ WebSocket 长连接 — 无需公网 IP |
@@ -94,6 +95,8 @@ cc-connect 把运行在你机器上的 AI Agent 桥接到你日常使用的即�
 
 - **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并配置，或
 - **Codex**: [Codex CLI](https://github.com/openai/codex) 已安装（`npm install -g @openai/codex`），或
+- **Antigravity CLI（agy）**: [agy](https://antigravity.google/docs/cli-overview) 已安装并登录，或
+- **Kimi Code**: [Kimi Code CLI 2.x](https://moonshotai.github.io/kimi-code/) 已安装并登录（`kimi login`）；即使 `~/.kimi-code/bin` 不在 PATH 里也能找到，或
 - **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) 已安装（`agent --version` 验证），或
 - **Gemini CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) 已安装（`npm install -g @google/gemini-cli`），或
 - **Qoder CLI**: [Qoder CLI](https://qoder.com) 已安装（`curl -fsSL https://qoder.com/install | bash`），或
@@ -293,6 +296,18 @@ app_secret = "your-app-secret"
 | **全自动** | `yolo` | 自动批准所有工具调用。 |
 | **规划模式** | `plan` | 只读规划模式，不做修改。 |
 
+**Antigravity CLI（agy）** 模式：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **默认** | `default` | 编辑和命令在聊天里审批，读取直接执行。 |
+| **接受编辑** | `acceptEdits` | `--mode accept-edits`。 |
+| **规划模式** | `plan` | `--mode plan`：只规划，不修改。 |
+| **自动模式** | `auto` | `--mode auto`：由 agy 自己审批。 |
+| **YOLO** | `bypassPermissions`（别名 `yolo`）| `--dangerously-skip-permissions`。 |
+
+**Kimi Code** 模式：只有 `bypassPermissions`（别名 `yolo`）。prompt 模式（`kimi -p`）不经确认执行所有工具，也不接受 `--plan`、`--yolo`、`--auto`；其他模式需要 Kimi 的 ACP 服务（规划中）。
+
 **Qoder CLI** 模式：
 
 | 模式 | 配置值 | 行为 |
@@ -338,6 +353,17 @@ mode = "default"
 # Qoder CLI
 [projects.agent.options]
 mode = "default"
+
+# Antigravity CLI（agy）
+[projects.agent.options]
+mode = "default"
+# model = "gemini-4-argon"
+# reasoning_level = "medium"
+
+# Kimi Code
+[projects.agent.options]
+mode = "bypassPermissions"
+# model = "kimi-code/k3"
 
 # OpenCode
 [projects.agent.options]
@@ -616,13 +642,15 @@ cc-connect cron del <job-id>
 
 Claude Code 会通过 `--append-system-prompt` 自动将你的请求转为 `cc-connect cron add` 命令。
 
-**其他 Agent**（Codex、Cursor、Gemini CLI、Qoder CLI、OpenCode、iFlow CLI）需要在项目根目录的 Agent 指令文件中添加说明，让 Agent 知道如何创建定时任务。将以下内容添加到对应文件中：
+**其他 Agent**（Codex、Antigravity CLI、Kimi Code、Cursor、Gemini CLI、Qoder CLI、OpenCode、iFlow CLI）需要在项目根目录的 Agent 指令文件中添加说明，让 Agent 知道如何创建定时任务。将以下内容添加到对应文件中：
 
 | Agent | 指令文件 |
 |-------|---------|
 | Codex | `AGENTS.md` |
 | Cursor | `.cursorrules` |
 | Qoder CLI | `AGENTS.md`（项目级）、`~/.qoder/AGENTS.md`（全局） |
+| Antigravity CLI（agy） | `AGENTS.md`（项目级）、`~/.gemini/GEMINI.md`（全局） |
+| Kimi Code | `AGENTS.md`（项目级）、`~/.kimi-code/AGENTS.md`（全局） |
 | Gemini CLI | `GEMINI.md` |
 | OpenCode | `OPENCODE.md` |
 | iFlow CLI | `IFLOW.md` |
@@ -906,6 +934,8 @@ cc-connect/
 ├── agent/                   # AI 助手适配器
 │   ├── claudecode/          # Claude Code CLI（交互式会话）
 │   ├── codex/               # OpenAI Codex CLI（exec --json）
+│   ├── antigravity/         # Antigravity CLI / agy（-p --output-format stream-json）
+│   ├── kimi/                # Kimi Code CLI（-p --output-format stream-json）
 │   ├── cursor/              # Cursor Agent CLI（--print stream-json）
 │   ├── qoder/               # Qoder CLI（-p -f stream-json）
 │   ├── gemini/              # Gemini CLI（-p --output-format stream-json）

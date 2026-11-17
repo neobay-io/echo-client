@@ -135,6 +135,15 @@ func checkAgentAuth(ctx context.Context, agent Agent) []DoctorCheckResult {
 		return checkCLIAuth(ctx, "agent", []string{"--version"}, "Cursor Agent")
 	case "qoder":
 		return checkCLIAuth(ctx, "qodercli", []string{"--version"}, "Qoder")
+	case "kimi", "antigravity":
+		// Resolved like the adapters do: Kimi's installer location is often
+		// not on the service's PATH.
+		bin, err := ResolveAgentCLI(name)
+		if err != nil {
+			bin = AgentCLIBinary(name)
+		}
+		label := map[string]string{"kimi": "Kimi Code", "antigravity": "Antigravity (agy)"}[name]
+		return checkCLIAuth(ctx, bin, []string{"--version"}, label)
 	}
 	return nil
 }

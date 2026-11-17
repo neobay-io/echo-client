@@ -476,7 +476,7 @@ func (e *Engine) prepareManagedSkillEnv(sessionKey string, envVars []string) ([]
 
 	var extraDirs []string
 	switch e.agent.Name() {
-	case "claudecode", "codex", "gemini", "qoder":
+	case "claudecode", "codex", "gemini", "qoder", "kimi", "antigravity":
 		if strings.TrimSpace(configuredWorkDir) != "" && configuredWorkDir != workspacePath {
 			extraDirs = append(extraDirs, configuredWorkDir)
 		}

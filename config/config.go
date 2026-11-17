@@ -79,6 +79,8 @@ type AgentUpdatesConfig struct {
 	Codex          AgentUpdateTargetConfig `toml:"codex"`
 	Gemini         AgentUpdateTargetConfig `toml:"gemini"`
 	Qoder          AgentUpdateTargetConfig `toml:"qoder"`
+	Kimi           AgentUpdateTargetConfig `toml:"kimi"`
+	Antigravity    AgentUpdateTargetConfig `toml:"antigravity"`
 }
 
 type AgentUpdateTargetConfig struct {
@@ -443,10 +445,12 @@ func (c *Config) validate() error {
 		}
 	}
 	for key, target := range map[string]AgentUpdateTargetConfig{
-		"claudecode": c.AgentUpdates.ClaudeCode,
-		"codex":      c.AgentUpdates.Codex,
-		"gemini":     c.AgentUpdates.Gemini,
-		"qoder":      c.AgentUpdates.Qoder,
+		"claudecode":  c.AgentUpdates.ClaudeCode,
+		"codex":       c.AgentUpdates.Codex,
+		"gemini":      c.AgentUpdates.Gemini,
+		"qoder":       c.AgentUpdates.Qoder,
+		"kimi":        c.AgentUpdates.Kimi,
+		"antigravity": c.AgentUpdates.Antigravity,
 	} {
 		if target.Channel != "" {
 			switch strings.ToLower(strings.TrimSpace(target.Channel)) {

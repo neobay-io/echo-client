@@ -21,11 +21,13 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
 
+	_ "github.com/chenhg5/cc-connect/agent/antigravity"
 	_ "github.com/chenhg5/cc-connect/agent/claudecode"
 	_ "github.com/chenhg5/cc-connect/agent/codex"
 	_ "github.com/chenhg5/cc-connect/agent/cursor"
 	_ "github.com/chenhg5/cc-connect/agent/gemini"
 	_ "github.com/chenhg5/cc-connect/agent/iflow"
+	_ "github.com/chenhg5/cc-connect/agent/kimi"
 	_ "github.com/chenhg5/cc-connect/agent/opencode"
 	_ "github.com/chenhg5/cc-connect/agent/qoder"
 
@@ -54,6 +56,11 @@ func main() {
 		switch os.Args[1] {
 		case "config-example":
 			fmt.Print(ccconnect.ConfigExampleTOML)
+			return
+		case "_agy-permission-hook":
+			// Invoked by agy's PreToolUse hook in default mode; relays the
+			// approval to the echo-client session that started agy.
+			runAntigravityPermissionHook()
 			return
 		case "update":
 			runUpdate()
@@ -754,7 +761,7 @@ level = "info"
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"   # "claudecode", "codex", "cursor", "gemini", "qoder", "opencode", or "iflow"
+type = "claudecode"   # "claudecode", "codex", "antigravity", "kimi", "cursor", "gemini", "qoder", "opencode", or "iflow"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -1047,6 +1054,8 @@ func buildAgentUpgradeConfig(cfg config.AgentUpdatesConfig) core.AgentUpgradeCon
 	apply("codex", cfg.Codex)
 	apply("gemini", cfg.Gemini)
 	apply("qoder", cfg.Qoder)
+	apply("kimi", cfg.Kimi)
+	apply("antigravity", cfg.Antigravity)
 	return result
 }
 

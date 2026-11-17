@@ -44,6 +44,9 @@ func writeDoctorReport(ctx context.Context, w io.Writer, agents []string) (unhea
 			fmt.Fprintln(w, "   not installed")
 		} else {
 			fmt.Fprintf(w, "   path:    %s\n", info.Selected.Path)
+			if info.Selected.OffPath {
+				fmt.Fprintln(w, "   note:    not on PATH; found in the vendor's install location")
+			}
 			if info.Selected.Resolved != "" && info.Selected.Resolved != info.Selected.Path {
 				fmt.Fprintf(w, "   target:  %s\n", info.Selected.Resolved)
 			}

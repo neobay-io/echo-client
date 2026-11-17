@@ -82,9 +82,7 @@ func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files
 	if strings.TrimSpace(prompt) == "" && len(imagePaths) > 0 {
 		prompt = "Please analyze the attached image(s)."
 	}
-	if hint := strings.TrimSpace(core.InteractionOptionsPrompt()); hint != "" {
-		prompt = hint + "\n\nUser request:\n" + prompt
-	}
+	prompt = core.WrapInteractionOptions(prompt)
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}

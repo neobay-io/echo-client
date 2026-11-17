@@ -69,8 +69,24 @@ func detectInstallRoute(target string, install *AgentCLIInstall) string {
 		}
 	case "qoder":
 		return installRouteStandalone // qodercli updates itself
+	case "kimi":
+		switch {
+		case has("/node_modules/@moonshot-ai/kimi-code"):
+			return installRouteNPM
+		case has("/.kimi-code/"):
+			return installRouteStandalone
+		}
+	case "antigravity":
+		return installRouteStandalone // agy updates itself
 	}
 	return installRouteUnknown
+}
+
+// selfUpdateArgs are the update subcommands of CLIs that update themselves.
+var selfUpdateArgs = map[string]string{
+	"qoder":       "update",
+	"kimi":        "upgrade --yes",
+	"antigravity": "update",
 }
 
 // applyInstallRoute points the version probe at the binary agents run and,
@@ -104,6 +120,19 @@ func applyInstallRoute(name string, target AgentUpgradeTargetConfig, info AgentC
 	case "gemini":
 		if route == installRouteBrew && target.Strategy == "package_manager" {
 			target.UpdateCommand = "brew upgrade gemini-cli"
+		}
+	case "kimi":
+		if route == installRouteNPM {
+			target.UpdateCommand = "npm install -g @moonshot-ai/kimi-code@latest"
+			target.Strategy = "package_manager"
+			break
+		}
+		fallthrough
+	case "qoder", "antigravity":
+		// Run the self-updater of the binary agents use; it may not be on
+		// the service's PATH (Kimi's installer puts it in ~/.kimi-code/bin).
+		if route == installRouteStandalone {
+			target.UpdateCommand = shellQuote(info.Selected.Path) + " " + selfUpdateArgs[name]
 		}
 	}
 	return target, ""

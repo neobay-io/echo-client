@@ -33,7 +33,7 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 
 > Time to uninstall OpenClaw — cc-connect gives you access to the most powerful AI agents available, not just one.
 
-- **7 AI Agents** — Claude Code, Codex, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
+- **9 AI Agents** — Claude Code, Codex, Antigravity CLI (agy), Kimi Code, Cursor Agent, Qoder CLI, Gemini CLI, OpenCode, iFlow CLI. Use whichever fits your workflow, or all of them at once.
 - **9 Chat Platforms** — Feishu, DingTalk, Slack, Telegram, Discord, WeChat Work, LINE, QQ, QQ Bot (Official). Most need zero public IP.
 - **Multi-Bot Relay** — Bind multiple bots in a group chat and let them communicate with each other. Ask Claude, get insights from Gemini — all in one conversation.
 - **Full Control from Chat** — Switch models (`/model`), change permission modes (`/mode`), manage sessions, all via slash commands.
@@ -58,6 +58,8 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 |-----------|------|--------|
 | Agent | Claude Code | ✅ Supported |
 | Agent | Codex (OpenAI) | ✅ Supported |
+| Agent | Antigravity CLI / agy (Google) | ✅ Supported |
+| Agent | Kimi Code (Moonshot) | ✅ Supported |
 | Agent | Cursor Agent | ✅ Supported |
 | Agent | Gemini CLI (Google) | ✅ Supported |
 | Agent | Qoder CLI | ✅ Supported |
@@ -65,7 +67,6 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 | Agent | iFlow CLI | ✅ Supported |
 | Agent | Goose (Block) | 🔜 Planned |
 | Agent | Aider | 🔜 Planned |
-| Agent | Kimi Code (Moonshot) | 🔭 Exploring |
 | Agent | GLM Code / CodeGeeX (ZhipuAI) | 🔭 Exploring |
 | Agent | MiniMax Code | 🔭 Exploring |
 | Platform | Feishu (Lark) | ✅ WebSocket — no public IP needed |
@@ -95,6 +96,8 @@ cc-connect bridges AI agents running on your machine to the messaging platforms 
 
 - **Claude Code**: [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and configured, OR
 - **Codex**: [Codex CLI](https://github.com/openai/codex) installed (`npm install -g @openai/codex`), OR
+- **Antigravity CLI (agy)**: [agy](https://antigravity.google/docs/cli-overview) installed and signed in, OR
+- **Kimi Code**: [Kimi Code CLI 2.x](https://moonshotai.github.io/kimi-code/) installed and logged in (`kimi login`); found in `~/.kimi-code/bin` even when that is not on PATH, OR
 - **Cursor Agent**: [Cursor Agent CLI](https://docs.cursor.com/agent) installed (`agent --version` to verify), OR
 - **Gemini CLI**: [Gemini CLI](https://github.com/google-gemini/gemini-cli) installed (`npm install -g @google/gemini-cli`), OR
 - **Qoder CLI**: [Qoder CLI](https://qoder.com) installed (`curl -fsSL https://qoder.com/install | bash`), OR
@@ -302,6 +305,18 @@ All agents support permission modes switchable at runtime via `/mode`.
 | **Default** | `default` | Standard permissions; prompt for approval. |
 | **YOLO** | `yolo` | Skip all permission checks, auto-approve. |
 
+**Antigravity CLI (agy)** modes:
+
+| Mode | Config Value | Behavior |
+|------|-------------|----------|
+| **Default** | `default` | Edits and commands are approved in chat; reads run freely. |
+| **Accept Edits** | `acceptEdits` | `--mode accept-edits`. |
+| **Plan** | `plan` | `--mode plan`: plan only, no changes. |
+| **Auto** | `auto` | `--mode auto`: agy reviews its own actions. |
+| **YOLO** | `bypassPermissions` (alias: `yolo`) | `--dangerously-skip-permissions`. |
+
+**Kimi Code** modes: only `bypassPermissions` (alias `yolo`). Prompt mode (`kimi -p`) runs every tool without asking and does not accept `--plan`, `--yolo` or `--auto`; the other modes need Kimi's ACP server (planned).
+
 **OpenCode** modes:
 
 | Mode | Config Value | Behavior |
@@ -340,6 +355,17 @@ mode = "default"
 # Qoder CLI
 [projects.agent.options]
 mode = "default"
+
+# Antigravity CLI (agy)
+[projects.agent.options]
+mode = "default"
+# model = "gemini-4-argon"
+# reasoning_level = "medium"
+
+# Kimi Code
+[projects.agent.options]
+mode = "bypassPermissions"
+# model = "kimi-code/k3"
 
 # OpenCode
 [projects.agent.options]
@@ -668,13 +694,15 @@ cc-connect cron del <job-id>
 
 Claude Code will automatically translate your request into a `cc-connect cron add` command via `--append-system-prompt`.
 
-**For other agents** (Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode, iFlow CLI), you need to add instructions to the agent's project-level instruction file so it knows how to create cron jobs. Add the following content to the corresponding file in your project root:
+**For other agents** (Codex, Antigravity CLI, Kimi Code, Cursor, Gemini CLI, Qoder CLI, OpenCode, iFlow CLI), you need to add instructions to the agent's project-level instruction file so it knows how to create cron jobs. Add the following content to the corresponding file in your project root:
 
 | Agent | Instruction File |
 |-------|-----------------|
 | Codex | `AGENTS.md` |
 | Cursor | `.cursorrules` |
 | Qoder CLI | `AGENTS.md` (project), `~/.qoder/AGENTS.md` (global) |
+| Antigravity CLI (agy) | `AGENTS.md` (project), `~/.gemini/GEMINI.md` (global) |
+| Kimi Code | `AGENTS.md` (project), `~/.kimi-code/AGENTS.md` (global) |
 | Gemini CLI | `GEMINI.md` |
 | OpenCode | `OPENCODE.md` |
 | iFlow CLI | `IFLOW.md` |
@@ -965,6 +993,8 @@ cc-connect/
 ├── agent/                   # Agent adapters
 │   ├── claudecode/          # Claude Code CLI (interactive sessions)
 │   ├── codex/               # OpenAI Codex CLI (exec --json)
+│   ├── antigravity/         # Antigravity CLI / agy (-p --output-format stream-json)
+│   ├── kimi/                # Kimi Code CLI (-p --output-format stream-json)
 │   ├── cursor/              # Cursor Agent CLI (--print stream-json)
 │   ├── qoder/               # Qoder CLI (-p -f stream-json)
 │   ├── gemini/              # Gemini CLI (-p --output-format stream-json)

@@ -228,7 +228,7 @@ type AgentCapabilities struct {
 | `default` | `default` | `approvalPolicy=on-request`，审批转发为卡片 | 默认 + PreToolUse hook 转发 | 不支持 |
 | `acceptEdits` | `acceptEdits` | `sandbox=workspace-write` + on-request | `--mode accept-edits` | 不支持 |
 | `plan` | `plan` | `collaborationMode=plan` | `--mode plan` | 不支持（第二期 ACP） |
-| `auto` | `auto` | `approvalsReviewer=auto_review`（`--approve-for-me`） | `--mode auto` | ✅（`-p` 的固有行为） |
+| `auto` | `auto` | `approvalsReviewer=auto_review`（`--approve-for-me`） | `--mode auto` | 不支持（`-p` 不审查任何动作，按 bypass 算；P6 用 ACP） |
 | `bypassPermissions` | `bypassPermissions` | `--yolo` 等价 | `--dangerously-skip-permissions` | ✅（同上） |
 
 已有别名继续兼容（`yolo` → `bypassPermissions`，Codex 的 `full-auto` → `auto`）。非法值报错，不再静默回到 default。`isEchoYoloEquivalentMode` 改为查这张表。
@@ -329,6 +329,16 @@ Echo 侧（独立仓库，单独 PR）：
 | T1.3 | 移植 `agent/kimi`，只保留 Kimi Code 2.x（legacy 已归档）；修正：`-p` 下不传 `--plan/--yolo`，只声明 `auto / bypassPermissions`；用 `kimi session list --json` 列会话；模型列表读取时脱敏；effort 先做 spike（`KIMI_MODEL_THINKING_EFFORT` 或每会话 `KIMI_CODE_HOME`） | T1.1, T0.5 | 真实 kimi 冒烟：对话、续接、切模型、图片 |
 | T1.4 | 更新硬编码列表：main.go 导入、doctor、agent_upgrade、`config.AgentUpdates`、native skills、`job_runner` extra dirs、yolo 等价表、`config.example.toml`、README | T1.2, T1.3 | 两个 agent 都能作为 Echo worker 注册 |
 
+**P1 实现记录（2026-11-17）**
+
+- **T1.1**：只移植了真正需要的 `core/cmdopts.go`（`ParseCmdOpts`、`ParseConfigEnv`，连同上游测试）。`GetProviderModel(s)`、`ContinueSession`、`Event.ToolStatus/ToolSuccess`、带 messageID 的 `Send` 都没有移植：两个新适配器改写成本 fork 的接口，不需要它们。新增 `core.ResolveAgentCLI`：PATH 上找不到时去厂商默认安装目录找（目前只有 Kimi 的 `~/.kimi-code/bin`，服务的 PATH 通常没有它），适配器、doctor、升级器共用。
+- **T1.2 agy**（`agent/antigravity`，agy 1.5.10 实测）：每轮 `agy -p --output-format stream-json`，会话 ID 直接取 init 事件的 `conversation_id`，续接用 `--conversation`；模型用 `agy models`，按基础模型分组（`gemini-4-argon` + low/medium/high），切换用 `--model <基础模型> --effort <档位>`（agy 拒绝“带档位后缀的 id + --effort”）；五个模式：`default`（PreToolUse hook 经 `--gemini_dir` 配置覆盖层转发到聊天审批，只读工具直接放行）、`acceptEdits`/`plan`/`auto`（`--mode`）、`bypassPermissions`（`--dangerously-skip-permissions`）；`/list` 用 sqlite3 命令只读查询 `conversation_summaries.db`，没有 sqlite3 时只列出该目录最近一次会话。真实冒烟：默认模式下审批卡片拒绝后文件确实没写、acceptEdits 直接写、续接时切模型和 effort 上下文仍在、`/list` 能看到。
+- **T1.3 Kimi**（`agent/kimi`，Kimi Code 2.5.3 实测，只支持 2.x）：每轮 `kimi -p --output-format stream-json`，续接用 `-S <id>`；`-p` 不能和 `--plan/--yolo/--auto` 同用、且不经确认执行所有工具，所以只提供 `bypassPermissions` 一个模式（`auto` 不作为别名，因为没有任何审查）；模型来自 `kimi provider list --json`，只解码模型别名、显示名和支持的 effort，凭据字段不读不记日志；effort spike 结论：环境变量 `KIMI_MODEL_THINKING_EFFORT` 对托管的 Kimi Code 模型生效（会话记录里 LLM 请求的 `thinkingEffort` 随之改变），模型不支持该档位时不传。会话列表和历史直接读 `~/.kimi-code/sessions/*/<id>/` 下的 `state.json`、`agents/main/wire.jsonl`。真实冒烟：写文件、续接时切模型和 effort、图片、`/list` 和历史都通过。
+- **T1.4**：两个 agent 加入 main.go、doctor、`agent_updates`（T10.6）、native skills（`.agents/skills`）、job runner 的 extra dirs、模式表、`config.example.toml`、README。作为 Echo worker 注册时需要配置 `mode = "bypassPermissions"`（Kimi 也要显式写，和它实际行为一致）。
+- **T10.6**：Kimi 默认 `kimi upgrade --yes`、agy 默认 `agy update`（两者都实测可无人值守运行），命令针对实际解析到的那份二进制执行；npm 装的 Kimi 自动改用 npm。legacy `kimi-cli` 1.22.0 仍通过 uv 装着（`~/.local/bin/kimi-cli`，数据在 `~/.kimi`）；它没有 `kimi` 链接，不会遮住 Kimi Code，适配器也不再支持它。是否卸载（`uv tool uninstall kimi-cli`）由你决定，未自动清理。
+- **顺带修复**：Codex、Kimi、agy 在每轮提示里附带的“选项按钮”说明会出现在 `/list` 摘要和历史里（Codex 一直如此）；现在统一用 `core.StripInteractionOptions` 去掉。Kimi 和 agy 把这段说明放在用户消息之后，因为 agy 只保存消息开头的一小段预览。
+- **尚未做**：两个 agent 的轮内插入、热切换、Kimi 的其他模式都等 P6（ACP）；agy 会话历史（`/history`）需要解析 protobuf，没做；聊天里的卡片和按钮还需要在飞书 / Telegram 上手动过一遍。
+
 ### P2 通用远程登录（约 3 天）
 
 | ID | 任务 | 依赖 | 验收 |
@@ -416,7 +426,7 @@ Echo 侧（独立仓库，单独 PR）：
 - **T10.1**：每个目标先按服务自己的 PATH 定位 CLI（与 agent 进程一致），版本探测直接执行这个二进制；按实际路径识别安装路线（Codex：standalone / npm / Homebrew；Claude：native / Homebrew / npm；Gemini：npm / Homebrew；Qoder：自更新），没有手动配置命令时自动选用对应的升级命令（Codex standalone 用官方安装脚本）。手动配置的 `version_command` / `update_command` 始终优先。命令执行改为非登录 shell（`/bin/sh -c`），不再读 `~/.profile`。PATH 上有其他副本时在日志和 `/agent-upgrade status` 里告警。本机实测四个目标都定位正确。
 - **T10.3**：自动运行失败时日志带上错误和输出尾部；计划、失败退避、每个目标的上次结果、通知会话都持久化到 `<data_dir>/agent-upgrade-state.json`；`/agent-upgrade status` 显示二进制路径、安装路线、副本告警、上次结果；新增 `/agent-upgrade notify on|off|list`（仅 `allowed_user_ids`），版本变化或失败时通知已登记的会话。
 - **T10.4**：下次运行时间按“上次运行 + 间隔”计算并持久化，重启不再重新计时；服务停机期间错过的运行在启动约 2 分钟后补上；新增 `window = "HH:MM-HH:MM"`（可跨午夜）；空闲判断加入 Echo 任务、隔离 cron 运行和 relay 轮次；用户缓存目录下的文件锁让两个服务不会同时升级同一个 CLI，持有锁期间另一个服务的新消息也会等待。
-- **尚未做**：升级期间的新消息仍然是提示稍后重试，而不是排队；另一个服务进程里正在运行的轮次看不到（锁只保证不会同时升级）；T10.2、T10.5、T10.6、T10.7。
+- **尚未做**：升级期间的新消息仍然是提示稍后重试，而不是排队；另一个服务进程里正在运行的轮次看不到（锁只保证不会同时升级）；T10.2、T10.5、T10.7（T10.6 随 P1 完成，见上）。
 
 ### P9 文档与测试（贯穿）
 

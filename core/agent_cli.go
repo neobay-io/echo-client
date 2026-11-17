@@ -26,6 +26,16 @@ var agentBinMap = map[string]string{
 // DoctorAgentTypes are the agent CLIs `echo-client doctor` inspects by default.
 var DoctorAgentTypes = []string{"claudecode", "codex", "antigravity", "kimi", "gemini", "qoder"}
 
+// agentFallbackDirs are vendor install directories, relative to the home
+// directory, that service managers (launchd, systemd) usually leave off PATH
+// because the vendor installer only edits shell rc files.
+var agentFallbackDirs = map[string][]string{
+	"kimi": {".kimi-code/bin"},
+}
+
+// agentCLIHomeDir is replaced in tests.
+var agentCLIHomeDir = os.UserHomeDir
+
 // AgentCLIBinary returns the executable name an agent type runs.
 func AgentCLIBinary(agentType string) string {
 	if bin, ok := agentBinMap[agentType]; ok {
@@ -34,11 +44,44 @@ func AgentCLIBinary(agentType string) string {
 	return agentType
 }
 
+// ResolveAgentCLI returns the executable an agent type runs: the first match
+// on PATH, else the vendor's default install location. Agent adapters,
+// doctor and the upgrader all use it so they agree on which binary that is.
+func ResolveAgentCLI(agentType string) (string, error) {
+	bin := AgentCLIBinary(agentType)
+	if path, err := exec.LookPath(bin); err == nil {
+		return path, nil
+	}
+	if path := fallbackAgentCLI(agentType, bin); path != "" {
+		return path, nil
+	}
+	return "", fmt.Errorf("%q not found in PATH", bin)
+}
+
+func fallbackAgentCLI(agentType, bin string) string {
+	dirs := agentFallbackDirs[agentType]
+	if len(dirs) == 0 {
+		return ""
+	}
+	home, err := agentCLIHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	for _, rel := range dirs {
+		candidate := filepath.Join(home, rel, bin)
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // AgentCLIInstall is one executable with the CLI's name on PATH.
 type AgentCLIInstall struct {
 	Path     string // entry on PATH
 	Resolved string // after following symlinks; empty if broken
 	Broken   bool   // dangling symlink or unreadable target
+	OffPath  bool   // found in the vendor's install directory, not on PATH
 }
 
 // AgentCLIInfo describes how an agent CLI resolves for this process.
@@ -74,6 +117,9 @@ func InspectAgentCLI(ctx context.Context, agentType string) AgentCLIInfo {
 			resolved, _ := filepath.EvalSymlinks(selectedPath)
 			info.Selected = &AgentCLIInstall{Path: selectedPath, Resolved: resolved}
 		}
+	} else if fallback := fallbackAgentCLI(agentType, info.Binary); fallback != "" {
+		resolved, _ := filepath.EvalSymlinks(fallback)
+		info.Selected = &AgentCLIInstall{Path: fallback, Resolved: resolved, OffPath: true}
 	}
 	for _, install := range installs {
 		if info.Selected != nil && install.Path == info.Selected.Path {
@@ -182,6 +228,9 @@ func describeInstall(install AgentCLIInstall) string {
 	}
 	if install.Broken {
 		s += " (broken)"
+	}
+	if install.OffPath {
+		s += " (not on PATH; vendor install location)"
 	}
 	return s
 }

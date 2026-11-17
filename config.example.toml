@@ -144,11 +144,15 @@ level = "info" # debug, info, warn, error
 # - codex: package_manager (`npm install -g @openai/codex@latest`)
 # - gemini: observe-only by default (manual npm command shown but not auto-run)
 # - qoder: builtin (`qodercli update`)
+# - kimi: builtin (`kimi upgrade --yes`, run on the resolved binary, e.g. ~/.kimi-code/bin/kimi)
+# - antigravity: builtin (`agy update`)
 # 默认策略：
 # - claudecode: builtin（`claude update`）
 # - codex: package_manager（`npm install -g @openai/codex@latest`）
 # - gemini: 默认 observe-only（提供 npm 命令，但默认不执行）
 # - qoder: builtin（`qodercli update`）
+# - kimi: builtin（`kimi upgrade --yes`，针对实际解析到的那份，例如 ~/.kimi-code/bin/kimi）
+# - antigravity: builtin（`agy update`）
 
 # Remote Claude login: disabled by default, explicit administrators + private chats only.
 # Uses the official CLI and accepts one-time authorization codes, NOT persistent tokens.
@@ -211,6 +215,16 @@ level = "info" # debug, info, warn, error
 # version_command = "qodercli --version"
 # update_command = "qodercli update"
 # # Qoder does not support channel or pin_version; built-in updater only supports the vendor-managed latest path
+#
+# [agent_updates.kimi]
+# enabled = true
+# strategy = "builtin"          # self-update; an npm install switches to npm automatically
+# # Kimi Code does not support channel or pin_version
+#
+# [agent_updates.antigravity]
+# enabled = true
+# strategy = "builtin"          # `agy update`; agy also updates itself in the background
+# # agy does not support channel or pin_version
 
 # =============================================================================
 # Speech-to-Text (Voice Messages) / 语音转文字（语音消息）
@@ -911,6 +925,74 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model tier / 可选：指定模型级别
 # model = "auto"  # "auto" | "ultimate" | "performance" | "efficient" | "lite"
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project 5b: Using Kimi Code CLI / 项目 5b：使用 Kimi Code CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires Kimi Code CLI 2.x (https://moonshotai.github.io/kimi-code/), logged in with `kimi login`.
+# The installer puts it in ~/.kimi-code/bin, which services usually lack on
+# PATH; echo-client finds it there anyway (set cmd to use another copy).
+# 需要 Kimi Code CLI 2.x，并已 `kimi login`。安装器放在 ~/.kimi-code/bin，
+# 服务的 PATH 里通常没有，echo-client 会自动去那里找（要用别的副本就设置 cmd）。
+# Each turn runs `kimi -p --output-format stream-json`, resumed with `-S <id>`.
+# 每轮执行 `kimi -p --output-format stream-json`，用 `-S <id>` 续接。
+
+# [[projects]]
+# name = "my-kimi-project"
+#
+# [projects.agent]
+# type = "kimi"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "bypassPermissions"  # the only mode: `kimi -p` runs every tool without asking
+#                             # 唯一可用的模式：`kimi -p` 不经确认执行所有工具
+#                             # (plan/default/auto need ACP, planned) / 其他模式需要 ACP（规划中）
+# model = "kimi-code/k3"      # optional; /model lists the aliases from `kimi provider list`
+# reasoning_level = "high"    # optional; low | high | max, per model (passed as KIMI_MODEL_THINKING_EFFORT)
+# # cmd = "/path/to/kimi"     # optional
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
+# Project 5c: Using Antigravity CLI (agy) / 项目 5c：使用 Antigravity CLI（agy）(uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires agy (https://antigravity.google/docs/cli-overview), signed in.
+# 需要安装 agy 并已登录。
+# Each turn runs `agy -p --output-format stream-json`, resumed with --conversation.
+# 每轮执行 `agy -p --output-format stream-json`，用 --conversation 续接。
+# /list reads agy's conversation database with the sqlite3 CLI (macOS ships it).
+# /list 用 sqlite3 命令读取 agy 的会话库（macOS 自带）。
+
+# [[projects]]
+# name = "my-agy-project"
+#
+# [projects.agent]
+# type = "antigravity"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# mode = "default"
+# model = "gemini-4-argon"    # optional; base model from `agy models`, effort via reasoning_level
+# reasoning_level = "medium"  # optional; low | medium | high | xhigh | max, per model
+#
+# Mode options / 模式说明:
+# - "default":           edits and commands are approved in chat; reads run freely
+#                        编辑和命令在聊天里审批，读取直接执行
+# - "acceptEdits":       --mode accept-edits
+# - "plan":              --mode plan (plan only, no changes / 只规划，不修改)
+# - "auto":              --mode auto (agy reviews its own actions / 由 agy 自己审批)
+# - "bypassPermissions": --dangerously-skip-permissions (required for Echo workers / Echo worker 必须用这个)
 #
 # [[projects.platforms]]
 # type = "telegram"

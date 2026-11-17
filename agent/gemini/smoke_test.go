@@ -256,7 +256,7 @@ func TestSkillDirsPreferAgentsAlias(t *testing.T) {
 
 func waitForGeminiResult(t *testing.T, events <-chan core.Event) {
 	t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(30 * time.Second) // generous: fake CLIs start slowly under parallel package tests
 	for {
 		select {
 		case evt := <-events:
