@@ -233,12 +233,15 @@ func (jm *JobManager) Start(req JobRequest) (*Job, error) {
 	}
 	jm.queues[req.Project] = append(jm.queues[req.Project], job.ID)
 	dispatch := jm.prepareNextJobLocked(req.Project)
+	// Snapshot while still holding the lock: once unlocked, a dispatched runJob
+	// (or a concurrent Cancel/finishJob) mutates job in place.
+	snapshot := job.clone()
 	jm.mu.Unlock()
 
 	if dispatch != nil {
 		go jm.runJob(dispatch)
 	}
-	return job.clone(), nil
+	return snapshot, nil
 }
 
 func (jm *JobManager) Get(jobID string) (*Job, bool) {

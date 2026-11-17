@@ -149,7 +149,7 @@ func TestReviewCycleResultErrorDoesNotRequestRevision(t *testing.T) {
 	if err := origin.startReviewCycle("feishu:chat:user", "reviewer"); !errors.Is(err, authErr) {
 		t.Fatalf("expected authentication failure, got %v", err)
 	}
-	if sends := originAgent.session.Sends(); len(sends) != 1 {
+	if sends := originAgent.Session().Sends(); len(sends) != 1 {
 		t.Fatalf("revision executed after failed review: %v", sends)
 	}
 }

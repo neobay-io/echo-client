@@ -45,6 +45,11 @@ func (a *blockingCronAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
 	return nil, nil
 }
 func (a *blockingCronAgent) Stop() error { return nil }
+func (a *blockingCronAgent) Session() *blockingCronSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
+}
 
 type blockingCronSession struct {
 	events  chan Event
@@ -703,7 +708,7 @@ func TestEngineExecuteLoopJobAutoPausesOnPrimitive(t *testing.T) {
 	if got == nil || got.Enabled {
 		t.Fatalf("loop job = %#v, want disabled after primitive pause", got)
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) == 0 || !strings.Contains(sends[0].prompt, loopPausePrimitive) {
 		t.Fatalf("prompt = %#v, want loop primitive instruction appended", sends)
 	}
@@ -745,7 +750,7 @@ func TestEngineExecuteLoopJobDoesNotAutoPauseWithoutPrimitiveOptIn(t *testing.T)
 	if got == nil || !got.Enabled {
 		t.Fatalf("loop job = %#v, want still enabled", got)
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) == 0 {
 		t.Fatal("expected at least one recorded send")
 	}

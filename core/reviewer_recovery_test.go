@@ -161,7 +161,7 @@ func TestReviewCycleEmptyReviewerDoesNotRequestRevision(t *testing.T) {
 	if err := origin.startReviewCycle("feishu:chat:user", "reviewer"); !errors.Is(err, errEmptyAgentResponse) {
 		t.Fatalf("expected empty review failure, got %v", err)
 	}
-	if sends := originAgent.session.Sends(); len(sends) != 1 {
+	if sends := originAgent.Session().Sends(); len(sends) != 1 {
 		t.Fatalf("origin received revision despite failure: %v", sends)
 	}
 }

@@ -110,11 +110,14 @@ func (s *stubAgentSession) Alive() bool                                         
 func (s *stubAgentSession) Close() error                                         { return nil }
 
 type failingSendAgent struct {
+	mu      sync.Mutex
 	session *failingSendSession
 }
 
 func (a *failingSendAgent) Name() string { return "failing-send" }
 func (a *failingSendAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.session == nil {
 		a.session = &failingSendSession{err: fmt.Errorf("send failed")}
 	}
@@ -124,6 +127,11 @@ func (a *failingSendAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, 
 	return nil, nil
 }
 func (a *failingSendAgent) Stop() error { return nil }
+func (a *failingSendAgent) Session() *failingSendSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
+}
 
 type failingSendSession struct {
 	err error
@@ -139,11 +147,14 @@ func (s *failingSendSession) Alive() bool                                       
 func (s *failingSendSession) Close() error                                         { return nil }
 
 type failOnceRecordingAgent struct {
+	mu      sync.Mutex
 	session *failOnceRecordingSession
 }
 
 func (a *failOnceRecordingAgent) Name() string { return "fail-once-recording" }
 func (a *failOnceRecordingAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.session == nil {
 		a.session = &failOnceRecordingSession{
 			events: make(chan Event, 16),
@@ -156,6 +167,11 @@ func (a *failOnceRecordingAgent) ListSessions(_ context.Context) ([]AgentSession
 	return nil, nil
 }
 func (a *failOnceRecordingAgent) Stop() error { return nil }
+func (a *failOnceRecordingAgent) Session() *failOnceRecordingSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
+}
 
 type failOnceRecordingSession struct {
 	mu        sync.Mutex
@@ -230,11 +246,14 @@ func (s *restartThenFailSession) Close() error                                  
 
 type slowRecordingSendAgent struct {
 	delay   time.Duration
+	mu      sync.Mutex
 	session *slowRecordingSendSession
 }
 
 func (a *slowRecordingSendAgent) Name() string { return "slow-recording-send" }
 func (a *slowRecordingSendAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.session == nil {
 		a.session = &slowRecordingSendSession{
 			delay:  a.delay,
@@ -247,6 +266,11 @@ func (a *slowRecordingSendAgent) ListSessions(_ context.Context) ([]AgentSession
 	return nil, nil
 }
 func (a *slowRecordingSendAgent) Stop() error { return nil }
+func (a *slowRecordingSendAgent) Session() *slowRecordingSendSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
+}
 
 type slowRecordingSendSession struct {
 	delay  time.Duration
@@ -285,18 +309,18 @@ func waitForSlowRecordedSends(t *testing.T, agent *slowRecordingSendAgent, want 
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if agent.session != nil {
-			sends := agent.session.Sends()
+		if agent.Session() != nil {
+			sends := agent.Session().Sends()
 			if len(sends) >= want {
 				return sends
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if agent.session == nil {
+	if agent.Session() == nil {
 		t.Fatalf("expected agent session to start")
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	t.Fatalf("send count = %d, want at least %d", len(sends), want)
 	return nil
 }
@@ -361,6 +385,14 @@ func (a *recordingSendAgent) ListSessions(_ context.Context) ([]AgentSessionInfo
 }
 func (a *recordingSendAgent) Stop() error { return nil }
 
+// Session returns the lazily started session. StartSession runs on engine
+// goroutines, so tests must read it through this accessor.
+func (a *recordingSendAgent) Session() *recordingSendSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
+}
+
 type scriptedRecordingAgent struct {
 	mu        sync.Mutex
 	responses []string
@@ -383,6 +415,11 @@ func (a *scriptedRecordingAgent) ListSessions(_ context.Context) ([]AgentSession
 	return nil, nil
 }
 func (a *scriptedRecordingAgent) Stop() error { return nil }
+func (a *scriptedRecordingAgent) Session() *scriptedRecordingSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.session
+}
 
 type listDeleteAgent struct {
 	sessions []AgentSessionInfo
@@ -578,18 +615,18 @@ func waitForRecordedSends(t *testing.T, agent *recordingSendAgent, want int) []r
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if agent.session != nil {
-			sends := agent.session.Sends()
+		if agent.Session() != nil {
+			sends := agent.Session().Sends()
 			if len(sends) >= want {
 				return sends
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if agent.session == nil {
+	if agent.Session() == nil {
 		t.Fatalf("expected agent session to start")
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	t.Fatalf("send count = %d, want at least %d", len(sends), want)
 	return nil
 }
@@ -709,21 +746,34 @@ func (a *stubWorkDirAgent) SetWorkDir(dir string) { a.workDir = dir }
 func (a *stubWorkDirAgent) GetWorkDir() string    { return a.workDir }
 
 type stubPlatformEngine struct {
-	n    string
-	sent []string
+	n      string
+	sentMu sync.Mutex
+	sent   []string
 }
 
 func (p *stubPlatformEngine) Name() string               { return p.n }
 func (p *stubPlatformEngine) Start(MessageHandler) error { return nil }
 func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) error {
+	p.sentMu.Lock()
+	defer p.sentMu.Unlock()
 	p.sent = append(p.sent, content)
 	return nil
 }
 func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) error {
+	p.sentMu.Lock()
+	defer p.sentMu.Unlock()
 	p.sent = append(p.sent, content)
 	return nil
 }
 func (p *stubPlatformEngine) Stop() error { return nil }
+
+// Sent returns a copy of the messages sent so far. The engine replies from its
+// own goroutines, so tests that observe async replies must read through this.
+func (p *stubPlatformEngine) Sent() []string {
+	p.sentMu.Lock()
+	defer p.sentMu.Unlock()
+	return append([]string(nil), p.sent...)
+}
 
 type stubCardPlatform struct {
 	mu    sync.Mutex
@@ -2123,7 +2173,7 @@ func TestStartReviewCycleRunsReviewerAndOriginRevision(t *testing.T) {
 		t.Fatalf("startReviewCycle: %v", err)
 	}
 
-	reviewerSends := reviewerAgent.session.Sends()
+	reviewerSends := reviewerAgent.Session().Sends()
 	if len(reviewerSends) != 1 {
 		t.Fatalf("reviewer send count = %d, want 1", len(reviewerSends))
 	}
@@ -2140,7 +2190,7 @@ func TestStartReviewCycleRunsReviewerAndOriginRevision(t *testing.T) {
 		t.Fatalf("reviewer prompt = %q, want security-review skill hint", reviewerSends[0].prompt)
 	}
 
-	originSends := originAgent.session.Sends()
+	originSends := originAgent.Session().Sends()
 	if len(originSends) != 2 {
 		t.Fatalf("origin send count = %d, want 2 (packet + revision)", len(originSends))
 	}
@@ -2362,7 +2412,7 @@ func TestStartReviewCycleCompactsLongOriginSummary(t *testing.T) {
 		t.Fatalf("startReviewCycle: %v", err)
 	}
 
-	originSends := originAgent.session.Sends()
+	originSends := originAgent.Session().Sends()
 	if len(originSends) != 2 {
 		t.Fatalf("origin send count = %d, want 2 (packet + revision)", len(originSends))
 	}
@@ -2420,7 +2470,7 @@ func TestStartReviewCycleCompactsLongReviewerSummary(t *testing.T) {
 		t.Fatalf("startReviewCycle: %v", err)
 	}
 
-	originSends := originAgent.session.Sends()
+	originSends := originAgent.Session().Sends()
 	if len(originSends) != 2 {
 		t.Fatalf("origin send count = %d, want 2 (packet + revision)", len(originSends))
 	}
@@ -2474,7 +2524,7 @@ func TestStartReviewCycleRetriesOversizedReviewPacket(t *testing.T) {
 		t.Fatalf("startReviewCycle: %v", err)
 	}
 
-	originSends := originAgent.session.Sends()
+	originSends := originAgent.Session().Sends()
 	if len(originSends) != 3 {
 		t.Fatalf("origin send count = %d, want 3 (packet + retry + revision)", len(originSends))
 	}
@@ -2482,7 +2532,7 @@ func TestStartReviewCycleRetriesOversizedReviewPacket(t *testing.T) {
 		t.Fatalf("packet retry prompt = %q, want compact retry instructions", originSends[1].prompt)
 	}
 
-	reviewerSends := reviewerAgent.session.Sends()
+	reviewerSends := reviewerAgent.Session().Sends()
 	if len(reviewerSends) != 1 {
 		t.Fatalf("reviewer send count = %d, want 1", len(reviewerSends))
 	}
@@ -2528,12 +2578,12 @@ func TestStartReviewCycleFailsWhenRetriedReviewPacketIsStillOversized(t *testing
 		t.Fatalf("error = %q, want %q", got, want)
 	}
 
-	originSends := originAgent.session.Sends()
+	originSends := originAgent.Session().Sends()
 	if len(originSends) != 2 {
 		t.Fatalf("origin send count = %d, want 2 (packet + retry)", len(originSends))
 	}
-	if reviewerAgent.session != nil && len(reviewerAgent.session.Sends()) != 0 {
-		t.Fatalf("expected reviewer not to receive a prompt, got %#v", reviewerAgent.session.Sends())
+	if reviewerAgent.Session() != nil && len(reviewerAgent.Session().Sends()) != 0 {
+		t.Fatalf("expected reviewer not to receive a prompt, got %#v", reviewerAgent.Session().Sends())
 	}
 }
 
@@ -2568,12 +2618,12 @@ func TestStartReviewCycleFailsWhenRetriedReviewPacketIsEmpty(t *testing.T) {
 		t.Fatalf("error = %q, want %q", got, want)
 	}
 
-	originSends := originAgent.session.Sends()
+	originSends := originAgent.Session().Sends()
 	if len(originSends) != 2 {
 		t.Fatalf("origin send count = %d, want 2 (packet + retry)", len(originSends))
 	}
-	if reviewerAgent.session != nil && len(reviewerAgent.session.Sends()) != 0 {
-		t.Fatalf("expected reviewer not to receive a prompt, got %#v", reviewerAgent.session.Sends())
+	if reviewerAgent.Session() != nil && len(reviewerAgent.Session().Sends()) != 0 {
+		t.Fatalf("expected reviewer not to receive a prompt, got %#v", reviewerAgent.Session().Sends())
 	}
 }
 
@@ -2597,7 +2647,7 @@ func TestStartReviewCycleAllowsCurrentProjectAsReviewerWhenNoReviewerRole(t *tes
 		t.Fatalf("startReviewCycle self-review: %v", err)
 	}
 
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) != 3 {
 		t.Fatalf("send count = %d, want 3 (packet + review + revision)", len(sends))
 	}
@@ -2905,7 +2955,7 @@ func TestProcessInteractiveMessage_IncludesQuotedContextInPrompt(t *testing.T) {
 
 	e.processInteractiveMessage(p, msg, session)
 
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) != 1 {
 		t.Fatalf("expected 1 send, got %d", len(sends))
 	}
@@ -2950,7 +3000,8 @@ func TestHandleMessage_QueuesBusyPromptAndDrains(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		return len(p.sent) > 0 && strings.Contains(p.sent[len(p.sent)-1], "Queued")
+		sent := p.Sent()
+		return len(sent) > 0 && strings.Contains(sent[len(sent)-1], "Queued")
 	}, "queued notice")
 	sends := waitForSlowRecordedSends(t, agent, 2)
 	if !strings.Contains(sends[0].prompt, "first") {
@@ -3023,7 +3074,7 @@ func TestHandleMessage_SlashCommandWithAttachmentDoesNotQueue(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		for _, sent := range p.sent {
+		for _, sent := range p.Sent() {
 			if strings.Contains(sent, "not an echo-client command") {
 				return true
 			}
@@ -3082,7 +3133,7 @@ func TestPromptQueue_RequeueRetryAfterSessionUnlock(t *testing.T) {
 	}
 	e.drainPromptQueue(queueKey)
 	time.Sleep(promptQueueRetryDelay + 50*time.Millisecond)
-	if agent.session != nil && len(agent.session.Sends()) != 0 {
+	if agent.Session() != nil && len(agent.Session().Sends()) != 0 {
 		t.Fatalf("queued prompt sent while session was locked")
 	}
 	session.Unlock()
@@ -3165,7 +3216,8 @@ func TestCmdSwitchCancelsPendingSnapshotQueuedPrompts(t *testing.T) {
 		t.Fatalf("queue items after switch = %#v, want none", snap.Items)
 	}
 	waitForCondition(t, func() bool {
-		return len(p.sent) > 0 && strings.Contains(p.sent[len(p.sent)-1], "Cancelled 1 queued")
+		sent := p.Sent()
+		return len(sent) > 0 && strings.Contains(sent[len(sent)-1], "Cancelled 1 queued")
 	}, "switch cancellation notice")
 }
 
@@ -3994,7 +4046,7 @@ func TestHandleMessage_BuffersAttachmentsUntilTextArrives(t *testing.T) {
 	if !strings.Contains(p.sent[0], "Received 1 attachment") {
 		t.Fatalf("buffering ack = %q", p.sent[0])
 	}
-	if agent.session != nil && len(agent.session.Sends()) != 0 {
+	if agent.Session() != nil && len(agent.Session().Sends()) != 0 {
 		t.Fatalf("expected no agent send for image-only message")
 	}
 
@@ -4008,15 +4060,15 @@ func TestHandleMessage_BuffersAttachmentsUntilTextArrives(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if agent.session != nil && len(agent.session.Sends()) == 1 {
+		if agent.Session() != nil && len(agent.Session().Sends()) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if agent.session == nil {
+	if agent.Session() == nil {
 		t.Fatal("expected agent session to start")
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) != 1 {
 		t.Fatalf("send count = %d, want 1", len(sends))
 	}
@@ -4047,21 +4099,21 @@ func TestHandleMessage_SendsTextAndImagesImmediately(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if agent.session != nil && len(agent.session.Sends()) == 1 {
+		if agent.Session() != nil && len(agent.Session().Sends()) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if agent.session == nil {
+	if agent.Session() == nil {
 		t.Fatal("expected agent session to start")
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) != 1 {
 		t.Fatalf("send count = %d, want 1", len(sends))
 	}
-	for _, sent := range p.sent {
+	for _, sent := range p.Sent() {
 		if strings.Contains(sent, "Received 1 attachment") {
-			t.Fatalf("expected no buffering ack for mixed message, got %#v", p.sent)
+			t.Fatalf("expected no buffering ack for mixed message, got %#v", p.Sent())
 		}
 	}
 	if sends[0].prompt != "summarize this" || len(sends[0].images) != 1 {
@@ -4091,12 +4143,12 @@ func TestHandleMessage_BufferedAttachmentsStayScopedToSessionKey(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if agent.session != nil && len(agent.session.Sends()) == 1 {
+		if agent.Session() != nil && len(agent.Session().Sends()) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) != 1 {
 		t.Fatalf("send count = %d, want 1", len(sends))
 	}
@@ -4135,12 +4187,12 @@ func TestHandleMessage_BuffersFileOnlyUntilTextArrives(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if agent.session != nil && len(agent.session.Sends()) == 1 {
+		if agent.Session() != nil && len(agent.Session().Sends()) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if len(sends) != 1 {
 		t.Fatalf("send count = %d, want 1", len(sends))
 	}
@@ -4171,7 +4223,7 @@ func TestHandleMessage_BuffersTextWhileCollectActive(t *testing.T) {
 		ReplyCtx:   "ctx",
 	})
 
-	if agent.session != nil && len(agent.session.Sends()) != 0 {
+	if agent.Session() != nil && len(agent.Session().Sends()) != 0 {
 		t.Fatalf("expected no agent send while collection is active")
 	}
 	batch := e.getPendingCollection("test:user1")
@@ -4338,8 +4390,8 @@ func TestHandleMessage_CollectDeferredSendKeepsAwaitingInstructionWhenSessionBus
 	if !e.isPendingCollectionAwaitingInstruction("test:user1") {
 		t.Fatal("expected final instruction to remain pending after busy flush")
 	}
-	if agent.session != nil {
-		t.Fatalf("expected no agent session to start while session is busy, got %#v", agent.session.Sends())
+	if agent.Session() != nil {
+		t.Fatalf("expected no agent session to start while session is busy, got %#v", agent.Session().Sends())
 	}
 
 	session.Unlock()
@@ -4518,7 +4570,7 @@ func TestHandleMessage_CollectSendFailureKeepsBatch(t *testing.T) {
 		t.Fatalf("expected batch to survive send failure, got %#v", batch)
 	}
 	waitForCondition(t, func() bool {
-		for _, sent := range p.sent {
+		for _, sent := range p.Sent() {
 			if strings.Contains(sent, "send failed") {
 				return true
 			}
@@ -4546,7 +4598,7 @@ func TestHandleMessage_SendFailureStillPreservesHistoryOutsideCollection(t *test
 		ReplyCtx:   "ctx",
 	})
 
-	waitForCondition(t, func() bool { return len(p.sent) > 0 }, "normal send failure reply")
+	waitForCondition(t, func() bool { return len(p.Sent()) > 0 }, "normal send failure reply")
 	session := e.sessions.GetOrCreateActive("test:user1")
 	if session.HistoryLen() != 1 {
 		t.Fatalf("expected failed normal send to remain in history, got len=%d", session.HistoryLen())
@@ -4593,7 +4645,7 @@ func TestHandleMessage_CollectSendDoesNotBlockCallerOnSlowSend(t *testing.T) {
 	}
 
 	waitForCondition(t, func() bool {
-		return agent.session != nil && len(agent.session.Sends()) == 1
+		return agent.Session() != nil && len(agent.Session().Sends()) == 1
 	}, "slow collection flush send")
 	if e.getPendingCollection("test:user1") != nil {
 		waitForCondition(t, func() bool { return e.getPendingCollection("test:user1") == nil }, "collection clear after slow send")
@@ -4632,7 +4684,7 @@ func TestHandleMessage_CollectRestartThenFailKeepsBatch(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		for _, sent := range p.sent {
+		for _, sent := range p.Sent() {
 			if strings.Contains(sent, "retry send failed") {
 				return true
 			}
@@ -4693,7 +4745,7 @@ func TestHandleMessage_CollectDeferredPlainTextRetryAfterFailure(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		for _, sent := range p.sent {
+		for _, sent := range p.Sent() {
 			if strings.Contains(sent, "temporary send failure") {
 				return true
 			}
@@ -4717,9 +4769,9 @@ func TestHandleMessage_CollectDeferredPlainTextRetryAfterFailure(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		return agent.session != nil && len(agent.session.Sends()) == 1
+		return agent.Session() != nil && len(agent.Session().Sends()) == 1
 	}, "deferred plain-text retry send")
-	sends := agent.session.Sends()
+	sends := agent.Session().Sends()
 	if !strings.Contains(sends[0].prompt, "Final instruction:\ndraft a short reply") {
 		t.Fatalf("prompt missing retried instruction: %q", sends[0].prompt)
 	}
@@ -4757,7 +4809,7 @@ func TestHandleMessage_CollectCommandRetryAnnouncesReuse(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		for _, sent := range p.sent {
+		for _, sent := range p.Sent() {
 			if strings.Contains(sent, "temporary send failure") {
 				return true
 			}
@@ -4776,7 +4828,7 @@ func TestHandleMessage_CollectCommandRetryAnnouncesReuse(t *testing.T) {
 	})
 
 	waitForCondition(t, func() bool {
-		for _, sent := range p.sent {
+		for _, sent := range p.Sent() {
 			if strings.Contains(sent, "Retrying the previous final instruction.") {
 				return true
 			}
@@ -4784,7 +4836,7 @@ func TestHandleMessage_CollectCommandRetryAnnouncesReuse(t *testing.T) {
 		return false
 	}, "retrying guidance")
 	waitForCondition(t, func() bool {
-		return agent.session != nil && len(agent.session.Sends()) == 1
+		return agent.Session() != nil && len(agent.Session().Sends()) == 1
 	}, "command retry send")
 }
 
