@@ -246,7 +246,7 @@ func TestIFlowTurnScheduleResultReplacesFallbackTimer(t *testing.T) {
 
 	turn.scheduleResult(nil)
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
 		if turn.readyForResult() {
 			return
@@ -275,7 +275,7 @@ func TestIFlowTurnPendingToolTimeoutReleasesTurn(t *testing.T) {
 		t.Fatalf("added = %#v", added)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
 		if turn.readyForResult() {
 			content := turn.finalContent()
@@ -340,7 +340,7 @@ while :; do sleep 1; done
 		t.Fatalf("Send #1: %v", err)
 	}
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(waitTimeout)
 	gotResult := false
 	for !gotResult {
 		select {

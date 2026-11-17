@@ -96,7 +96,7 @@ func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan
 	var event core.Event
 	select {
 	case event = <-events:
-	case <-time.After(3 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timeout waiting for permission event")
 	}
 	if event.Type != core.EventPermissionRequest {
@@ -117,7 +117,7 @@ func testBridgeDecision(t *testing.T, bridge *agyPermissionBridge, events <-chan
 		if err != nil {
 			t.Fatalf("Relay: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timeout waiting for hook response")
 	}
 

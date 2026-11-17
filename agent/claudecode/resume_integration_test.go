@@ -93,7 +93,7 @@ func TestClaudeReadLoopClosesDoneWhenCancelledWithStderr(t *testing.T) {
 	go cs.readLoop(stdout, &stderr)
 	select {
 	case <-cs.done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("cancelled error path did not close done")
 	}
 	if _, ok := <-cs.events; ok {

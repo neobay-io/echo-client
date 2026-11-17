@@ -134,7 +134,7 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 
 	var gotTextLen int
 	var gotResult bool
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 
 	for !gotResult {
 		select {
@@ -191,7 +191,7 @@ wait $child
 		t.Fatalf("Send: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
 		pid, _ := cs.currentProcessInfo()
 		if pid != 0 {
@@ -216,7 +216,7 @@ wait $child
 		if ok {
 			t.Fatal("expected events channel to be closed after forced kill")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for events channel to close")
 	}
 }
@@ -260,7 +260,7 @@ echo '{"type":"turn.completed"}'
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-cs.Events():
@@ -330,7 +330,7 @@ echo '{"type":"turn.completed"}'
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-cs.Events():
@@ -394,7 +394,7 @@ echo '{"type":"turn.completed"}'
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-cs.Events():
@@ -487,7 +487,7 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 }
 
 func waitForFileContent(path string) ([]byte, error) {
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil && len(data) > 0 {

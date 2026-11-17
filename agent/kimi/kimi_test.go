@@ -202,7 +202,7 @@ if [ ` + string(rune('0'+exitCode)) + ` -ne 0 ]; then echo "boom: quota exhauste
 func collectTurn(t *testing.T, s core.AgentSession) []core.Event {
 	t.Helper()
 	var events []core.Event
-	timeout := time.After(10 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-s.Events():

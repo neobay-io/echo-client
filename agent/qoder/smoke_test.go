@@ -86,7 +86,7 @@ func TestAgentSessionSmoke_UsesManagedWorkspaceAndExtraDirs(t *testing.T) {
 
 func waitForQoderResult(t *testing.T, events <-chan core.Event) {
 	t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-events:
@@ -124,7 +124,7 @@ func readQoderText(t *testing.T, path string) string {
 
 func waitForQoderArtifact(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(path); err == nil {
 			return

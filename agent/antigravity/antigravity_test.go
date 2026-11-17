@@ -167,7 +167,7 @@ echo '` + result + `'
 func collectTurn(t *testing.T, s core.AgentSession, onPermission func(core.Event)) []core.Event {
 	t.Helper()
 	var events []core.Event
-	timeout := time.After(20 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-s.Events():

@@ -89,7 +89,7 @@ func fakeCodexArgs(t *testing.T, mode, resumeID string) []string {
 	if err := cs.Send("hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	timeout := time.After(30 * time.Second) // generous: fake CLIs start slowly under parallel package tests
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-cs.Events():

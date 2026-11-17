@@ -77,11 +77,13 @@ func TestAgentStartSession_UsesManagedWorkspaceAndExtraDirs(t *testing.T) {
 	}
 }
 
+// waitForFile waits until the fake CLI has written path. It requires content,
+// not just existence: the shell creates the file before printf writes to it.
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

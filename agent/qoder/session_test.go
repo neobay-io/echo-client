@@ -51,7 +51,7 @@ echo '{"type":"result","session_id":"qoder-session-1","done":true,"message":{"co
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-qs.Events():
@@ -127,7 +127,7 @@ echo '{"type":"result","session_id":"qoder-session-2","done":true,"message":{"co
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-qs.Events():
@@ -206,7 +206,7 @@ echo '{"type":"result","session_id":"qoder-session-3","done":true,"message":{"co
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-qs.Events():
@@ -275,7 +275,7 @@ echo '{"type":"result","session_id":"qoder-session-model","done":true,"message":
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-qs.Events():
@@ -338,7 +338,7 @@ echo '{"type":"result","session_id":"qoder-session-plan","done":true,"message":{
 		t.Fatalf("Send: %v", err)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-qs.Events():
@@ -395,7 +395,7 @@ func TestHandleResult_UsesTopLevelResultFallback(t *testing.T) {
 		if evt.SessionID != "qoder-session-result" {
 			t.Fatalf("event sessionID = %q, want %q", evt.SessionID, "qoder-session-result")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -427,7 +427,7 @@ func TestHandleResult_PrefersMessageContentOverTopLevelResult(t *testing.T) {
 		if evt.Content != "message content wins" {
 			t.Fatalf("event content = %q, want message content", evt.Content)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -463,7 +463,7 @@ func TestHandleResult_ConcatenatesMultipleTextItems(t *testing.T) {
 		if evt.Content != "first block\n\nsecond block" {
 			t.Fatalf("event content = %q, want concatenated text blocks", evt.Content)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -495,7 +495,7 @@ func TestHandleResult_FallsBackWhenMessageHasNoTextItems(t *testing.T) {
 		if evt.Content != "fallback result text" {
 			t.Fatalf("event content = %q, want fallback top-level result", evt.Content)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -531,7 +531,7 @@ func TestHandleResult_FallsBackToAssistantTextWhenResultIsEmpty(t *testing.T) {
 		if evt.Content != "assistant text without finished status" {
 			t.Fatalf("event content = %q, want assistant text fallback", evt.Content)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -574,7 +574,7 @@ func TestHandleResult_FallbackSkipsInProgressAssistantText(t *testing.T) {
 		if evt.Content != "The answer is 42" {
 			t.Fatalf("text event content = %q, want finished text", evt.Content)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for text event")
 	}
 
@@ -586,7 +586,7 @@ func TestHandleResult_FallbackSkipsInProgressAssistantText(t *testing.T) {
 		if evt.Content != "The answer is 42" {
 			t.Fatalf("event content = %q, want only finished assistant text fallback", evt.Content)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -621,7 +621,7 @@ func TestHandleResult_PrefersResultOverAssistantTextFallback(t *testing.T) {
 		if evt.Content != "top-level result text" {
 			t.Fatalf("event content = %q, want top-level result", evt.Content)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -661,7 +661,7 @@ echo '{"type":"result","session_id":"qoder-session-reset","done":true}'
 		if evt.Content != "" {
 			t.Fatalf("event content = %q, want no stale assistant fallback", evt.Content)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for result event")
 	}
 }
@@ -700,7 +700,7 @@ func TestHandleAssistant_EmitsToolUseForToolUseItemsWithoutFinishedStatus(t *tes
 		if evt.ToolInput != "/tmp/demo/README.md" {
 			t.Fatalf("tool input = %q, want file path preview", evt.ToolInput)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitTimeout):
 		t.Fatal("timed out waiting for tool_use event")
 	}
 }

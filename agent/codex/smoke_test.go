@@ -157,7 +157,7 @@ func TestSkillDirsPreferAgentsAlias(t *testing.T) {
 
 func waitForResult(t *testing.T, events <-chan core.Event) {
 	t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case evt := <-events:
@@ -195,7 +195,7 @@ func readTextFile(t *testing.T, path string) string {
 
 func waitForArtifact(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(path); err == nil {
 			return
