@@ -5006,6 +5006,18 @@ func (e *Engine) renderHelpCard() *Card {
 		Build()
 }
 
+// builtinCommandDescription is a builtin command's localized menu text.
+// Message keys cannot always use the command's "-" (agent-upgrade is keyed
+// agent_upgrade), so the "_" form is tried too. Empty if there is none.
+func (e *Engine) builtinCommandDescription(id string) string {
+	for _, key := range []string{id, strings.ReplaceAll(id, "-", "_")} {
+		if desc := e.i18n.T(MsgKey(key)); desc != key {
+			return desc
+		}
+	}
+	return ""
+}
+
 // GetAllCommands returns all available commands for bot menu registration.
 // It includes built-in commands (with localized descriptions) and custom commands.
 func (e *Engine) GetAllCommands() []BotCommandInfo {
@@ -5031,7 +5043,7 @@ func (e *Engine) GetAllCommands() []BotCommandInfo {
 
 		commands = append(commands, BotCommandInfo{
 			Command:     primaryName,
-			Description: e.i18n.T(MsgKey(primaryName)),
+			Description: e.builtinCommandDescription(primaryName),
 		})
 	}
 
@@ -5153,8 +5165,10 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			fmt.Fprintf(&sb, "\n/model page N (1-%d)", pageCount)
 		}
 
+		// Model ids are long; Feishu and Telegram cut off button text, so
+		// give each model its own row there.
 		buttonsPerRow := 3
-		if strings.EqualFold(p.Name(), "feishu") {
+		if strings.EqualFold(p.Name(), "feishu") || strings.EqualFold(p.Name(), "telegram") {
 			buttonsPerRow = 1
 		}
 
@@ -5218,10 +5232,10 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
 }
 
-func modelPickerOptions(platformName, _ string, current string, available []ModelOption) []ModelOption {
-	if !strings.EqualFold(platformName, "feishu") {
-		return available
-	}
+// modelPickerOptions lists the agent's models, with the current one first
+// when the agent does not list it (e.g. a model set by id), so every
+// platform's picker shows what is in use.
+func modelPickerOptions(_, _ string, current string, available []ModelOption) []ModelOption {
 	options := append([]ModelOption(nil), available...)
 	if current = strings.TrimSpace(current); current != "" && !containsModelOption(options, current) {
 		options = append([]ModelOption{{Name: current, Desc: "Current model"}}, options...)

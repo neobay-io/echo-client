@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 
@@ -51,6 +54,10 @@ type Platform struct {
 	lastSentMu            sync.Mutex
 	lastSentMessageIDs    map[int64]int
 	cardNavHandler        core.CardNavigationHandler
+	// commandAliases maps menu names Telegram accepts (agent_upgrade) back to
+	// the engine's command names (agent-upgrade). Set by RegisterCommands.
+	commandMu      sync.RWMutex
+	commandAliases map[string]string
 }
 
 // SetCardNavigationHandler implements core.CardNavigable so the engine can route
@@ -384,6 +391,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					text = strings.ReplaceAll(text, "@"+p.bot.Self.UserName, "")
 					text = strings.TrimSpace(text)
 				}
+				text = p.restoreCommand(text)
 
 				coreMsg := &core.Message{
 					SessionKey: sessionKey, Platform: "telegram",
@@ -881,6 +889,60 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	return nil
 }
 
+// telegramUploadLimit is the Bot API's limit for files a bot uploads.
+const telegramUploadLimit = 50 << 20
+
+// telegramCaptionLimit is the longest caption Telegram accepts.
+const telegramCaptionLimit = 1024
+
+// SendFile sends a local file to the chat as a document (core.FileSender),
+// so agents can hand back files on Telegram as they do on Feishu.
+func (p *Platform) SendFile(ctx context.Context, rctx any, path string, caption string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("telegram: SendFile: invalid reply context type %T", rctx)
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("telegram: SendFile: empty path")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("telegram: SendFile: path must be absolute")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("telegram: SendFile: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("telegram: SendFile: %s is a directory", filepath.Base(path))
+	}
+	if info.Size() > telegramUploadLimit {
+		return fmt.Errorf("telegram: SendFile: %s is %d MB; bots can upload at most 50 MB", filepath.Base(path), info.Size()>>20)
+	}
+	if p.bot == nil {
+		return fmt.Errorf("telegram: bot not initialized")
+	}
+
+	caption = strings.TrimSpace(caption)
+	if len([]rune(caption)) > telegramCaptionLimit {
+		// Too long for a caption: send it as its own message first.
+		if err := p.Send(ctx, rc, caption); err != nil {
+			return fmt.Errorf("telegram: send file caption: %w", err)
+		}
+		caption = ""
+	}
+	doc := tgbotapi.NewDocument(rc.chatID, tgbotapi.FilePath(path))
+	doc.Caption = caption
+	doc.ReplyToMessageID = rc.messageID
+	doc.AllowSendingWithoutReply = true
+	sent, err := p.bot.Send(doc)
+	if err != nil {
+		return fmt.Errorf("telegram: send file: %w", err)
+	}
+	p.rememberSentMessage(rc.chatID, sent.MessageID)
+	return nil
+}
+
 // DeletePreviewMessage deletes a stale preview message so the caller can send a fresh one.
 func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
 	h, ok := previewHandle.(*telegramPreviewHandle)
@@ -1043,48 +1105,97 @@ func (p *Platform) Stop() error {
 }
 
 // RegisterCommands registers bot commands with Telegram for the command menu.
+// Names Telegram rejects only because of "-" or upper case are registered in
+// Telegram's form (agent-upgrade → agent_upgrade) and mapped back when used.
 func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	if p.bot == nil {
 		return fmt.Errorf("telegram: bot not initialized")
 	}
-
-	// Telegram limits: max 100 commands, description max 256 chars
-	var tgCommands []tgbotapi.BotCommand
-	for _, c := range commands {
-		if !isValidTelegramCommand(c.Command) {
-			slog.Warn("telegram: invalid command, skipping",
-				slog.String("command", c.Command),
-				slog.String("description", c.Description))
-			continue
-		}
-		desc := c.Description
-		if len(desc) > 256 {
-			desc = desc[:253] + "..."
-		}
-		tgCommands = append(tgCommands, tgbotapi.BotCommand{
-			Command:     c.Command,
-			Description: desc,
-		})
-	}
-
-	// Limit to 100 commands
-	if len(tgCommands) > 100 {
-		tgCommands = tgCommands[:100]
-	}
+	tgCommands, aliases := telegramBotCommands(commands)
+	p.commandMu.Lock()
+	p.commandAliases = aliases
+	p.commandMu.Unlock()
 
 	if len(tgCommands) == 0 {
 		slog.Debug("telegram: no commands to register")
 		return nil
 	}
-
 	cfg := tgbotapi.NewSetMyCommands(tgCommands...)
-	_, err := p.bot.Request(cfg)
-	if err != nil {
+	if _, err := p.bot.Request(cfg); err != nil {
 		return fmt.Errorf("telegram: setMyCommands failed: %w", err)
 	}
-
-	slog.Info("telegram: registered bot commands", "count", len(tgCommands))
+	slog.Info("telegram: registered bot commands", "count", len(tgCommands), "renamed", len(aliases))
 	return nil
+}
+
+// telegramCommandName is the form Telegram accepts for a command name.
+func telegramCommandName(cmd string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(cmd)), "-", "_")
+}
+
+// telegramBotCommands converts the engine's commands to Telegram's menu
+// (at most 100, descriptions at most 256 bytes) and returns the renamed
+// ones as Telegram name → engine name.
+func telegramBotCommands(commands []core.BotCommandInfo) ([]tgbotapi.BotCommand, map[string]string) {
+	var tgCommands []tgbotapi.BotCommand
+	aliases := make(map[string]string)
+	seen := make(map[string]bool)
+	for _, c := range commands {
+		name := telegramCommandName(c.Command)
+		if !isValidTelegramCommand(name) {
+			slog.Warn("telegram: command name not allowed by Telegram, skipping", "command", c.Command)
+			continue
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if name != c.Command {
+			aliases[name] = c.Command
+		}
+		desc := strings.TrimSpace(c.Description)
+		if desc == "" {
+			desc = c.Command // Telegram requires a description
+		}
+		if len(desc) > 256 {
+			desc = truncateUTF8(desc, 253) + "..."
+		}
+		tgCommands = append(tgCommands, tgbotapi.BotCommand{Command: name, Description: desc})
+		if len(tgCommands) == 100 {
+			break
+		}
+	}
+	return tgCommands, aliases
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a character.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// restoreCommand maps a renamed menu command back to the engine's name:
+// "/agent_upgrade run all" → "/agent-upgrade run all".
+func (p *Platform) restoreCommand(text string) string {
+	if !strings.HasPrefix(text, "/") {
+		return text
+	}
+	end := strings.IndexAny(text, " \t\n")
+	if end < 0 {
+		end = len(text)
+	}
+	p.commandMu.RLock()
+	original, ok := p.commandAliases[strings.ToLower(text[1:end])]
+	p.commandMu.RUnlock()
+	if !ok {
+		return text
+	}
+	return "/" + original + text[end:]
 }
 
 // isValidTelegramCommand validates if a command string meets Telegram's requirements.

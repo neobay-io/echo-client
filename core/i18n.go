@@ -447,6 +447,9 @@ const (
 	MsgBuiltinCmdDoctor       MsgKey = "doctor"
 	MsgBuiltinCmdUpgrade      MsgKey = "upgrade"
 	MsgBuiltinCmdAgentUpgrade MsgKey = "agent_upgrade"
+	MsgBuiltinCmdAttach       MsgKey = "attach"
+	MsgBuiltinCmdLoop         MsgKey = "loop"
+	MsgBuiltinCmdTTS          MsgKey = "tts"
 	MsgBuiltinCmdRestart      MsgKey = "restart"
 	MsgBuiltinCmdStatus       MsgKey = "status"
 	MsgBuiltinCmdVersion      MsgKey = "version"
@@ -2898,6 +2901,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看/修改執行階段配置，參數: [get|set|reload] [鍵] [值]",
 		LangJapanese:           "ランタイム設定の表示/変更、引数: [get|set|reload] [キー] [値]",
 		LangSpanish:            "Ver/actualizar configuración en tiempo de ejecución, arg: [get|set|reload] [clave] [valor]",
+	},
+	MsgBuiltinCmdAttach: {
+		LangEnglish:            "Take over a local Claude Code session",
+		LangChinese:            "接管本机的 Claude Code 会话",
+		LangTraditionalChinese: "接管本機的 Claude Code 工作階段",
+		LangJapanese:           "ローカルの Claude Code セッションを引き継ぐ",
+		LangSpanish:            "Tomar el control de una sesión local de Claude Code",
+	},
+	MsgBuiltinCmdLoop: {
+		LangEnglish:            "Manage loop tasks",
+		LangChinese:            "管理 loop 定时任务",
+		LangTraditionalChinese: "管理 loop 定時任務",
+		LangJapanese:           "loop スケジュールタスク管理",
+		LangSpanish:            "Gestionar tareas loop programadas",
+	},
+	MsgBuiltinCmdTTS: {
+		LangEnglish:            "View/switch text-to-speech mode",
+		LangChinese:            "查看/切换语音合成模式",
+		LangTraditionalChinese: "查看/切換語音合成模式",
+		LangJapanese:           "音声合成モードの表示/切り替え",
+		LangSpanish:            "Ver/cambiar modo de síntesis de voz",
 	},
 	MsgBuiltinCmdDoctor: {
 		LangEnglish:            "Run system diagnostics",
