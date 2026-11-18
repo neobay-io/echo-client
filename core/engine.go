@@ -2447,7 +2447,7 @@ func (e *Engine) replyWithInteraction(sessionKey string, p Platform, replyCtx an
 	}
 
 	if bs, ok := p.(InlineButtonSender); ok {
-		if err := bs.SendWithButtons(e.ctx, replyCtx, renderContent, buttonRows); err == nil {
+		if err := bs.SendWithButtons(e.ctx, replyCtx, renderContent, buttonRows); err == nil || errors.Is(err, ErrDeliveryUnknown) {
 			return
 		}
 	}
@@ -5265,7 +5265,7 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 		return
 	}
 	if bs, ok := p.(InlineButtonSender); ok && card.HasButtons() {
-		if err := bs.SendWithButtons(e.ctx, replyCtx, card.RenderText(), card.CollectButtons()); err == nil {
+		if err := bs.SendWithButtons(e.ctx, replyCtx, card.RenderText(), card.CollectButtons()); err == nil || errors.Is(err, ErrDeliveryUnknown) {
 			return
 		}
 	}
@@ -6621,6 +6621,10 @@ func (e *Engine) reply(p Platform, replyCtx any, content string) {
 func (e *Engine) replyWithButtons(p Platform, replyCtx any, content string, buttons [][]ButtonOption) {
 	if bs, ok := p.(InlineButtonSender); ok {
 		if err := bs.SendWithButtons(e.ctx, replyCtx, content, buttons); err == nil {
+			return
+		} else if errors.Is(err, ErrDeliveryUnknown) {
+			// It may have arrived; a plain-text copy would duplicate it.
+			slog.Warn("replyWithButtons: delivery unknown; not sending a plain-text copy", "platform", p.Name(), "error", err)
 			return
 		} else {
 			buttonCount := 0

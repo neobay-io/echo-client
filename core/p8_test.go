@@ -1,6 +1,10 @@
 package core
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"testing"
+)
 
 // P8: every builtin command has a menu description (attach, loop, tts and
 // agent-upgrade had none, so Telegram showed bare names or dropped them).
@@ -33,5 +37,23 @@ func TestModelPickerShowsCurrentModelEverywhere(t *testing.T) {
 	}
 	if len(available) != 2 {
 		t.Fatal("input slice modified")
+	}
+}
+
+// buttonsUnknownPlatform's button sends end with "may have been delivered".
+type buttonsUnknownPlatform struct{ stubPlatformEngine }
+
+func (p *buttonsUnknownPlatform) SendWithButtons(context.Context, any, string, [][]ButtonOption) error {
+	return fmt.Errorf("send: %w", ErrDeliveryUnknown)
+}
+
+// P8 review: a button message that may have been delivered is not sent
+// again as plain text.
+func TestNoPlainTextCopyAfterUnconfirmedButtons(t *testing.T) {
+	p := &buttonsUnknownPlatform{stubPlatformEngine{n: "telegram"}}
+	e := NewEngine("p8", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.replyWithButtons(p, "ctx", "pick one", [][]ButtonOption{{{Text: "a", Data: "a"}}})
+	if len(p.sent) != 0 {
+		t.Fatalf("plain-text copy sent: %v", p.sent)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -65,7 +67,21 @@ type Platform struct {
 	cardNavHandler        core.CardNavigationHandler
 	cancel                context.CancelFunc
 	dedup                 core.MessageDedup
-	botOpenID             string
+	botMu                 sync.RWMutex
+	botOpenID             string // guarded by botMu; "" until the bot is identified
+	tokens                *tokenCache
+	imageBatchWindow      time.Duration
+	batchMu               sync.Mutex
+	imageBatches          map[string]*imageBatch
+	inbound               sync.Map // sessionKey -> *sync.Mutex (inboundLock)
+	runMu                 sync.Mutex
+	runCtx                context.Context // the current run; downloads stop with it
+	gen                   atomic.Uint64   // run generation (held images of an old run are dropped)
+	stopped               atomic.Bool
+	httpClient            *http.Client // resource downloads (nil = http.DefaultClient)
+	dlMu                  sync.Mutex
+	dlToken               string
+	dlTokenExpires        time.Time
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -85,6 +101,22 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	replyInThread, _ := opts["reply_in_thread"].(bool)
+	imageBatchWindow := defaultImageBatchWindow
+	if v, ok := opts["image_batch_window_ms"]; ok {
+		switch n := v.(type) {
+		case int64:
+			imageBatchWindow = time.Duration(n) * time.Millisecond
+		case int:
+			imageBatchWindow = time.Duration(n) * time.Millisecond
+		case float64:
+			imageBatchWindow = time.Duration(n) * time.Millisecond
+		default:
+			return nil, fmt.Errorf("feishu: image_batch_window_ms must be a number")
+		}
+		if imageBatchWindow < 0 || imageBatchWindow > 10*time.Second {
+			return nil, fmt.Errorf("feishu: image_batch_window_ms must be between 0 and 10000")
+		}
+	}
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -97,6 +129,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		}
 	}
 
+	tokens := sharedTokens
 	return &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,
@@ -106,7 +139,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		replyInThread:         replyInThread,
-		client:                lark.NewClient(appID, appSecret),
+		client:                newLarkClient(appID, appSecret, tokens),
+		tokens:                tokens,
+		imageBatchWindow:      imageBatchWindow,
 	}, nil
 }
 
@@ -120,12 +155,22 @@ func (p *Platform) SetCardNavigationHandler(fn core.CardNavigationHandler) {
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.runMu.Lock()
+	p.runCtx = ctx
+	p.runMu.Unlock()
+	p.gen.Add(1)
+	p.stopped.Store(false)
 
-	if openID, err := p.fetchBotOpenID(); err != nil {
-		slog.Warn("feishu: failed to get bot open_id, group chat filtering disabled", "error", err)
+	// Group chats need the bot's open_id to tell whether the bot was
+	// mentioned. Without it the bot ignores group messages (direct messages
+	// still work) and keeps trying in the background.
+	if err := p.identifyBot(ctx); err != nil {
+		slog.Error("feishu: could not get the bot's open_id; group messages are ignored until it is known (retrying every 5 minutes)", "error", err)
+		go p.superviseBotIdentity(ctx)
 	} else {
-		p.botOpenID = openID
-		slog.Info("feishu: bot identified", "open_id", openID)
+		slog.Info("feishu: bot identified", "open_id", p.getBotOpenID())
 	}
 
 	eventHandler := dispatcher.NewEventDispatcher("", "").
@@ -160,11 +205,8 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
-
 	go func() {
-		if err := p.wsClient.Start(ctx); err != nil {
+		if err := p.wsClient.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("feishu: websocket error", "error", err)
 		}
 	}()
@@ -177,7 +219,9 @@ func (p *Platform) addReaction(messageID string) string {
 		return ""
 	}
 	emojiType := p.reactionEmoji
-	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), apiCallTimeout)
+	defer cancel()
+	resp, err := p.client.Im.MessageReaction.Create(ctx,
 		larkim.NewCreateMessageReactionReqBuilder().
 			MessageId(messageID).
 			Body(larkim.NewCreateMessageReactionReqBodyBuilder().
@@ -202,7 +246,9 @@ func (p *Platform) removeReaction(messageID, reactionID string) {
 	if reactionID == "" || messageID == "" {
 		return
 	}
-	resp, err := p.client.Im.MessageReaction.Delete(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), apiCallTimeout)
+	defer cancel()
+	resp, err := p.client.Im.MessageReaction.Delete(ctx,
 		larkim.NewDeleteMessageReactionReqBuilder().
 			MessageId(messageID).
 			ReactionId(reactionID).
@@ -287,8 +333,15 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		chatType = *msg.ChatType
 	}
 
-	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
-		if !isBotMentioned(msg.Mentions, p.botOpenID) {
+	if chatType == "group" && !p.groupReplyAll {
+		botID := p.getBotOpenID()
+		if botID == "" {
+			// Fail closed: without the bot's open_id a mention cannot be
+			// checked, and answering every group message is worse.
+			slog.Warn("feishu: bot open_id unknown; ignoring group message", "chat_id", chatID)
+			return nil
+		}
+		if !isBotMentioned(msg.Mentions, botID) {
 			slog.Debug("feishu: ignoring group message without bot mention", "chat_id", chatID)
 			return nil
 		}
@@ -314,7 +367,18 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 	if chatType == "p2p" && chatID != "" {
 		p.privateChats.Store(chatID, true)
 	}
+	// One chat's messages are handled one at a time, in arrival order.
+	inbound := p.inboundLock(sessionKey)
+	inbound.Lock()
+	defer inbound.Unlock()
+	if p.stopped.Load() {
+		return nil
+	}
 	quoted := p.fetchQuotedMessage(msg.ParentId, msg.RootId)
+	if msgType != "image" {
+		// Images held for a burst go first, keeping the chat's order.
+		p.flushImagesLocked(sessionKey, nil)
+	}
 
 	switch msgType {
 	case "text":
@@ -349,7 +413,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 			slog.Error("feishu: download image failed", "error", err)
 			return nil
 		}
-		p.handler(p, applyQuotedMessage(&core.Message{
+		p.dispatchImage(applyQuotedMessage(&core.Message{
 			SessionKey: sessionKey, Platform: "feishu",
 			MessageID: messageID,
 			UserID:    userID, UserName: userName,
@@ -470,21 +534,8 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	msgType, msgBody := buildReplyContent(content)
-
-	resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-		MessageId(rc.messageID).
-		Body(larkim.NewReplyMessageReqBodyBuilder().
-			MsgType(msgType).
-			Content(msgBody).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: reply api call: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu: reply failed code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	_, err := p.postMessage(ctx, "reply", rc.messageID, rc.chatID, msgType, msgBody)
+	return err
 }
 
 // Send sends a new message to the same chat (not a reply to original message).
@@ -504,42 +555,16 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	msgType, msgBody := buildReplyContent(content)
-
-	// Send a new message to the chat (not a reply)
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(msgType).
-			Content(msgBody).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: send api call: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu: send failed code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	// A new message in the chat (not a reply).
+	_, err := p.postMessage(ctx, "send", "", rc.chatID, msgType, msgBody)
+	return err
 }
 
 // downloadImage fetches an image from Feishu by message_id and image_key.
 func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
-	resp, err := p.client.Im.MessageResource.Get(context.Background(),
-		larkim.NewGetMessageResourceReqBuilder().
-			MessageId(messageID).
-			FileKey(imageKey).
-			Type("image").
-			Build())
+	data, err := p.getResource(p.runContext(), messageID, imageKey, "image")
 	if err != nil {
-		return nil, "", fmt.Errorf("feishu: image API: %w", err)
-	}
-	if !resp.Success() {
-		return nil, "", fmt.Errorf("feishu: image API code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	data, err := io.ReadAll(resp.File)
-	if err != nil {
-		return nil, "", fmt.Errorf("feishu: read image: %w", err)
+		return nil, "", err
 	}
 
 	mimeType := detectMimeType(data)
@@ -549,21 +574,9 @@ func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, er
 
 // downloadResource fetches a file resource (audio, etc.) from Feishu by message_id and file_key.
 func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte, error) {
-	resp, err := p.client.Im.MessageResource.Get(context.Background(),
-		larkim.NewGetMessageResourceReqBuilder().
-			MessageId(messageID).
-			FileKey(fileKey).
-			Type(resType).
-			Build())
+	data, err := p.getResource(p.runContext(), messageID, fileKey, resType)
 	if err != nil {
-		return nil, fmt.Errorf("feishu: resource API: %w", err)
-	}
-	if !resp.Success() {
-		return nil, fmt.Errorf("feishu: resource API code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	data, err := io.ReadAll(resp.File)
-	if err != nil {
-		return nil, fmt.Errorf("feishu: read resource: %w", err)
+		return nil, err
 	}
 	slog.Debug("feishu: downloaded resource", "key", fileKey, "type", resType, "size", len(data))
 	return data, nil
@@ -886,8 +899,8 @@ func findSingleAsterisk(s string) int {
 }
 
 // fetchBotOpenID retrieves the bot's open_id via the Feishu bot info API.
-func (p *Platform) fetchBotOpenID() (string, error) {
-	resp, err := p.client.Get(context.Background(),
+func (p *Platform) fetchBotOpenID(ctx context.Context) (string, error) {
+	resp, err := p.client.Get(ctx,
 		"/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
 		return "", fmt.Errorf("api call: %w", err)
@@ -1004,42 +1017,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	cardJSON := buildCardJSON(content)
 
-	var msgID string
-	if p.replyInThread && rc.messageID != "" {
-		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-			MessageId(rc.messageID).
-			Body(larkim.NewReplyMessageReqBodyBuilder().
-				MsgType(larkim.MsgTypeInteractive).
-				Content(cardJSON).
-				Build()).
-			Build())
-		if err != nil {
-			return nil, fmt.Errorf("feishu: send preview (reply): %w", err)
-		}
-		if !resp.Success() {
-			return nil, fmt.Errorf("feishu: send preview (reply) code=%d msg=%s", resp.Code, resp.Msg)
-		}
-		if resp.Data != nil && resp.Data.MessageId != nil {
-			msgID = *resp.Data.MessageId
-		}
-	} else {
-		resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-			ReceiveIdType(larkim.ReceiveIdTypeChatId).
-			Body(larkim.NewCreateMessageReqBodyBuilder().
-				ReceiveId(chatID).
-				MsgType(larkim.MsgTypeInteractive).
-				Content(cardJSON).
-				Build()).
-			Build())
-		if err != nil {
-			return nil, fmt.Errorf("feishu: send preview: %w", err)
-		}
-		if !resp.Success() {
-			return nil, fmt.Errorf("feishu: send preview code=%d msg=%s", resp.Code, resp.Msg)
-		}
-		if resp.Data != nil && resp.Data.MessageId != nil {
-			msgID = *resp.Data.MessageId
-		}
+	replyTo := ""
+	if p.replyInThread {
+		replyTo = rc.messageID
+	}
+	msgID, err := p.postMessage(ctx, "send preview", replyTo, chatID, larkim.MsgTypeInteractive, cardJSON)
+	if err != nil {
+		return nil, err
 	}
 
 	if msgID == "" {
@@ -1062,24 +1046,33 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		processed = preprocessFeishuMarkdown(content)
 	}
 	cardJSON := buildCardJSON(processed)
-	resp, err := p.client.Im.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
-		MessageId(h.messageID).
-		Body(larkim.NewPatchMessageReqBodyBuilder().
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: patch message: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu: patch message code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	// Replacing a card's content is idempotent, so it is safe to retry.
+	return p.withTransientRetry(ctx, "patch message", func() error {
+		return p.withFreshToken("patch message", func() error {
+			callCtx, cancel := context.WithTimeout(ctx, apiCallTimeout)
+			defer cancel()
+			resp, err := p.client.Im.Message.Patch(callCtx, larkim.NewPatchMessageReqBuilder().
+				MessageId(h.messageID).
+				Body(larkim.NewPatchMessageReqBodyBuilder().
+					Content(cardJSON).
+					Build()).
+				Build())
+			if err != nil {
+				return fmt.Errorf("feishu: patch message: %w", err)
+			}
+			if !resp.Success() {
+				return &apiError{op: "patch message", code: resp.Code, msg: resp.Msg}
+			}
+			return nil
+		})
+	})
 }
 
 // onCardAction handles card button click callbacks from Feishu.
 // It extracts the action value and routes it as a regular user message,
-// similar to Telegram's handleCallbackQuery.
+// similar to Telegram's handleCallbackQuery. A click on one of the bot's own
+// cards is addressed to the bot, so the group mention check (and the bot's
+// open_id) does not apply; allow_from does.
 func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	if event.Event == nil || event.Event.Action == nil {
 		return nil, nil
@@ -1290,43 +1283,21 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	}
 
 	cardJSON := renderCard(cardFromButtons(content, buttons), "")
+	return p.sendInteractive(ctx, rc, "send with buttons", cardJSON)
+}
 
-	if p.replyInThread && rc.messageID != "" {
-		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-			MessageId(rc.messageID).
-			Body(larkim.NewReplyMessageReqBodyBuilder().
-				MsgType(larkim.MsgTypeInteractive).
-				Content(cardJSON).
-				Build()).
-			Build())
-		if err != nil {
-			return fmt.Errorf("feishu: sendWithButtons reply: %w", err)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("feishu: sendWithButtons reply code=%d msg=%s", resp.Code, resp.Msg)
-		}
-		return nil
+// sendInteractive sends a card: in the message's thread with
+// reply_in_thread, otherwise as a new message in the chat.
+func (p *Platform) sendInteractive(ctx context.Context, rc replyContext, op, cardJSON string) error {
+	replyTo := ""
+	if p.replyInThread {
+		replyTo = rc.messageID
 	}
-
-	if rc.chatID == "" {
-		return fmt.Errorf("feishu: chatID is empty, cannot send message with buttons")
+	if replyTo == "" && rc.chatID == "" {
+		return fmt.Errorf("feishu: chatID is empty, cannot %s", op)
 	}
-
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: sendWithButtons: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu: sendWithButtons code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	_, err := p.postMessage(ctx, op, replyTo, rc.chatID, larkim.MsgTypeInteractive, cardJSON)
+	return err
 }
 
 func (p *Platform) ReplyCard(ctx context.Context, rctx any, card *core.Card) error {
@@ -1335,41 +1306,7 @@ func (p *Platform) ReplyCard(ctx context.Context, rctx any, card *core.Card) err
 		return fmt.Errorf("feishu: invalid reply context type %T", rctx)
 	}
 
-	cardJSON := renderCard(card, "")
-	if p.replyInThread && rc.messageID != "" {
-		resp, err := p.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
-			MessageId(rc.messageID).
-			Body(larkim.NewReplyMessageReqBodyBuilder().
-				MsgType(larkim.MsgTypeInteractive).
-				Content(cardJSON).
-				Build()).
-			Build())
-		if err != nil {
-			return fmt.Errorf("feishu: reply card: %w", err)
-		}
-		if !resp.Success() {
-			return fmt.Errorf("feishu: reply card code=%d msg=%s", resp.Code, resp.Msg)
-		}
-		return nil
-	}
-	if rc.chatID == "" {
-		return fmt.Errorf("feishu: chatID is empty, cannot send card")
-	}
-	resp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardJSON).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: reply card create: %w", err)
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu: reply card code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	return p.sendInteractive(ctx, rc, "send card", renderCard(card, ""))
 }
 
 func (p *Platform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
@@ -1392,9 +1329,11 @@ func cardFromButtons(content string, buttons [][]core.ButtonOption) *core.Card {
 }
 
 func (p *Platform) Stop() error {
+	p.stopped.Store(true)
 	if p.cancel != nil {
 		p.cancel()
 	}
+	p.dropImageBatches()
 	return nil
 }
 
@@ -1418,24 +1357,12 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	}
 
 	// Upload file to Feishu as opus
-	uploadResp, err := p.client.Im.File.Create(ctx,
-		larkim.NewCreateFileReqBuilder().
-			Body(larkim.NewCreateFileReqBodyBuilder().
-				FileType(larkim.FileTypeOpus).
-				FileName("tts_audio.opus").
-				File(bytes.NewReader(audio)).
-				Build()).
-			Build())
+	fileKey, err := p.uploadFile(ctx, "upload audio", larkim.CreateFileFileTypeOpus, "tts_audio.opus", func() (io.Reader, error) {
+		return bytes.NewReader(audio), nil
+	})
 	if err != nil {
-		return fmt.Errorf("feishu: upload audio: %w", err)
+		return err
 	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("feishu: upload audio code=%d msg=%s", uploadResp.Code, uploadResp.Msg)
-	}
-	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
-		return fmt.Errorf("feishu: upload audio: no file_key returned")
-	}
-	fileKey := *uploadResp.Data.FileKey
 
 	slog.Debug("feishu: audio uploaded", "file_key", fileKey, "format", format, "size", len(audio))
 
@@ -1447,21 +1374,8 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	}
 
 	// Send audio message to chat
-	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeAudio).
-			Content(audioContent).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: send audio message: %w", err)
-	}
-	if !sendResp.Success() {
-		return fmt.Errorf("feishu: send audio message code=%d msg=%s", sendResp.Code, sendResp.Msg)
-	}
-	return nil
+	_, err = p.postMessage(ctx, "send audio message", "", rc.chatID, larkim.MsgTypeAudio, audioContent)
+	return err
 }
 
 // SendFile uploads a local file to Feishu and sends it back to the current chat.
@@ -1490,24 +1404,13 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, path string, caption 
 		name = "attachment"
 	}
 
-	uploadResp, err := p.client.Im.File.Create(ctx,
-		larkim.NewCreateFileReqBuilder().
-			Body(larkim.NewCreateFileReqBodyBuilder().
-				FileType(larkim.FileTypeStream).
-				FileName(name).
-				File(f).
-				Build()).
-			Build())
+	fileKey, err := p.uploadFile(ctx, "upload file", larkim.CreateFileFileTypeStream, name, func() (io.Reader, error) {
+		_, err := f.Seek(0, io.SeekStart)
+		return f, err
+	})
 	if err != nil {
-		return fmt.Errorf("feishu: upload file: %w", err)
+		return err
 	}
-	if !uploadResp.Success() {
-		return fmt.Errorf("feishu: upload file code=%d msg=%s", uploadResp.Code, uploadResp.Msg)
-	}
-	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
-		return fmt.Errorf("feishu: upload file: no file_key returned")
-	}
-	fileKey := *uploadResp.Data.FileKey
 
 	fileMsg := larkim.MessageFile{FileKey: fileKey}
 	fileContent, err := fileMsg.String()
@@ -1521,21 +1424,8 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, path string, caption 
 		}
 	}
 
-	sendResp, err := p.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(rc.chatID).
-			MsgType(larkim.MsgTypeFile).
-			Content(fileContent).
-			Build()).
-		Build())
-	if err != nil {
-		return fmt.Errorf("feishu: send file message: %w", err)
-	}
-	if !sendResp.Success() {
-		return fmt.Errorf("feishu: send file message code=%d msg=%s", sendResp.Code, sendResp.Msg)
-	}
-	return nil
+	_, err = p.postMessage(ctx, "send file message", "", rc.chatID, larkim.MsgTypeFile, fileContent)
+	return err
 }
 
 type postElement struct {
@@ -1587,7 +1477,9 @@ func (p *Platform) fetchQuotedMessage(parentID, rootID *string) *quotedMessage {
 		return nil
 	}
 
-	resp, err := p.client.Im.Message.Get(context.Background(), larkim.NewGetMessageReqBuilder().
+	ctx, cancel := context.WithTimeout(context.Background(), apiCallTimeout)
+	defer cancel()
+	resp, err := p.client.Im.Message.Get(ctx, larkim.NewGetMessageReqBuilder().
 		MessageId(refID).
 		Build())
 	if err != nil {

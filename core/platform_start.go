@@ -25,6 +25,11 @@ const (
 // example, has no bot client until Start succeeds), so such sends are refused.
 var ErrPlatformNotRunning = errors.New("is not running: it failed to start and is being retried")
 
+// ErrDeliveryUnknown marks a send that failed in a way the platform may
+// still have delivered (e.g. the connection dropped before the answer). A
+// fallback send (plain text instead of buttons) would duplicate it.
+var ErrDeliveryUnknown = errors.New("the message may have been delivered")
+
 // platformRunState tracks a platform's lifecycle so start retries never race
 // with Stop or with each other. All transitions happen under
 // Engine.platformRunMu.

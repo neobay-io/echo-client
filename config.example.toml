@@ -613,6 +613,8 @@ app_secret = "your-feishu-app-secret"
 #                          # 设为 true 时，所有回复都会引用原消息（方便追踪每条回复对应哪条提问）
 # progress_style = "legacy" # "legacy" | "compact" | "card" for Feishu progress updates
 #                           # 飞书中思考/工具调用进度的展示样式
+# image_batch_window_ms = 500  # Images sent within this window become one message (0 = off)
+#                              # 这个时间窗内连发的图片合成一条消息（0 = 关闭）
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
