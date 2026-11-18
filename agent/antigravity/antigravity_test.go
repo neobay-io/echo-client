@@ -197,7 +197,7 @@ func TestDefaultModeForwardsApprovalsAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if err := s.Send("ping", nil, nil); err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestNonDefaultModesSkipTheBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	_ = s.Send("ping", nil, nil)
 	collectTurn(t, s, nil)
 	logged, _ := os.ReadFile(argsLog)
@@ -291,7 +291,7 @@ func TestFailedResultBecomesOneError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	_ = s.Send("ping", nil, nil)
 	events := collectTurn(t, s, nil)
 	last := events[len(events)-1]

@@ -202,7 +202,7 @@ func TestConcurrentStateSavesKeepTheLatest(t *testing.T) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(saved.Notify, m.NotifyChats()) && !(len(saved.Notify) == 0 && len(m.NotifyChats()) == 0) {
+	if !reflect.DeepEqual(saved.Notify, m.NotifyChats()) && (len(saved.Notify) != 0 || len(m.NotifyChats()) != 0) {
 		t.Fatalf("saved %+v, in memory %+v", saved.Notify, m.NotifyChats())
 	}
 }

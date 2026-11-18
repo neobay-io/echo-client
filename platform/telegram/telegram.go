@@ -920,7 +920,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, path string, caption 
 	if err != nil {
 		return fmt.Errorf("telegram: SendFile: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// A caption too long for Telegram goes out first as plain messages. If
 	// that fails the file is still sent.

@@ -36,30 +36,32 @@ func runDoctor(args []string) {
 // CLI that is installed looked unhealthy (broken install, failed --version,
 // or help no longer listing an option the adapter passes).
 func writeDoctorReport(ctx context.Context, w io.Writer, agents []string) (unhealthy bool) {
-	fmt.Fprintf(w, "PATH=%s\n\n", os.Getenv("PATH"))
+	// Write errors (closed stdout) are not worth failing the report over.
+	printf := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format, args...) }
+	printf("PATH=%s\n\n", os.Getenv("PATH"))
 	for _, agentType := range agents {
 		info := core.InspectAgentCLI(ctx, agentType)
 		result := core.AgentCLIDoctorResult(info)
-		fmt.Fprintf(w, "%s %s (%s)\n", result.Status.Icon(), agentType, info.Binary)
+		printf("%s %s (%s)\n", result.Status.Icon(), agentType, info.Binary)
 		if info.Selected == nil {
-			fmt.Fprintln(w, "   not installed")
+			printf("   not installed\n")
 		} else {
-			fmt.Fprintf(w, "   path:    %s\n", info.Selected.Path)
+			printf("   path:    %s\n", info.Selected.Path)
 			if info.Selected.OffPath {
-				fmt.Fprintln(w, "   note:    not on PATH; found in the vendor's install location")
+				printf("   note:    not on PATH; found in the vendor's install location\n")
 			}
 			if info.Selected.Resolved != "" && info.Selected.Resolved != info.Selected.Path {
-				fmt.Fprintf(w, "   target:  %s\n", info.Selected.Resolved)
+				printf("   target:  %s\n", info.Selected.Resolved)
 			}
 			if info.Version != "" {
-				fmt.Fprintf(w, "   version: %s\n", info.Version)
+				printf("   version: %s\n", info.Version)
 			}
 			if info.VersionErr != "" {
-				fmt.Fprintf(w, "   version check failed: %s\n", info.VersionErr)
+				printf("   version check failed: %s\n", info.VersionErr)
 				unhealthy = true
 			} else if problems := core.CheckAgentCLIOptions(ctx, agentType, info.Selected.Path); len(problems) > 0 {
 				// The same check upgrades run before keeping a new version.
-				fmt.Fprintf(w, "   options: %s\n", strings.Join(problems, "; "))
+				printf("   options: %s\n", strings.Join(problems, "; "))
 				unhealthy = true
 			}
 		}
@@ -73,9 +75,9 @@ func writeDoctorReport(ctx context.Context, w io.Writer, agents []string) (unhea
 			if target == "" {
 				target = "?"
 			}
-			fmt.Fprintf(w, "   %s: %s → %s\n", state, other.Path, target)
+			printf("   %s: %s → %s\n", state, other.Path, target)
 		}
-		fmt.Fprintln(w)
+		printf("\n")
 	}
 	return unhealthy
 }

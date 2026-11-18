@@ -226,7 +226,7 @@ func TestSessionRunsCLIAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.Send("ping", nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestSessionReportsCLIFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.Send("ping", nil, nil); err != nil {
 		t.Fatal(err)
 	}
