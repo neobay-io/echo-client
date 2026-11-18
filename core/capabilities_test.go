@@ -55,7 +55,8 @@ func TestValidateCapabilitiesRejectsUnbackedDeclarations(t *testing.T) {
 		Auth:      AuthCaps{Login: true, Flow: "carrier-pigeon"},
 		Modes:     []string{"plan"},
 		Compact:   true,
-		Steer:     true,
+		Steer:     true, // checked on the session, not here
+		Usage:     true,
 		Sessions:  SessionCaps{History: true},
 		LiveModel: true,
 	}}
@@ -69,15 +70,16 @@ func TestValidateCapabilitiesRejectsUnbackedDeclarations(t *testing.T) {
 		"no remote login implementation", // agent is named codex
 		`mode "plan" declared but not listed`,
 		"compact declared",
-		"steer declared",
+		"usage declared but UsageReporter",
+		"live switching declared but LiveSettingsApplier",
 		"session history declared",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "live_model") {
-		t.Errorf("live_model is backed by ModelSwitcher, got:\n%s", text)
+	if strings.Contains(text, "live_model") || strings.Contains(text, "steer") {
+		t.Errorf("live_model is backed by ModelSwitcher and steer is a session interface, got:\n%s", text)
 	}
 }
 

@@ -120,10 +120,27 @@ func promptQueuePreview(content string) string {
 	return content
 }
 
-func (e *Engine) beginPromptTurnOrEnqueue(queueKey, localSessionID, agentSessionID string, msg *Message) (bool, int, error) {
+// enqueuePromptID is enqueuePrompt that also returns the new item's ID.
+func (e *Engine) enqueuePromptID(queueKey, localSessionID, agentSessionID string, msg *Message) (int, string, error) {
 	e.promptQueueMu.Lock()
 	defer e.promptQueueMu.Unlock()
+	state := e.promptQueues[queueKey]
+	if state == nil {
+		state = &promptQueueState{}
+		e.promptQueues[queueKey] = state
+	}
+	pos, err := e.enqueuePromptLocked(state, queueKey, localSessionID, agentSessionID, "user", "", msg)
+	if err != nil {
+		return 0, "", err
+	}
+	return pos, state.Items[len(state.Items)-1].ID, nil
+}
 
+// beginPromptTurnOrEnqueueID is beginPromptTurnOrEnqueue that also returns
+// the queued item's ID.
+func (e *Engine) beginPromptTurnOrEnqueueID(queueKey, localSessionID, agentSessionID string, msg *Message) (bool, int, string, error) {
+	e.promptQueueMu.Lock()
+	defer e.promptQueueMu.Unlock()
 	state := e.promptQueues[queueKey]
 	if state == nil {
 		state = &promptQueueState{}
@@ -131,10 +148,13 @@ func (e *Engine) beginPromptTurnOrEnqueue(queueKey, localSessionID, agentSession
 	}
 	if state.Running || len(state.Items) > 0 {
 		pos, err := e.enqueuePromptLocked(state, queueKey, localSessionID, agentSessionID, "user", "", msg)
-		return false, pos, err
+		if err != nil {
+			return false, 0, "", err
+		}
+		return false, pos, state.Items[len(state.Items)-1].ID, nil
 	}
 	state.Running = true
-	return true, 0, nil
+	return true, 0, "", nil
 }
 
 func (e *Engine) enqueuePrompt(queueKey, localSessionID, agentSessionID string, msg *Message) (int, error) {
@@ -551,6 +571,11 @@ func (e *Engine) queueAction(sessionKey, args string) string {
 			return e.i18n.T(MsgQueueDeleted)
 		}
 		return e.i18n.T(MsgQueueItemNotFound)
+	case "steer":
+		if len(fields) < 2 {
+			return e.i18n.T(MsgQueueUsage)
+		}
+		return e.steerQueuedItem(sessionKey, queueKey, fields[1])
 	case "up":
 		if len(fields) < 2 {
 			return e.i18n.T(MsgQueueUsage)

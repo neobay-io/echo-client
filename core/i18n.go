@@ -2730,6 +2730,127 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "To log in %s, open this official link in your browser:\n%s\n\nand enter the code: %s\n\nNothing needs to be sent back here; the CLI finishes on its own once you approve. /auth cancel aborts login.",
 		LangChinese: "登录 %s：请在浏览器中打开官方链接：\n%s\n\n并输入代码：%s\n\n不需要回贴任何内容，授权后 CLI 会自动完成登录。可用 /auth cancel 取消。",
 	},
+	MsgKey("steer"): {
+		LangEnglish:            "Add a message to the running turn: /steer <text>",
+		LangChinese:            "向正在进行的这一轮插话：/steer <内容>",
+		LangTraditionalChinese: "向正在進行的這一輪插話：/steer <內容>",
+		LangJapanese:           "実行中のターンにメッセージを追加: /steer <内容>",
+		LangSpanish:            "Añadir un mensaje al turno en curso: /steer <texto>",
+	},
+	MsgKey("usage"): {
+		LangEnglish:            "Show plan limits and spending",
+		LangChinese:            "查看套餐额度和花费",
+		LangTraditionalChinese: "查看方案額度和花費",
+		LangJapanese:           "プランの上限と使用状況を表示",
+		LangSpanish:            "Ver límites del plan y gasto",
+	},
+	MsgKey("context"): {
+		LangEnglish:            "Show how much of the context window is used",
+		LangChinese:            "查看上下文窗口用量",
+		LangTraditionalChinese: "查看上下文視窗用量",
+		LangJapanese:           "コンテキストウィンドウの使用量を表示",
+		LangSpanish:            "Ver cuánto contexto se usa",
+	},
+	MsgKey("steer_usage"): {
+		LangEnglish: "Usage: /steer <text> — adds the text to the turn that is running.",
+		LangChinese: "用法：/steer <内容>，把内容插入正在进行的这一轮。",
+	},
+	MsgKey("steer_no_turn"): {
+		LangEnglish: "No turn is running, so this is sent as a new message.",
+		LangChinese: "当前没有进行中的轮次，按新消息发送。",
+	},
+	MsgKey("steer_no_turn_queued"): {
+		LangEnglish: "No turn is running to insert into; the message stays in the queue.",
+		LangChinese: "当前没有可以插入的轮次，消息仍在队列里。",
+	},
+	MsgKey("steer_done"): {
+		LangEnglish: "📌 Added to the running turn; the agent reads it after its current step.",
+		LangChinese: "📌 已插入正在进行的这一轮，agent 会在当前步骤结束后读到。",
+	},
+	MsgKey("steer_btn_insert"): {
+		LangEnglish: "Insert now",
+		LangChinese: "立即插入",
+	},
+	MsgKey("usage_unsupported"): {
+		LangEnglish: "This agent cannot report usage.",
+		LangChinese: "当前 Agent 不支持查看用量。",
+	},
+	MsgKey("usage_failed"): {
+		LangEnglish: "❌ Could not read usage: %v",
+		LangChinese: "❌ 读取用量失败：%v",
+	},
+	MsgKey("usage_title"): {
+		LangEnglish: "📊 Usage",
+		LangChinese: "📊 用量",
+	},
+	MsgKey("usage_used"): {
+		LangEnglish: "%d%% used",
+		LangChinese: "已用 %d%%",
+	},
+	MsgKey("usage_resets"): {
+		LangEnglish: "resets %s",
+		LangChinese: "%s 重置",
+	},
+	MsgKey("usage_session_cost"): {
+		LangEnglish: "This session: $%.2f",
+		LangChinese: "本会话：$%.2f",
+	},
+	MsgKey("usage_empty"): {
+		LangEnglish: "No usage information available.",
+		LangChinese: "没有可用的用量信息。",
+	},
+	MsgKey("context_no_session"): {
+		LangEnglish: "No agent process is running for this chat; send a message first.",
+		LangChinese: "这个聊天当前没有运行中的 agent 进程，请先发一条消息。",
+	},
+	MsgKey("context_unsupported"): {
+		LangEnglish: "This agent cannot report context usage.",
+		LangChinese: "当前 Agent 不支持查看上下文用量。",
+	},
+	MsgKey("context_title"): {
+		LangEnglish: "🧠 Context: %s / %s tokens (%d%%)",
+		LangChinese: "🧠 上下文：%s / %s tokens（%d%%）",
+	},
+	MsgKey("status_cost"): {
+		LangEnglish: "Cost (this process): $%.2f\n",
+		LangChinese: "花费（当前进程）：$%.2f\n",
+	},
+	MsgKey("plan_empty"): {
+		LangEnglish: "(the plan is empty)",
+		LangChinese: "（计划为空）",
+	},
+	MsgKey("plan_prompt"): {
+		LangEnglish: "📋 The agent has a plan and asks to start:\n\n%s\n\nApprove it, keep planning, or reply with what to change.",
+		LangChinese: "📋 Agent 拟好了计划，请求开始执行：\n\n%s\n\n可以批准、继续规划，或者直接回复要修改的地方。",
+	},
+	MsgKey("plan_btn_approve"): {
+		LangEnglish: "Approve plan",
+		LangChinese: "批准计划",
+	},
+	MsgKey("plan_btn_keep"): {
+		LangEnglish: "Keep planning",
+		LangChinese: "继续规划",
+	},
+	MsgKey("plan_approved"): {
+		LangEnglish: "✅ Plan approved.",
+		LangChinese: "✅ 已批准计划。",
+	},
+	MsgKey("plan_kept"): {
+		LangEnglish: "Planning continues.",
+		LangChinese: "继续规划。",
+	},
+	MsgKey("plan_feedback_sent"): {
+		LangEnglish: "Sent your changes to the agent; it will revise the plan.",
+		LangChinese: "修改意见已发给 agent，它会修改计划。",
+	},
+	MsgKey("ask_hint"): {
+		LangEnglish: "Tap an option, send its number, or reply with your own answer. /stop cancels.",
+		LangChinese: "点选一个选项、发送序号，或直接回复你的答案。/stop 可取消。",
+	},
+	MsgKey("ask_hint_multi"): {
+		LangEnglish: "Several answers allowed: send numbers like 1,3, or reply with your own answer.",
+		LangChinese: "可以多选：发送序号如 1,3，或直接回复你的答案。",
+	},
 	MsgKey("auth_button_cancel"): {
 		LangEnglish: "Cancel login",
 		LangChinese: "取消登录",

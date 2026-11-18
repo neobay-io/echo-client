@@ -252,6 +252,24 @@ func (r engineJobRunner) Run(
 	}
 }
 
+// retireStatesForAgentSession marks chats whose agent process runs one of
+// ids (agent session IDs) to restart it before their next turn.
+func (e *Engine) retireStatesForAgentSession(ids ...string) {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	for _, st := range e.interactiveStates {
+		if st == nil || st.agentSession == nil {
+			continue
+		}
+		cur := st.agentSession.CurrentSessionID()
+		for _, id := range ids {
+			if id != "" && cur == id {
+				st.stale = true
+			}
+		}
+	}
+}
+
 // ErrAgentUpgradeInProgress is returned by startAgentSession while the
 // agent's CLI is being upgraded.
 var ErrAgentUpgradeInProgress = errors.New("agent upgrade in progress")
@@ -332,6 +350,14 @@ func (e *Engine) runIsolatedCronTurn(
 	opts AgentSessionOptions,
 ) (finalSessionID string, output string, err error) {
 	defer e.trackBackgroundTurn()()
+	// A chat whose resident process (Claude Code) holds this agent session
+	// would not see what the cron run added: restart it before its next turn
+	// so it resumes the extended transcript (T3.7).
+	defer func() {
+		if err == nil {
+			e.retireStatesForAgentSession(agentSessionID, finalSessionID)
+		}
+	}()
 	agentSession, err := e.startAgentSessionAfterUpgrade(ctx, agentSessionID, syntheticKey, env, opts)
 	if err != nil {
 		return "", "", fmt.Errorf("start isolated cron session: %w", cronResumeError(err, agentSessionID, false))

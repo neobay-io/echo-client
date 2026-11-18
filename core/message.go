@@ -257,6 +257,8 @@ type Event struct {
 	RequestID    string         // unique request ID for EventPermissionRequest
 	Done         bool
 	Error        error
+	// Interrupted marks the EventResult of a turn stopped by Interrupter.
+	Interrupted bool
 }
 
 // HistoryEntry is one turn in a conversation.

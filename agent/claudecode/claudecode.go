@@ -57,6 +57,13 @@ type Agent struct {
 	proxyLocalURL string              // local URL of the proxy
 	modelRunner   claudeModelRunner
 
+	// list_models cache (control.go); listModelsFn is replaced in tests.
+	modelsMu         sync.Mutex
+	models           []claudeModel
+	modelsAt         time.Time
+	modelsRefreshing bool
+	listModelsFn     func(context.Context) ([]claudeModel, error)
+
 	mu sync.Mutex
 }
 
@@ -108,6 +115,8 @@ func normalizePermissionMode(raw string) string {
 	return core.NormalizePermissionMode("claudecode", raw)
 }
 
+var validEffortName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
 func normalizeReasoningLevel(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "auto", "default":
@@ -118,9 +127,16 @@ func normalizeReasoningLevel(raw string) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh":
+		return "xhigh"
 	case "max":
 		return "max"
 	default:
+		// A level Claude's model list offers (e.g. "ultracode") passes
+		// through; anything else is dropped.
+		if lower := strings.ToLower(strings.TrimSpace(raw)); validEffortName.MatchString(lower) {
+			return lower
+		}
 		return ""
 	}
 }
@@ -172,13 +188,26 @@ func (a *Agent) AvailableReasoningLevels() []core.ReasoningLevelOption {
 		{Name: "low", Desc: "Fastest, shallow reasoning"},
 		{Name: "medium", Desc: "Balanced"},
 		{Name: "high", Desc: "Deep reasoning"},
+		{Name: "xhigh", Desc: "Deeper reasoning"},
 		{Name: "max", Desc: "Deepest reasoning"},
 	}
 }
 
+// AvailableModels lists Claude's models. With an API key (a provider or
+// ANTHROPIC_API_KEY) the API's list comes first: it is the provider's. Else
+// list_models (it knows the newest models and their effort levels), then
+// Claude's /model aliases.
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
 		return models
+	}
+	if models := a.listModels(ctx); len(models) > 0 {
+		options := make([]core.ModelOption, 0, len(models))
+		for _, m := range models {
+			desc := strings.Trim(m.Display+" · "+m.Description, " ·")
+			options = append(options, core.ModelOption{Name: m.Value, Desc: desc})
+		}
+		return options
 	}
 	if models := a.fetchModelsFromCLI(ctx); len(models) > 0 {
 		return models
@@ -396,6 +425,14 @@ func (a *Agent) SetSessionOptions(opts core.AgentSessionOptions) {
 func (a *Agent) Capabilities() core.AgentCapabilities {
 	return core.AgentCapabilities{
 		Auth: core.AuthCaps{Login: true, Status: true, Logout: true, Flow: core.AuthFlowURLCode},
+		// Control protocol (control.go): live /model /effort /mode, steering,
+		// interrupt, /usage and /context, question and plan cards.
+		LiveModel: true,
+		LiveMode:  true,
+		Steer:     true,
+		Interrupt: true,
+		Usage:     true,
+		AskUser:   true,
 	}
 }
 
@@ -405,12 +442,21 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	tools := make([]string, len(a.allowedTools))
 	copy(tools, a.allowedTools)
 	model, reasoningLevel, mode := a.startSettingsLocked()
-	extraEnv := a.providerEnvLocked()
-	extraEnv = append(extraEnv, a.sessionEnv...)
+	extraEnv := a.processEnvLocked()
 	workDir := core.SessionWorkDirFromEnv(extraEnv, a.workDir)
 	extraDirs := core.SessionExtraDirsFromEnv(extraEnv)
 
-	// Add Claude Code Router environment variables if configured
+	a.mu.Unlock()
+
+	return newClaudeSession(ctx, workDir, model, reasoningLevel, sessionID, mode, tools, extraDirs, extraEnv)
+}
+
+// processEnvLocked is the environment added to every Claude process this
+// agent starts (sessions and control-only ones): provider, chat session and
+// Claude Code Router settings. Caller holds a.mu.
+func (a *Agent) processEnvLocked() []string {
+	extraEnv := a.providerEnvLocked()
+	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.routerURL != "" {
 		extraEnv = append(extraEnv, "ANTHROPIC_BASE_URL="+a.routerURL)
 		// When using router, we need to prevent proxy interference
@@ -422,10 +468,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	if a.routerAPIKey != "" {
 		extraEnv = append(extraEnv, "ANTHROPIC_API_KEY="+a.routerAPIKey)
 	}
-
-	a.mu.Unlock()
-
-	return newClaudeSession(ctx, workDir, model, reasoningLevel, sessionID, mode, tools, extraDirs, extraEnv)
+	return extraEnv
 }
 
 // startSettingsLocked resolves the model, reasoning level and permission mode

@@ -1,6 +1,11 @@
 package core
 
-import "strings"
+import (
+	"context"
+	"log/slog"
+	"strings"
+	"time"
+)
 
 // perSessionSettings reports whether /model, /effort and /mode are stored on
 // the chat session (agent implements SessionOptionsInjector) instead of being
@@ -74,7 +79,53 @@ func (e *Engine) applySessionSetting(sessionKey string, update func(*AgentSessio
 	} else if legacy != nil {
 		legacy()
 	}
+	if e.applySettingsLive(sessionKey) {
+		return
+	}
 	e.retireInteractiveState(sessionKey)
+}
+
+// liveSettingsTimeout bounds switching a running process's settings.
+var liveSettingsTimeout = 5 * time.Second
+
+// applySettingsLive applies the chat's settings to its running agent process
+// when the agent can switch them live (T3.1), so the process and its context
+// stay. It reports false when there is no such process or the switch failed;
+// the caller then retires the process instead.
+func (e *Engine) applySettingsLive(sessionKey string) bool {
+	applier, ok := e.agent.(LiveSettingsApplier)
+	if !ok {
+		return false
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		return false
+	}
+	if state.runningTurn() != nil {
+		// Never change a turn already running (in a shared chat another
+		// member's /mode could otherwise loosen permissions mid-turn): the
+		// process restarts with the new settings before the next turn.
+		return false
+	}
+	var opts AgentSessionOptions
+	if e.perSessionSettings() {
+		opts = e.sessions.GetOrCreateActive(sessionKey).Settings()
+		opts.Mode = e.offeredMode(opts.Mode)
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, liveSettingsTimeout)
+	defer cancel()
+	if err := applier.ApplyLiveSettings(ctx, state.agentSession, opts); err != nil {
+		slog.Info("live settings switch failed; the process restarts on the next turn", "session_key", sessionKey, "error", err)
+		return false
+	}
+	// An earlier "allow all" belonged to the old settings, as it did to the
+	// old process: a restrictive /mode must not keep auto-approving.
+	state.mu.Lock()
+	state.approveAll = false
+	state.mu.Unlock()
+	return true
 }
 
 // retireInteractiveState makes the next turn of sessionKey start a fresh agent

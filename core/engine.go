@@ -249,6 +249,15 @@ type interactiveState struct {
 	fromVoice    bool // true if current turn originated from voice transcription
 	stopped      chan struct{}
 	stopOnce     sync.Once
+	// turnDone is open while a chat turn reads this session's events, and
+	// closed when it ends (guarded by mu); nil between turns.
+	turnDone chan struct{}
+	// steerOK: the running turn can still take steered messages; false once
+	// its final result arrived (guarded by mu).
+	steerOK bool
+	// turnMu orders ending a turn against /stop sending an interrupt, so an
+	// interrupt meant for one turn can never reach the next.
+	turnMu sync.Mutex
 }
 
 type agentSessionTurnLock struct {
@@ -274,6 +283,60 @@ func newInteractiveState(agentSession AgentSession, p Platform, replyCtx any, qu
 	}
 }
 
+// beginTurn marks a chat turn as running; the returned func ends it.
+func (s *interactiveState) beginTurn() func() {
+	ch := make(chan struct{})
+	s.mu.Lock()
+	s.turnDone = ch
+	s.steerOK = true
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.turnMu.Lock()
+			defer s.turnMu.Unlock()
+			s.mu.Lock()
+			if s.turnDone == ch {
+				s.turnDone = nil
+				s.steerOK = false
+			}
+			s.mu.Unlock()
+			close(ch)
+		})
+	}
+}
+
+// turnFinishing marks that the running turn got its final result: a message
+// steered now would start new work nobody reads.
+func (s *interactiveState) turnFinishing() {
+	s.mu.Lock()
+	s.steerOK = false
+	s.mu.Unlock()
+}
+
+// steerable reports whether the running turn can still take a message.
+func (s *interactiveState) steerable() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnDone != nil && s.steerOK
+}
+
+// runningTurn returns the running turn's done channel, or nil.
+func (s *interactiveState) runningTurn() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnDone == nil {
+		return nil
+	}
+	return s.turnDone
+}
+
 func (s *interactiveState) stop() {
 	if s == nil {
 		return
@@ -291,6 +354,9 @@ type pendingPermission struct {
 	InputPreview string
 	Resolved     chan struct{} // closed when user responds
 	resolveOnce  sync.Once
+	// decision is set for questions and plans (AskUserQuestion,
+	// ExitPlanMode): the user answers instead of allowing or denying.
+	decision *pendingDecision
 }
 
 type pendingVoiceConfirmation struct {
@@ -1377,12 +1443,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
 		}
-		pos, err := e.enqueuePrompt(queueKey, session.ID, agentSessionID, msg)
+		pos, itemID, err := e.enqueuePromptID(queueKey, session.ID, agentSessionID, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.promptQueueErrorMessage(err))
 			return
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgQueueEnqueued, pos))
+		e.replyQueued(p, msg, pos, itemID)
 		return
 	}
 	if !queueEligible {
@@ -1394,7 +1460,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		go e.processInteractiveMessageWithQueueLifecycle(p, msg, session)
 		return
 	}
-	startNow, pos, err := e.beginPromptTurnOrEnqueue(queueKey, session.ID, agentSessionID, msg)
+	startNow, pos, itemID, err := e.beginPromptTurnOrEnqueueID(queueKey, session.ID, agentSessionID, msg)
 	if err != nil {
 		session.Unlock()
 		e.reply(p, msg.ReplyCtx, e.promptQueueErrorMessage(err))
@@ -1402,7 +1468,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 	if !startNow {
 		session.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgQueueEnqueued, pos))
+		e.replyQueued(p, msg, pos, itemID)
 		go e.drainPromptQueue(queueKey)
 		return
 	}
@@ -1817,7 +1883,7 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 			if prompt != nil && strings.Contains(strings.ToLower(fullResponse), "<options>") {
 				displayResponse = strings.TrimSpace(prompt.Prompt)
 			}
-			if displayResponse == "" && prompt == nil {
+			if displayResponse == "" && prompt == nil && !event.Interrupted {
 				displayResponse = e.i18n.T(MsgEmptyResponse)
 			}
 			if displayResponse != "" {
@@ -2436,6 +2502,18 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		return false
 	}
 
+	if pending.decision != nil {
+		// A question or plan: the reply is the answer.
+		if e.handleDecisionReply(p, msg, state, pending, content) {
+			state.mu.Lock()
+			state.pending = nil
+			state.mu.Unlock()
+			e.clearInteractionPrompt(msg.SessionKey)
+			pending.resolve()
+		}
+		return true
+	}
+
 	lower := strings.ToLower(strings.TrimSpace(content))
 
 	if isApproveAllResponse(lower) {
@@ -3013,6 +3091,7 @@ const defaultFirstEventTimeout = 5 * time.Minute
 const defaultTurnTimeout = 45 * time.Minute
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time, agentTurn *agentSessionTurnGuard) {
+	defer state.beginTurn()()
 	var textParts []string
 	toolCount := 0
 	waitStart := time.Now()
@@ -3191,7 +3270,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			autoApprove := state.approveAll
 			state.mu.Unlock()
 
-			if autoApprove {
+			// Questions and plans go to the user even with "allow all".
+			decision := newPendingDecision(event.ToolName, event.ToolInputRaw)
+			if autoApprove && decision == nil {
 				slog.Debug("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
 				_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
 					Behavior:     "allow",
@@ -3208,12 +3289,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"tool", event.ToolName,
 			)
 
-			permLimit := e.display.ToolMaxLen
-			if permLimit > 0 {
-				permLimit = permLimit * 8 / 5 // permission prompts get ~1.6x more room
+			if decision != nil {
+				// Flush text written before the question so it reads first.
+				if len(textParts) > 0 {
+					e.send(p, replyCtx, strings.Join(textParts, ""))
+					textParts = nil
+				}
+				e.sendDecisionPrompt(sessionKey, p, replyCtx, decision)
+			} else {
+				permLimit := e.display.ToolMaxLen
+				if permLimit > 0 {
+					permLimit = permLimit * 8 / 5 // permission prompts get ~1.6x more room
+				}
+				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, permLimit))
+				e.sendPermissionPrompt(sessionKey, p, replyCtx, prompt)
 			}
-			prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, truncateIf(event.ToolInput, permLimit))
-			e.sendPermissionPrompt(sessionKey, p, replyCtx, prompt)
 
 			pending := &pendingPermission{
 				RequestID:    event.RequestID,
@@ -3221,6 +3311,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				ToolInput:    event.ToolInputRaw,
 				InputPreview: event.ToolInput,
 				Resolved:     make(chan struct{}),
+				decision:     decision,
 			}
 			state.mu.Lock()
 			state.pending = pending
@@ -3248,6 +3339,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventResult:
+			state.turnFinishing()
 			cp.Finalize("done")
 			if event.Error != nil {
 				sp.finish("")
@@ -3271,7 +3363,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if prompt != nil && strings.Contains(strings.ToLower(fullResponse), "<options>") {
 				displayResponse = strings.TrimSpace(prompt.Prompt)
 			}
-			if displayResponse == "" && prompt == nil {
+			if displayResponse == "" && prompt == nil && !event.Interrupted {
 				displayResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
@@ -3344,6 +3436,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
+			state.turnFinishing()
 			cp.Finalize("error")
 			sp.finish("") // clean up preview on error
 			if event.Error != nil {
@@ -3484,6 +3577,9 @@ var builtinCommands = []struct {
 	{[]string{"collect"}, "collect"},
 	{[]string{"queue"}, "queue"},
 	{[]string{"stop"}, "stop"},
+	{[]string{"steer"}, "steer"},
+	{[]string{"usage"}, "usage"},
+	{[]string{"context"}, "context"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
 	{[]string{"commands", "command", "cmd"}, "commands"},
@@ -3611,6 +3707,12 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdQueue(p, msg, args)
 	case "stop":
 		e.cmdStop(p, msg)
+	case "steer":
+		e.cmdSteer(p, msg)
+	case "usage":
+		e.cmdUsage(p, msg)
+	case "context":
+		e.cmdContext(p, msg)
 	case "help":
 		e.cmdHelp(p, msg)
 	case "version":
@@ -4667,6 +4769,7 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 	if summary := formatCapabilitySummary(CapabilitiesOf(e.agent)); summary != "" {
 		modeStr += e.i18n.Tf(MsgKey("status_capabilities"), summary)
 	}
+	modeStr += e.sessionCostLine(msg.SessionKey)
 
 	// Quiet mode
 	e.quietMu.RLock()
@@ -5339,6 +5442,41 @@ func containsModelOption(options []ModelOption, name string) bool {
 	return false
 }
 
+// reasoningLevelsForModel narrows the effort options to what the chat's
+// model supports, when the agent knows (T3.2), keeping "auto". Levels the
+// model offers that the static list lacks are added.
+func (e *Engine) reasoningLevelsForModel(levels []ReasoningLevelOption, model string) []ReasoningLevelOption {
+	mep, ok := e.agent.(ModelEffortProvider)
+	if !ok {
+		return levels
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, 20*time.Second)
+	defer cancel()
+	supported := mep.EffortsForModel(ctx, model)
+	if len(supported) == 0 {
+		return levels
+	}
+	allowed := make(map[string]bool, len(supported))
+	for _, name := range supported {
+		allowed[strings.ToLower(name)] = true
+	}
+	var out []ReasoningLevelOption
+	seen := map[string]bool{}
+	for _, l := range levels {
+		name := strings.ToLower(strings.TrimSpace(l.Name))
+		if name == "auto" || name == "default" || name == "" || allowed[name] {
+			out = append(out, l)
+			seen[name] = true
+		}
+	}
+	for _, name := range supported {
+		if !seen[strings.ToLower(name)] {
+			out = append(out, ReasoningLevelOption{Name: name})
+		}
+	}
+	return out
+}
+
 func (e *Engine) cmdEffort(p Platform, msg *Message, args []string) {
 	switcher, ok := e.agent.(ReasoningLevelSwitcher)
 	if !ok {
@@ -5350,7 +5488,7 @@ func (e *Engine) cmdEffort(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	levels := switcher.AvailableReasoningLevels()
+	levels := e.reasoningLevelsForModel(switcher.AvailableReasoningLevels(), e.effectiveModel(e.sessions.ActiveSession(msg.SessionKey)))
 	current := strings.TrimSpace(e.effectiveReasoningLevel(e.sessions.ActiveSession(msg.SessionKey)))
 
 	if len(args) == 0 {
@@ -5607,6 +5745,25 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		return
 	}
 
+	// A running turn of an agent that can interrupt stops without losing
+	// its process or conversation (T3.4); the kill is the fallback. This can
+	// take seconds, and some platforms deliver one update at a time, so it
+	// runs in the background.
+	if _, ok := state.agentSession.(Interrupter); ok && state.runningTurn() != nil {
+		go func() {
+			if e.interruptRunningTurn(msg.SessionKey, state) {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+				return
+			}
+			e.stopByClosing(p, msg, state)
+		}()
+		return
+	}
+	e.stopByClosing(p, msg, state)
+}
+
+// stopByClosing stops the chat's agent process (the /stop fallback).
+func (e *Engine) stopByClosing(p Platform, msg *Message, state *interactiveState) {
 	// Cancel pending permission if any
 	state.mu.Lock()
 	pending := state.pending
@@ -5635,6 +5792,81 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	}
 
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// interruptWait is how long /stop waits for an interrupted turn to end
+// before killing the process.
+var interruptWait = 15 * time.Second
+
+// interruptRunningTurn asks the agent to stop the chat's running turn and
+// waits for it to end. It reports false when there is no running turn, the
+// agent cannot interrupt, or the turn did not end in time. Every step is
+// bounded by interruptWait, so a stuck process falls back to the kill.
+func (e *Engine) interruptRunningTurn(sessionKey string, state *interactiveState) bool {
+	if state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+		return false
+	}
+	it, ok := state.agentSession.(Interrupter)
+	if !ok {
+		return false
+	}
+	done := state.runningTurn()
+	if done == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, interruptWait)
+	defer cancel()
+
+	// Hold turnMu: the turn cannot end (and the next one cannot start) while
+	// the interrupt is on its way, so it reaches this turn or none.
+	state.turnMu.Lock()
+	if state.runningTurn() != done {
+		state.turnMu.Unlock()
+		return true // the turn ended by itself meanwhile
+	}
+	// A turn waiting on a permission prompt or question is blocked on it:
+	// deny it so the agent sees the interrupt, and retire its buttons.
+	state.mu.Lock()
+	pending := state.pending
+	state.pending = nil
+	state.mu.Unlock()
+	if pending != nil {
+		e.clearInteractionPrompt(sessionKey)
+		if !withinDeadline(ctx, func() error {
+			return state.agentSession.RespondPermission(pending.RequestID, PermissionResult{Behavior: "deny", Message: "The user stopped this turn."})
+		}) {
+			state.turnMu.Unlock()
+			pending.resolve()
+			return false
+		}
+		pending.resolve()
+	}
+	err := it.Interrupt(ctx)
+	state.turnMu.Unlock()
+	if err != nil {
+		slog.Info("interrupt failed; stopping the agent process instead", "error", err)
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		slog.Warn("interrupted turn did not end in time; stopping the agent process")
+		return false
+	}
+}
+
+// withinDeadline runs fn, giving up (and reporting false) when ctx ends
+// first; fn keeps running in the background until it returns.
+func withinDeadline(ctx context.Context, fn func() error) bool {
+	errc := make(chan error, 1)
+	go func() { errc <- fn() }()
+	select {
+	case err := <-errc:
+		return err == nil
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (e *Engine) cmdCompress(p Platform, msg *Message) {

@@ -178,20 +178,16 @@ func ValidateCapabilities(agent Agent) []error {
 	if declared.Compact && !derived.Compact {
 		fail("compact declared but ContextCompressor is not implemented")
 	}
-	// No core interface exists for these yet; declaring them would make
-	// commands promise behavior nothing delivers.
-	if declared.Steer {
-		fail("steer declared but core has no steering interface yet")
+	if (declared.LiveModel || declared.LiveMode) && !isLiveSettingsApplier(agent) {
+		fail("live switching declared but LiveSettingsApplier is not implemented")
 	}
-	if declared.Interrupt {
-		fail("interrupt declared but core has no interrupt interface yet")
+	if declared.Usage && !isUsageReporter(agent) {
+		fail("usage declared but UsageReporter is not implemented")
 	}
-	if declared.Usage {
-		fail("usage declared but core has no usage interface yet")
-	}
-	if declared.AskUser {
-		fail("ask_user declared but core has no ask-user interface yet")
-	}
+	// Steer, Interrupt and AskUser are implemented by the agent's sessions
+	// (Steerer, Interrupter, permission requests for AskUserQuestion /
+	// ExitPlanMode), which exist only once a session starts; the engine
+	// checks the session itself before using them.
 	return errs
 }
 
@@ -235,7 +231,10 @@ func formatCapabilitySummary(caps AgentCapabilities) string {
 		parts = append(parts, "interrupt")
 	}
 	if caps.Usage {
-		parts = append(parts, "usage")
+		parts = append(parts, "/usage")
+	}
+	if caps.AskUser {
+		parts = append(parts, "questions & plans")
 	}
 	return strings.Join(parts, " · ")
 }
@@ -249,5 +248,18 @@ func capabilityCommands(caps AgentCapabilities) map[string]bool {
 		"effort":   len(caps.Efforts) > 0 || caps.EffortViaModel,
 		"mode":     len(caps.Modes) > 0,
 		"compress": caps.Compact,
+		"steer":    caps.Steer,
+		"usage":    caps.Usage,
+		"context":  caps.Usage,
 	}
+}
+
+func isLiveSettingsApplier(agent Agent) bool {
+	_, ok := agent.(LiveSettingsApplier)
+	return ok
+}
+
+func isUsageReporter(agent Agent) bool {
+	_, ok := agent.(UsageReporter)
+	return ok
 }

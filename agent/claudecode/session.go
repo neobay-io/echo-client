@@ -39,7 +39,7 @@ type claudeSession struct {
 	recentMu       sync.Mutex
 	recentTools    []string
 	sessionID      atomic.Value // stores string
-	autoApprove    bool         // auto mode: approve all permission requests
+	autoApprove    atomic.Bool  // bypass mode: approve permission requests
 	workDir        string
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -50,6 +50,19 @@ type claudeSession struct {
 	resumeWorkSeen atomic.Bool
 	failureMu      sync.Mutex
 	failure        error
+
+	// Control protocol (control.go).
+	controlMu      sync.Mutex
+	controlPending map[string]chan controlResult
+	controlSeq     atomic.Int64
+	// Settings the process runs with; changed live by applyLive.
+	settingsMu sync.Mutex
+	model      string
+	effort     string
+	mode       string
+	// interrupting: an interrupt was requested; the turn's result is an
+	// interruption, not an error.
+	interrupting atomic.Bool
 }
 
 var heicImageConverter = convertHEICImage
@@ -92,16 +105,19 @@ func newClaudeSession(ctx context.Context, workDir, model, reasoningLevel, sessi
 	}
 
 	cs := &claudeSession{
-		cmd:         cmd,
-		stdin:       stdin,
-		events:      make(chan core.Event, 64),
-		autoApprove: mode == "bypassPermissions",
-		workDir:     workDir,
-		resumeID:    sessionID,
-		ctx:         sessionCtx,
-		cancel:      cancel,
-		done:        make(chan struct{}),
+		cmd:      cmd,
+		stdin:    stdin,
+		events:   make(chan core.Event, 64),
+		workDir:  workDir,
+		resumeID: sessionID,
+		ctx:      sessionCtx,
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		model:    model,
+		effort:   reasoningLevel,
+		mode:     mode,
 	}
+	cs.autoApprove.Store(mode == "bypassPermissions")
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
 	cs.resuming.Store(isClaudeSessionID(sessionID))
@@ -214,6 +230,8 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 		case "control_request":
 			cs.resumeWorkSeen.Store(true)
 			cs.handleControlRequest(raw)
+		case "control_response":
+			cs.handleControlResponse(raw)
 		case "control_cancel_request":
 			requestID, _ := raw["request_id"].(string)
 			slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
@@ -379,6 +397,15 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.sessionID.Store(sid)
 	}
 	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+	if cs.interrupting.Swap(false) {
+		// The turn ended because /stop interrupted it: not an error, and the
+		// process keeps its conversation.
+		evt.Interrupted = true
+		if isError {
+			evt.Content = ""
+		}
+		isError = false
+	}
 	if isError {
 		evt.Type = core.EventError
 		evt.Error = errors.New(content)
@@ -451,8 +478,9 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
 
-	// Auto mode: approve immediately without asking the user
-	if cs.autoApprove {
+	// Bypass mode approves tools without asking, but a question or a plan is
+	// for the user to answer, whatever the mode.
+	if cs.autoApprove.Load() && !core.IsUserDecisionTool(toolName) {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior:     "allow",
@@ -632,6 +660,17 @@ func convertHEICImage(img core.ImageAttachment) (core.ImageAttachment, error) {
 // The normalized images are then saved locally and only the file paths are
 // referenced in the text prompt so Claude Code can inspect them via local tools.
 func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	return cs.sendUserMessage(prompt, images, files, "")
+}
+
+// sendUserMessage writes a user message; priority "next" steers it into the
+// running turn.
+func (cs *claudeSession) sendUserMessage(prompt string, images []core.ImageAttachment, files []core.FileAttachment, priority string) error {
+	if priority == "" {
+		// A new turn: an interrupt that arrived after the previous turn had
+		// already ended must not mark this turn's result.
+		cs.interrupting.Store(false)
+	}
 	if err := cs.sessionFailure(); err != nil {
 		return err
 	}
@@ -641,11 +680,18 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 	filePaths := core.SaveFilesToDisk(cs.workDir, files)
 	prompt = core.AppendFileRefs(prompt, filePaths)
 
-	if len(images) == 0 {
-		return cs.writeJSON(map[string]any{
+	userMessage := func(content string) map[string]any {
+		msg := map[string]any{
 			"type":    "user",
-			"message": map[string]any{"role": "user", "content": prompt},
-		})
+			"message": map[string]any{"role": "user", "content": content},
+		}
+		if priority != "" {
+			msg["priority"] = priority
+		}
+		return msg
+	}
+	if len(images) == 0 {
+		return cs.writeJSON(userMessage(prompt))
 	}
 
 	normalizedImages := make([]core.ImageAttachment, 0, len(images))
@@ -670,10 +716,7 @@ func (cs *claudeSession) Send(prompt string, images []core.ImageAttachment, file
 		textPart += "\n\n(Local files: " + strings.Join(refs, ", ") + ")"
 	}
 
-	return cs.writeJSON(map[string]any{
-		"type":    "user",
-		"message": map[string]any{"role": "user", "content": textPart},
-	})
+	return cs.writeJSON(userMessage(textPart))
 }
 
 // RespondPermission writes a control_response to the Claude process stdin.

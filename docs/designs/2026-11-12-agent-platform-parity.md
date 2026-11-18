@@ -392,6 +392,28 @@ Echo 侧（独立仓库，单独 PR）：
 | T3.6 | `/usage`（`get_usage` + `rate_limit_event`）、`/context`（`get_context_usage`）；`/status` 显示花费 | T0.1 | |
 | T3.7 | cron 写入同一会话后，常驻 Claude 进程检测到 transcript 变化就重新 resume | — | cron 跑完后，聊天里能接着 cron 的上下文继续 |
 
+**P3 实现记录（2026-11-18）**
+
+控制协议在本机 Claude Code 2.1.326 上实测：`control_request {request_id, request:{subtype}}` → `control_response {subtype: success|error, request_id, response}`。`list_models`、`get_usage`、`get_context_usage`、`set_model`、`apply_flag_settings`、`set_permission_mode`、`interrupt` 都可用，不发提示词就不会调用模型。core 新增可选接口（`core/agent_live.go`）：`LiveSettingsApplier`、`Steerer`、`Interrupter`、`UsageReporter`、`ContextReporter`、`ModelEffortProvider`，Codex（P4）、agy / Kimi（P6）后续接同样的接口。
+
+- **T3.1**：`/model`、`/effort`、`/mode` 先对运行中的进程热切换（只发变化的项），进程和上下文保留；切换失败（或清空 effort 这种做不到的）才回到原来的“下一轮重启进程”。切到 bypassPermissions 时自动批准跟着变。
+- **T3.2**：模型列表优先用 `list_models`（不配 API key 时），缓存 10 分钟，失败回退到原来的 API / `/model` 解析。`/effort` 的选项按当前模型支持的级别过滤（加上 xhigh），模型列出的新级别（如 ultracode）会补进来。测试里禁止启动真实 Claude。
+- **T3.3**：`/steer <内容>` 插入正在进行的这一轮（用户消息带 `priority:"next"`，实测同一轮内读到）；没有进行中的轮次就按新消息发送。忙时排队的消息回复里带“立即插入”按钮（`/queue steer <id>`）。插入的内容记入会话历史。
+- **T3.4**：`/stop` 对支持中断的 agent 发 `interrupt`，等这一轮结束（最多 15 秒）；进程和会话保留，之后还能继续（实测）。等不到才回到原来的结束进程。这一轮的结果标为“已中断”，不当成错误，也不提示“空回复”。中断在这一轮刚结束时才到达的话，不会误标下一轮。
+- **T3.5**：AskUserQuestion 变成问题卡片（每个选项一个按钮，可回序号、选项文字，或直接回复自己的答案，多选回 `1,3`），答案按 `{"answers": {问题: 选项}}` 回给工具；多个问题依次问。ExitPlanMode 显示计划和“批准计划 / 继续规划”，直接回复文字就是修改意见（拒绝并带上意见）。这两种在 bypass 和“全部允许”下也一定问用户。
+- **T3.6**：`/usage` 显示套餐、5 小时 / 7 天额度用量和重置时间、本进程花费（有运行中的进程就问它，否则起一个只发控制请求的临时进程）；`/context` 显示上下文用量和主要组成；`/status` 增加“花费（当前进程）”。`rate_limit_event` 暂未单独处理（`/usage` 已能看到额度）。
+- **T3.7**：cron 的独立轮次续写了某个 agent 会话后，持有这个会话的聊天会在下一轮前重启进程，resume 到包含 cron 内容的 transcript。
+
+**P3 review（2026-11-18，Codex + Kimi Code）**：两边合并后 14 个问题，全部修复：
+
+- 问题卡片的按钮发送选项序号，不再发送选项文字（选项文字是 agent 写的，可能像 `/mode yolo` 这样的命令）；同一个问题的多个回答只取第一个（加锁，避免并发回答 panic 或重复回复）。
+- 离开 bypass 时先关掉自动批准再请 CLI 切换；热切换成功后清掉之前的“全部允许”；正在进行的轮次不做热切换（共享聊天里别人的 `/mode` 不会在这一轮中途放宽权限），改为下一轮重启生效。
+- 插话只在这一轮还没收到最终结果时接受；“立即插入”按钮绑定的是这条消息自己的队列 ID；`/steer` 保留引用的内容。
+- `/stop`：控制请求的写入也有期限，CLI 不读 stdin 时不会卡住；中断和“这一轮结束、下一轮开始”之间加锁，中断只会到达当前这一轮；中断时撤掉待回答问题的按钮；中断在后台进行，不阻塞 Telegram 的消息循环。`/usage`、`/context` 也在后台执行；`/effort` 只用缓存的模型列表，没有就后台刷新。
+- `list_models` 新出现的强度级别（如 ultracode）能真正传给 Claude。
+- 只发控制请求的临时 Claude 进程使用和正常会话相同的环境（包括 Claude Code Router 设置）。
+- 待你确认：共享聊天（`share_session_in_channel`）里，任何允许的成员都能插话、回答别人的问题或批准计划；这和现在任何成员都能批准权限请求的模型一致，本次没有改。
+
 ### P4 Codex 迁移到 app-server（约 5 天）
 
 | ID | 任务 | 依赖 | 验收 |
