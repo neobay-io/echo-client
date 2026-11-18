@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,44 @@ type WorkerClient struct {
 	pending  map[string]chan map[string]any
 	reqSeq   int
 	watchers map[string]context.CancelFunc
+	// assigned: jobs Echo assigned through this client (job ID -> when),
+	// re-reported after every reconnect (T7.3).
+	assigned map[string]time.Time
+	// metadataFor returns a project's live registration metadata (T7.1).
+	metadataFor AgentMetadataFunc
 }
+
+// AgentMetadataFunc returns a project's live metadata for Echo's agent
+// registration: capabilities, CLI version, login status, defaults.
+type AgentMetadataFunc func(ctx context.Context, project string) map[string]any
+
+// SetAgentMetadata sets where registration metadata comes from.
+func (c *WorkerClient) SetAgentMetadata(fn AgentMetadataFunc) {
+	c.mu.Lock()
+	c.metadataFor = fn
+	c.mu.Unlock()
+}
+
+// workerRequestTimeout bounds a request to the gateway (hello, register,
+// heartbeat); a gateway that stops answering ends the session.
+var workerRequestTimeout = 30 * time.Second
+
+// workerMetadataTimeout bounds gathering registration metadata.
+var workerMetadataTimeout = 30 * time.Second
+
+// workerResyncKeep is how long a finished job is reported again after a
+// reconnect.
+var workerResyncKeep = 6 * time.Hour
+
+// maxAssignedJobs triggers pruning of old assignments.
+const maxAssignedJobs = 1000
+
+// workerFeatures are the protocol features this worker supports.
+var workerFeatures = []string{"agent_options", "agent_session_id", "job_resync"}
+
+// workerWriteTimeout bounds one websocket write; a peer that stops reading
+// ends the session.
+var workerWriteTimeout = 30 * time.Second
 
 type workerAgentRegistration struct {
 	ID             string         `json:"id"`
@@ -105,6 +143,7 @@ func NewWorkerClient(
 		doneCh:            make(chan struct{}),
 		pending:           make(map[string]chan map[string]any),
 		watchers:          make(map[string]context.CancelFunc),
+		assigned:          make(map[string]time.Time),
 	}, nil
 }
 
@@ -184,15 +223,22 @@ func (c *WorkerClient) runSession(ctx context.Context) error {
 				"label":    c.label,
 				"platform": runtime.GOOS,
 				"tags":     c.tags,
+				// features tells Echo what this worker understands (an
+				// older worker would ignore agent_options silently).
+				"features": workerFeatures,
 			},
 		},
 	}, "host_registered"); err != nil {
 		return err
 	}
+	// Echo forgets a worker's jobs when it disconnects: report every job it
+	// assigned again (state now, or the result it may have missed) right
+	// away, before the slower agent registration.
+	c.resyncJobs(ctx)
 	if _, err := c.request(ctx, map[string]any{
 		"type":    "register_agents",
 		"host_id": c.hostID,
-		"agents":  c.agents,
+		"agents":  c.registrationAgents(ctx),
 	}, "agents_registered"); err != nil {
 		return err
 	}
@@ -226,6 +272,8 @@ func (c *WorkerClient) request(
 	payload = cloneMap(payload)
 	payload["request_id"] = requestID
 	waitCh := make(chan map[string]any, 1)
+	ctx, cancel := context.WithTimeout(ctx, workerRequestTimeout)
+	defer cancel()
 
 	c.mu.Lock()
 	c.pending[requestID] = waitCh
@@ -315,6 +363,16 @@ func (c *WorkerClient) handleAssignTask(ctx context.Context, payload map[string]
 	prompt, _ := payload["prompt"].(string)
 	timeoutSec, _ := payload["timeout_sec"].(float64)
 	workspaceRef := decodeWorkspaceRef(payload["workspace_ref"])
+	agentOptions, optErr := decodeAgentOptions(payload["agent_options"])
+	if optErr != nil {
+		_ = c.sendJSON(map[string]any{
+			"type":       "task_assigned",
+			"request_id": requestID,
+			"host_id":    c.hostID,
+			"error":      optErr.Error(),
+		})
+		return
+	}
 
 	job, err := c.jobMgr.Start(JobRequest{
 		Project:      strings.TrimSpace(agentProject),
@@ -323,6 +381,7 @@ func (c *WorkerClient) handleAssignTask(ctx context.Context, payload map[string]
 		Prompt:       prompt,
 		Timeout:      time.Duration(int(timeoutSec)) * time.Second,
 		WorkspaceRef: workspaceRef,
+		AgentOptions: agentOptions,
 	})
 	if err != nil {
 		_ = c.sendJSON(map[string]any{
@@ -334,6 +393,13 @@ func (c *WorkerClient) handleAssignTask(ctx context.Context, payload map[string]
 		return
 	}
 
+	c.mu.Lock()
+	c.assigned[job.ID] = time.Now()
+	over := len(c.assigned) > maxAssignedJobs
+	c.mu.Unlock()
+	if over {
+		c.pruneAssigned()
+	}
 	_ = c.sendJSON(map[string]any{
 		"type":       "task_assigned",
 		"request_id": requestID,
@@ -341,6 +407,141 @@ func (c *WorkerClient) handleAssignTask(ctx context.Context, payload map[string]
 		"job":        workerJobPayload(job),
 	})
 	c.ensureWatcher(ctx, job.ID)
+}
+
+// decodeAgentOptions reads assign_task.agent_options: model, effort (or
+// reasoning_level), mode, resume_session_id. Unknown keys are refused so a
+// misspelled option does not silently run with the defaults.
+func decodeAgentOptions(raw any) (JobAgentOptions, error) {
+	if raw == nil {
+		return JobAgentOptions{}, nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return JobAgentOptions{}, fmt.Errorf("agent_options must be an object")
+	}
+	var opts JobAgentOptions
+	for key, value := range m {
+		if value == nil {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			return JobAgentOptions{}, fmt.Errorf("agent_options.%s must be a string", key)
+		}
+		switch key {
+		case "model":
+			opts.Model = text
+		case "effort", "reasoning_level", "reasoning_effort":
+			opts.Effort = text
+		case "mode":
+			opts.Mode = text
+		case "resume_session_id":
+			opts.ResumeSessionID = text
+		default:
+			return JobAgentOptions{}, fmt.Errorf("unknown agent_options key %q", key)
+		}
+	}
+	return opts, nil
+}
+
+// registrationAgents is the agent list for register_agents, with each
+// project's live metadata added (gathered in parallel, bounded).
+func (c *WorkerClient) registrationAgents(ctx context.Context) []workerAgentRegistration {
+	c.mu.Lock()
+	metadataFor := c.metadataFor
+	c.mu.Unlock()
+	agents := make([]workerAgentRegistration, len(c.agents))
+	copy(agents, c.agents)
+	if metadataFor == nil {
+		return agents
+	}
+	ctx, cancel := context.WithTimeout(ctx, workerMetadataTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, 4) // probes start CLIs: a few at a time
+	for i := range agents {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			live := metadataFor(ctx, agents[i].CCProject)
+			merged := cloneMap(agents[i].Metadata)
+			for k, v := range live {
+				merged[k] = v
+			}
+			agents[i].Metadata = merged
+		}(i)
+	}
+	wg.Wait()
+	return agents
+}
+
+// resyncJobs reports the state of every job Echo assigned (after a
+// reconnect), restarts watchers of jobs still running, and forgets jobs
+// that finished long ago.
+func (c *WorkerClient) resyncJobs(ctx context.Context) {
+	c.mu.Lock()
+	ids := make([]string, 0, len(c.assigned))
+	for id := range c.assigned {
+		ids = append(ids, id)
+	}
+	c.mu.Unlock()
+	for _, id := range ids {
+		job, ok := c.jobMgr.Get(id)
+		if !ok {
+			c.forgetAssigned(id)
+			continue
+		}
+		if isTerminalWorkerJobStatus(job.Status) {
+			if job.FinishedAt != nil && time.Since(*job.FinishedAt) > workerResyncKeep {
+				c.forgetAssigned(id)
+				continue
+			}
+			if err := c.sendJSON(map[string]any{"type": "task_result", "host_id": c.hostID, "job": workerJobPayload(job)}); err != nil {
+				slog.Warn("worker client failed to resend task result", "job_id", id, "error", err)
+			}
+			continue
+		}
+		if err := c.sendJSON(map[string]any{"type": "task_progress", "host_id": c.hostID, "job": workerJobPayload(job)}); err != nil {
+			slog.Warn("worker client failed to resend task progress", "job_id", id, "error", err)
+		}
+		c.ensureWatcher(ctx, id)
+	}
+}
+
+// pruneAssigned bounds the assigned set: jobs that ended long ago go first,
+// then the oldest finished ones until at most maxAssignedJobs remain. Jobs
+// still queued or running are always kept.
+func (c *WorkerClient) pruneAssigned() {
+	c.mu.Lock()
+	type entry struct {
+		id string
+		at time.Time
+	}
+	entries := make([]entry, 0, len(c.assigned))
+	for id, at := range c.assigned {
+		entries = append(entries, entry{id, at})
+	}
+	c.mu.Unlock()
+	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
+	remaining := len(entries)
+	for _, e := range entries {
+		j, ok := c.jobMgr.Get(e.id)
+		finished := !ok || isTerminalWorkerJobStatus(j.Status)
+		old := !ok || (j.FinishedAt != nil && time.Since(*j.FinishedAt) > workerResyncKeep)
+		if finished && (old || remaining > maxAssignedJobs) {
+			c.forgetAssigned(e.id)
+			remaining--
+		}
+	}
+}
+
+func (c *WorkerClient) forgetAssigned(jobID string) {
+	c.mu.Lock()
+	delete(c.assigned, jobID)
+	c.mu.Unlock()
 }
 
 func (c *WorkerClient) handleCancelTask(payload map[string]any) {
@@ -717,7 +918,8 @@ func (c *WorkerClient) watchJob(ctx context.Context, jobID string) {
 					"host_id": c.hostID,
 					"job":     workerJobPayload(job),
 				}); err != nil {
-					slog.Warn("worker client failed to send task result", "job_id", jobID, "error", err)
+					// Sent again after the reconnect (resyncJobs).
+					slog.Warn("worker client failed to send task result; it is sent again after reconnecting", "job_id", jobID, "error", err)
 				}
 				return
 			}
@@ -726,8 +928,9 @@ func (c *WorkerClient) watchJob(ctx context.Context, jobID string) {
 				"host_id": c.hostID,
 				"job":     workerJobPayload(job),
 			}); err != nil {
-				slog.Warn("worker client failed to send task progress", "job_id", jobID, "error", err)
-				return
+				// Keep watching: the next snapshot goes out once connected.
+				slog.Debug("worker client failed to send task progress", "job_id", jobID, "error", err)
+				lastFingerprint = ""
 			}
 		}
 	}
@@ -742,7 +945,11 @@ func (c *WorkerClient) sendJSON(payload map[string]any) error {
 	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(workerWriteTimeout))
 	if err := conn.WriteJSON(payload); err != nil {
+		// A write that failed or timed out leaves the connection unusable:
+		// close it so the session ends and reconnects.
+		_ = conn.Close()
 		return fmt.Errorf("write %s: %w", payload["type"], err)
 	}
 	return nil
@@ -1051,13 +1258,15 @@ func workerJobPayload(job *Job) map[string]any {
 		"output":        job.Output,
 		"summary":       job.Summary,
 		"session_id":    job.SessionID,
-		"skills_meta":   job.SkillsMeta,
-		"error":         job.Error,
-		"error_code":    job.ErrorCode,
-		"created_at":    job.CreatedAt.Format(time.RFC3339Nano),
-		"timeout_sec":   job.TimeoutSec,
-		"event_count":   job.EventCount,
-		"events":        []JobEvent{},
+		// agent_session_id: resume it with agent_options.resume_session_id.
+		"agent_session_id": job.SessionID,
+		"skills_meta":      job.SkillsMeta,
+		"error":            job.Error,
+		"error_code":       job.ErrorCode,
+		"created_at":       job.CreatedAt.Format(time.RFC3339Nano),
+		"timeout_sec":      job.TimeoutSec,
+		"event_count":      job.EventCount,
+		"events":           []JobEvent{},
 	}
 	if len(job.Events) > 0 {
 		payload["events"] = append([]JobEvent(nil), job.Events...)
@@ -1067,6 +1276,9 @@ func workerJobPayload(job *Job) map[string]any {
 	}
 	if job.FinishedAt != nil {
 		payload["finished_at"] = job.FinishedAt.Format(time.RFC3339Nano)
+	}
+	if !job.AgentOptions.IsZero() {
+		payload["agent_options"] = job.AgentOptions
 	}
 	return payload
 }

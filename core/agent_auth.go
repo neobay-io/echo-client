@@ -378,6 +378,7 @@ func (e *Engine) RefreshInteractiveAuth() {
 func (e *Engine) RefreshInteractiveAuthFor(agent string) {
 	if e.agent != nil && e.agent.Name() == agent {
 		e.retireAllInteractiveStates()
+		invalidateEchoAuth(agent) // Echo sees the new login state at its next registration
 	}
 }
 

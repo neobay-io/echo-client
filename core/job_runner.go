@@ -100,6 +100,52 @@ func (e *Engine) JobRunner() JobRunner {
 	return engineJobRunner{engine: e}
 }
 
+// ValidateJobOptions implements JobOptionsValidator (Echo's per-task
+// agent_options, T7.2).
+// A task's mode cannot be more permissive than the mode the project is
+// configured with: a reviewer lane set to plan stays read-only whatever the
+// task asks for.
+func (r engineJobRunner) ValidateJobOptions(opts JobAgentOptions) (JobAgentOptions, error) {
+	opts, err := r.engine.normalizeAgentSettings(opts)
+	if err != nil || opts.Mode == "" {
+		return opts, err
+	}
+	ms, ok := r.engine.agent.(ModeSwitcher)
+	if !ok {
+		return opts, fmt.Errorf("agent %s has no permission modes", r.engine.agent.Name())
+	}
+	ceiling := ms.GetMode()
+	if !modeWithin(r.engine.agent.Name(), opts.Mode, ceiling) {
+		return opts, fmt.Errorf("mode %q is more permissive than this project's mode %q", opts.Mode, ceiling)
+	}
+	return opts, nil
+}
+
+// permissiveness orders the canonical modes from most to least restricted.
+var permissiveness = map[string]int{
+	PermissionModePlan:        0,
+	PermissionModeDefault:     1,
+	PermissionModeAcceptEdits: 2,
+	PermissionModeAuto:        3,
+	PermissionModeBypass:      4,
+}
+
+// modeWithin reports whether mode allows no more than ceiling. Modes
+// without a known meaning are only allowed when equal to the ceiling.
+func modeWithin(agentType, mode, ceiling string) bool {
+	if strings.EqualFold(mode, ceiling) {
+		return true
+	}
+	_, m, ok1 := ResolvePermissionMode(agentType, mode)
+	_, c, ok2 := ResolvePermissionMode(agentType, ceiling)
+	if !ok1 || !ok2 {
+		return false
+	}
+	rm, known1 := permissiveness[m]
+	rc, known2 := permissiveness[c]
+	return known1 && known2 && rm <= rc
+}
+
 func (r engineJobRunner) Run(
 	ctx context.Context,
 	req JobRequest,
@@ -111,9 +157,22 @@ func (r engineJobRunner) Run(
 		sessionKey = "echo-job-anonymous"
 	}
 	defer r.engine.trackBackgroundTurn()()
+	if resumeID := req.AgentOptions.ResumeSessionID; resumeID != "" {
+		// A job that continues an agent session takes turns with chats and
+		// cron runs on it, and chats holding it reload it afterwards.
+		key, lock := r.engine.retainAgentSessionTurnLock(r.engine.agent.Name(), resumeID)
+		release, lockErr := r.engine.waitAgentSessionTurnLock(ctx, key, lock)
+		if lockErr != nil {
+			return nil, lockErr
+		}
+		defer release()
+	}
 	agentSession, err := r.engine.StartJobSession(ctx, req, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("start job session: %w", err)
+	}
+	if resumeID := req.AgentOptions.ResumeSessionID; resumeID != "" {
+		defer func() { r.engine.retireStatesForAgentSession(resumeID, agentSession.CurrentSessionID()) }()
 	}
 	defer func() {
 		_ = agentSession.Close()
@@ -451,9 +510,11 @@ func (e *Engine) StartJobSession(
 	if err := validateJobWorkspace(req.WorkspaceRef); err != nil {
 		return nil, err
 	}
-	// Echo jobs always use the project defaults: chat-level /model, /effort and
-	// /mode choices must not leak into worker tasks.
-	return e.startAgentSessionAfterUpgrade(ctx, "", sessionKey, e.jobEnv(req, jobID, sessionKey), AgentSessionOptions{})
+	// Echo jobs use the project defaults unless the task sets its own
+	// (agent_options); chat-level /model, /effort and /mode choices never
+	// leak into worker tasks.
+	opts := AgentSessionOptions{Model: req.AgentOptions.Model, ReasoningLevel: req.AgentOptions.Effort, Mode: req.AgentOptions.Mode}
+	return e.startAgentSessionAfterUpgrade(ctx, req.AgentOptions.ResumeSessionID, sessionKey, e.jobEnv(req, jobID, sessionKey), opts)
 }
 
 func (e *Engine) sessionEnv(sessionKey string) []string {

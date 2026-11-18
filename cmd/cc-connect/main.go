@@ -615,6 +615,16 @@ func main() {
 		if err != nil {
 			slog.Warn("echo worker client unavailable", "error", err)
 		} else {
+			enginesByProject := make(map[string]*core.Engine, len(engines))
+			for i, e := range engines {
+				enginesByProject[cfg.Projects[i].Name] = e
+			}
+			workerClient.SetAgentMetadata(func(ctx context.Context, project string) map[string]any {
+				if e := enginesByProject[project]; e != nil {
+					return e.EchoAgentMetadata(ctx)
+				}
+				return nil
+			})
 			var workerCtx context.Context
 			workerCtx, stopWorkerClient = context.WithCancel(context.Background())
 			workerClient.Start(workerCtx)

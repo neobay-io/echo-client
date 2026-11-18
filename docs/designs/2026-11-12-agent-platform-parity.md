@@ -495,6 +495,23 @@ Echo 侧（独立仓库，单独 PR）：
 | T7.3 | 可靠性：结果补发、重连后同步、请求超时、watcher 不因发送失败退出 | — | 断网重连测试 |
 | T7.4 | Echo 仓库：透传 `agent_options`、按能力调度（可选）、`AgentSessionSummary` 增加 kimi、更新文档 | T7.2 | 独立 PR |
 
+**P7 实现记录（2026-11-18）**
+
+- **T7.1 注册信息**：`register_agents` 的每个 agent 的 metadata 增加 `capabilities`（§5.1 的能力声明）、`cli_version`（`<cli> --version` 第一行，CLI 文件变了才重新读）、`auth_status`（是否登录、方式、到期时间；不含账号信息；10 分钟缓存，检查要启动 CLI）、`default_model` / `default_effort` / `default_mode`。每次连上 Echo 注册时并行收集，最多 30 秒。
+- **T7.2 按任务的设置**：`assign_task.agent_options` 支持 `model`、`effort`（或 `reasoning_level`）、`mode`、`resume_session_id`；未知的键直接拒绝（`task_assigned` 带错误），值按 agent 实际提供的选项检查（与 cron 任务自己的设置同一套规则，只有能按会话接收设置的 agent 才接受）。设置只作用于这个任务，不改共享的 agent；`resume_session_id` 接着已有的 agent 会话跑，跑的时候与聊天、cron 共用会话锁，结束后持有这个会话的聊天进程会重启以读到新内容。任务结果里有 `agent_session_id`（同 `session_id`）和 `agent_options`。排队中的任务重启后保留自己的设置（以前连 `task_type` 都会丢）。
+- **T7.3 可靠性**：Echo 在 worker 断开时会丢掉它的任务状态，所以每次重新连上并注册后，worker 把 Echo 派来的每个任务重新报一遍（还在跑的发进度并恢复监视，6 小时内结束的发结果），断线期间结束的任务结果因此不会丢；进度发不出去时监视不再退出；对网关的每个请求（hello、注册、心跳）最多等 30 秒，超时就断开重连。
+- **T7.4（Echo 仓库）**：任务 `input.agent_options`（`model`、`effort`、`mode`、`resume_session_id`）透传到 `assign_task`，未知的键让派发失败；结果里的 agent 会话记在 `task_attempts.remote_agent_session_id`（新迁移 `20261118_01`）；README 增加 kimi、agy 和这些字段的说明；v2 设计里的会话来源增加 `kimi_cli`、`agy_cli`。按能力调度没有做（Echo 现在按 role 和 agent_type 选 agent，metadata 已经有能力信息，需要时再加）。设计里的 `AgentSessionSummary` 在 Echo 中还没有实现，只更新了设计文档。
+- **未做**：进程重启前正在跑的任务会被标为 orphaned，重启后不会主动报给 Echo（Echo 的任务超时会处理）。
+
+**P7 review（2026-11-18，Codex + Kimi Code）**：
+
+- **权限不能被任务放宽（高）**：任务的 `mode` 不能比这个项目配置的模式更宽（plan < default < acceptEdits < auto < bypass）；配置成 plan 的 reviewer 不会因为任务要求而变成 bypass。
+- **只能续接自己的会话（高）**：`resume_session_id` 只接受这个项目在本机跑过的 Echo 任务的会话（任务记录里有），不能拿聊天或别的项目的会话 ID 读历史；也就不会出现两个项目同时续接同一会话、或 Claude 收到不是 UUID 的 ID 时悄悄开新会话。失败、超时、取消的任务也保留会话 ID（agent 一报告就记下）。
+- **旧 worker 不会悄悄忽略设置（高）**：`register_host` 的 metadata 带 `features`（`agent_options`、`agent_session_id`、`job_resync`）；Echo 只给声明了 `agent_options` 的 worker 发设置，否则派发失败。
+- **重连时不误判任务丢失（高）**：worker 在注册主机后、收集较慢的 agent 信息之前就重新报任务；Echo 在 worker 重连 60 秒内（且 worker 支持 `job_resync`）找不到任务时不判为丢失；已经结束的任务不会被晚到的进度覆盖回“运行中”。
+- **其它**：续接会话的任务只调度到持有这个会话的 agent（忙时等待，不换别的机器）；补发的结果不会写到绑定了别的任务的执行记录上；websocket 每次写入最多 30 秒，超时断开重连；只清理已结束很久的任务记录（不清理还在跑的）；`/auth` 登录或退出后，下次注册上报新的登录状态。
+- **Kimi 补充**：重启后恢复的排队任务在开始前按当前的 agent 再检查一次设置（项目换了 agent 时直接失败，不会以项目的 bypass 运行）；CLI 版本和登录状态在整个进程里按 CLI 共享缓存，同一个 CLI 同时只探测一次，注册时最多 4 个项目并行收集；已分配任务的记录真正有上限（保留还在跑的，其余按时间淘汰）。
+
 ### P8 平台拉齐（约 3 天）
 
 | ID | 任务 | 依赖 | 验收 |

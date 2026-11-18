@@ -43,6 +43,27 @@ type JobRequest struct {
 	Prompt       string          `json:"prompt"`
 	Timeout      time.Duration   `json:"timeout,omitempty"`
 	WorkspaceRef JobWorkspaceRef `json:"workspace_ref,omitempty"`
+	// AgentOptions are this job's own agent settings (Echo's
+	// assign_task.agent_options, T7.2); empty fields use the project's.
+	AgentOptions JobAgentOptions `json:"agent_options,omitempty"`
+}
+
+// JobAgentOptions are per-job agent settings. ResumeSessionID continues an
+// existing agent session instead of starting a new one.
+type JobAgentOptions struct {
+	Model           string `json:"model,omitempty"`
+	Effort          string `json:"effort,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	ResumeSessionID string `json:"resume_session_id,omitempty"`
+}
+
+// IsZero reports whether no option is set.
+func (o JobAgentOptions) IsZero() bool { return o == JobAgentOptions{} }
+
+// JobOptionsValidator is a JobRunner that checks a job's agent options
+// before the job is accepted, returning them in the agent's own form.
+type JobOptionsValidator interface {
+	ValidateJobOptions(opts JobAgentOptions) (JobAgentOptions, error)
 }
 
 type JobResult struct {
@@ -83,6 +104,7 @@ type Job struct {
 	TimeoutSec   int             `json:"timeout_sec,omitempty"`
 	EventCount   int             `json:"event_count,omitempty"`
 	Events       []JobEvent      `json:"events,omitempty"`
+	AgentOptions JobAgentOptions `json:"agent_options,omitempty"`
 }
 
 func (j *Job) clone() *Job {
@@ -201,6 +223,25 @@ func (jm *JobManager) Start(req JobRequest) (*Job, error) {
 		jm.mu.Unlock()
 		return nil, fmt.Errorf("project %q is not registered", req.Project)
 	}
+	if !req.AgentOptions.IsZero() {
+		v, ok := runner.(JobOptionsValidator)
+		if !ok {
+			jm.mu.Unlock()
+			return nil, fmt.Errorf("project %q does not take per-job agent options", req.Project)
+		}
+		opts, err := v.ValidateJobOptions(req.AgentOptions)
+		if err != nil {
+			jm.mu.Unlock()
+			return nil, fmt.Errorf("agent_options: %w", err)
+		}
+		if opts.ResumeSessionID != "" && !jm.ownsSessionLocked(req.Project, opts.ResumeSessionID) {
+			// Only sessions this project's own jobs ran in can be continued:
+			// a chat's (or another project's) session is not Echo's to read.
+			jm.mu.Unlock()
+			return nil, fmt.Errorf("agent_options: resume_session_id %q is not a session of an earlier job of project %q on this worker", opts.ResumeSessionID, req.Project)
+		}
+		req.AgentOptions = opts
+	}
 
 	jobID, err := jm.createUniqueJobIDLocked()
 	if err != nil {
@@ -219,6 +260,7 @@ func (jm *JobManager) Start(req JobRequest) (*Job, error) {
 		Status:       JobStatusQueued,
 		CreatedAt:    now,
 		TimeoutSec:   int(req.Timeout / time.Second),
+		AgentOptions: req.AgentOptions,
 	}
 	if err := jm.saveJob(job); err != nil {
 		jm.mu.Unlock()
@@ -242,6 +284,17 @@ func (jm *JobManager) Start(req JobRequest) (*Job, error) {
 		go jm.runJob(dispatch)
 	}
 	return snapshot, nil
+}
+
+// ownsSessionLocked reports whether an earlier job of project ran in the
+// agent session id (jm.mu held).
+func (jm *JobManager) ownsSessionLocked(project, id string) bool {
+	for _, managed := range jm.jobs {
+		if managed.job.Project == project && managed.job.SessionID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (jm *JobManager) Get(jobID string) (*Job, bool) {
@@ -378,6 +431,30 @@ func (jm *JobManager) runJob(managed *managedJob) {
 		})
 		return
 	}
+	// A job restored after a restart was validated against the agent it was
+	// queued for; check its options again against the agent it runs on.
+	if !req.AgentOptions.IsZero() {
+		var validErr error
+		if v, ok := runner.(JobOptionsValidator); !ok {
+			validErr = fmt.Errorf("project %q does not take per-job agent options", req.Project)
+		} else if req.AgentOptions, validErr = v.ValidateJobOptions(req.AgentOptions); validErr == nil && req.AgentOptions.ResumeSessionID != "" {
+			jm.mu.RLock()
+			owned := jm.ownsSessionLocked(req.Project, req.AgentOptions.ResumeSessionID)
+			jm.mu.RUnlock()
+			if !owned {
+				validErr = fmt.Errorf("resume_session_id %q is not a session of an earlier job of project %q", req.AgentOptions.ResumeSessionID, req.Project)
+			}
+		}
+		if validErr != nil {
+			jm.finishJob(jobID, func(job *Job) {
+				now := time.Now().UTC()
+				job.FinishedAt = &now
+				job.Status = JobStatusFailed
+				job.Error = "agent_options: " + validErr.Error()
+			})
+			return
+		}
+	}
 
 	result, err := runner.Run(ctx, req, jobID, func(event JobEvent) {
 		jm.recordJobEvent(jobID, event)
@@ -464,6 +541,11 @@ func (jm *JobManager) recordJobEvent(jobID string, event JobEvent) {
 	}
 	event.Index = managed.job.EventCount
 	managed.job.EventCount++
+	if event.SessionID != "" {
+		// Known as soon as the agent reports it, so a job that fails or
+		// times out can still be continued (resume_session_id).
+		managed.job.SessionID = event.SessionID
+	}
 	managed.job.Events = append(managed.job.Events, event)
 	if extra := len(managed.job.Events) - maxBufferedJobEvents; extra > 0 {
 		managed.job.Events = append([]JobEvent(nil), managed.job.Events[extra:]...)
@@ -563,9 +645,11 @@ func (jm *JobManager) load() error {
 			req: JobRequest{
 				Project:      job.Project,
 				TaskID:       job.TaskID,
+				TaskType:     job.TaskType,
 				Prompt:       job.Prompt,
 				Timeout:      time.Duration(job.TimeoutSec) * time.Second,
 				WorkspaceRef: job.WorkspaceRef,
+				AgentOptions: job.AgentOptions,
 			},
 			cancel: func() {},
 		}

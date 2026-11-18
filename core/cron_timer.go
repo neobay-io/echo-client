@@ -221,49 +221,64 @@ func (e *Engine) cmdTimerDel(p Platform, msg *Message, args []string) {
 // against what this project's agent offers and stores them in the agent's
 // form. Unknown values are refused rather than dropped.
 func (e *Engine) normalizeJobSettings(job *CronJob) error {
-	if id := job.AgentSessionID; id != "" {
-		if len(id) > 256 || strings.IndexFunc(id, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
-			return fmt.Errorf("invalid agent_session_id")
+	opts, err := e.normalizeAgentSettings(JobAgentOptions{Model: job.Model, Effort: job.ReasoningLevel, Mode: job.Mode, ResumeSessionID: job.AgentSessionID})
+	if err != nil {
+		return err
+	}
+	job.Model, job.ReasoningLevel, job.Mode = opts.Model, opts.Effort, opts.Mode
+	return nil
+}
+
+// normalizeAgentSettings checks a job's own settings (a cron job's, an Echo
+// task's) against what this project's agent offers and returns them in the
+// agent's form. Unknown values are refused rather than dropped.
+func (e *Engine) normalizeAgentSettings(opts JobAgentOptions) (JobAgentOptions, error) {
+	opts.Model = strings.TrimSpace(opts.Model)
+	opts.Effort = strings.TrimSpace(opts.Effort)
+	opts.Mode = strings.TrimSpace(opts.Mode)
+	opts.ResumeSessionID = strings.TrimSpace(opts.ResumeSessionID)
+	if id := opts.ResumeSessionID; id != "" {
+		if len(id) > 256 || strings.IndexFunc(id, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 || strings.HasPrefix(id, "-") {
+			return opts, fmt.Errorf("invalid agent session id")
 		}
 	}
-	if job.Model != "" || job.ReasoningLevel != "" || job.Mode != "" {
+	if opts.Model != "" || opts.Effort != "" || opts.Mode != "" {
 		// Settings reach a job's session only through SessionOptionsInjector;
 		// accepting them for other agents would run the job with the
 		// project's settings instead (e.g. bypass for a job asking for plan).
 		if _, ok := e.agent.(SessionOptionsInjector); !ok {
-			return fmt.Errorf("agent %s cannot give a job its own model, effort or mode", e.agent.Name())
+			return opts, fmt.Errorf("agent %s cannot give a job its own model, effort or mode", e.agent.Name())
 		}
 	}
-	if job.Mode != "" {
+	if opts.Mode != "" {
 		switcher, ok := e.agent.(ModeSwitcher)
 		if !ok {
-			return fmt.Errorf("agent %s has no permission modes", e.agent.Name())
+			return opts, fmt.Errorf("agent %s has no permission modes", e.agent.Name())
 		}
-		mode, ok := resolveModeForSwitcher(e.agent.Name(), switcher, job.Mode)
+		mode, ok := resolveModeForSwitcher(e.agent.Name(), switcher, opts.Mode)
 		if !ok {
-			return fmt.Errorf("unknown mode %q for %s", job.Mode, e.agent.Name())
+			return opts, fmt.Errorf("unknown mode %q for %s", opts.Mode, e.agent.Name())
 		}
-		job.Mode = mode
+		opts.Mode = mode
 	}
-	if job.ReasoningLevel != "" {
+	if opts.Effort != "" {
 		switcher, ok := e.agent.(ReasoningLevelSwitcher)
 		if !ok {
-			return fmt.Errorf("agent %s has no reasoning levels", e.agent.Name())
+			return opts, fmt.Errorf("agent %s has no reasoning levels", e.agent.Name())
 		}
-		want := strings.ToLower(job.ReasoningLevel)
 		found := false
 		for _, l := range switcher.AvailableReasoningLevels() {
-			if strings.EqualFold(l.Name, want) {
-				job.ReasoningLevel, found = l.Name, true
+			if strings.EqualFold(l.Name, opts.Effort) {
+				opts.Effort, found = l.Name, true
 				break
 			}
 		}
 		if !found {
-			return fmt.Errorf("unknown reasoning_level %q for %s", job.ReasoningLevel, e.agent.Name())
+			return opts, fmt.Errorf("unknown reasoning_level %q for %s", opts.Effort, e.agent.Name())
 		}
 	}
-	if job.Model != "" && (len(job.Model) > 200 || strings.ContainsAny(job.Model, " \t\r\n")) {
-		return fmt.Errorf("invalid model %q", job.Model)
+	if opts.Model != "" && (len(opts.Model) > 200 || strings.ContainsAny(opts.Model, " \t\r\n") || strings.HasPrefix(opts.Model, "-")) {
+		return opts, fmt.Errorf("invalid model %q", opts.Model)
 	}
-	return nil
+	return opts, nil
 }
