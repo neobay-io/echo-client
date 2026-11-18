@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chenhg5/cc-connect/agent/acp"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -45,8 +46,15 @@ type Agent struct {
 	sessionEnv     []string
 	sessionOpts    core.AgentSessionOptions // per-chat overrides for the next StartSession
 	catalog        *modelCatalog
+	backend        string // backendPrint | backendACP
 	mu             sync.Mutex
 }
+
+// Backends: one `agy -p` per turn (default), or a resident `agy acp` (P6).
+const (
+	backendPrint = "print"
+	backendACP   = "acp"
+)
 
 var (
 	_ core.ModelSwitcher          = (*Agent)(nil)
@@ -68,11 +76,23 @@ func New(opts map[string]any) (core.Agent, error) {
 	reasoningLevel, _ := opts["reasoning_level"].(string)
 	mode, _ := opts["mode"].(string)
 
+	backend := backendPrint
+	if b, _ := opts["backend"].(string); strings.TrimSpace(b) != "" {
+		switch strings.ToLower(strings.TrimSpace(b)) {
+		case backendPrint, "prompt", "-p":
+		case backendACP:
+			backend = backendACP
+		default:
+			return nil, fmt.Errorf(`antigravity: backend must be "print" or "acp" (got %q)`, b)
+		}
+	}
+
 	cmd, extraArgs, err := resolveCommand(opts)
 	if err != nil {
 		return nil, err
 	}
 	a := &Agent{
+		backend:        backend,
 		workDir:        workDir,
 		model:          strings.TrimSpace(model),
 		reasoningLevel: normalizeEffort(reasoningLevel),
@@ -138,9 +158,56 @@ func (a *Agent) Name() string { return "antigravity" }
 // Capabilities implements core.CapabilityProvider: chat login runs
 // `agy acp --login` (Google URL + pasted code); agy has no logout.
 func (a *Agent) Capabilities() core.AgentCapabilities {
-	return core.AgentCapabilities{
+	caps := core.AgentCapabilities{
 		Auth: core.AuthCaps{Login: true, Status: true, Flow: core.AuthFlowURLCode},
 	}
+	if a.backend == backendACP {
+		// agy acp: settings change inside the session, /stop cancels the
+		// turn, a message sent during a turn continues it.
+		caps.LiveModel, caps.LiveMode, caps.Interrupt, caps.Steer, caps.AskUser = true, true, true, true, true
+	}
+	return caps
+}
+
+// ApplyLiveSettings implements core.LiveSettingsApplier: an `agy acp`
+// session switches model, thinking level and mode in place. Prompt-mode
+// sessions cannot; the engine restarts them instead.
+func (a *Agent) ApplyLiveSettings(ctx context.Context, session core.AgentSession, opts core.AgentSessionOptions) error {
+	var s *acp.Session
+	switch v := session.(type) {
+	case *acp.Session:
+		s = v
+	case acp.SteeringSession:
+		s = v.Session
+	default:
+		return fmt.Errorf("antigravity: this session cannot change settings while running")
+	}
+	a.mu.Lock()
+	model, effort, mode := a.model, a.reasoningLevel, a.mode
+	a.mu.Unlock()
+	if opts.Model != "" {
+		model = strings.TrimSpace(opts.Model)
+	}
+	if opts.ReasoningLevel != "" {
+		effort = normalizeEffort(opts.ReasoningLevel)
+	}
+	if opts.Mode != "" {
+		mode = normalizeMode(opts.Mode)
+	}
+	base, suffix := splitEffortSuffix(model)
+	if effort == "" {
+		effort = suffix // "gemini-4-argon-high" carries its level
+	}
+	return s.Apply(ctx, base, a.effortForModel(model, effort), mode)
+}
+
+// CompressCommand implements core.ContextCompressor: `agy acp` runs the
+// /compact command; prompt mode has none.
+func (a *Agent) CompressCommand() string {
+	if a.backend == backendACP {
+		return "/compact"
+	}
+	return ""
 }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -298,6 +365,32 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		mode = normalizeMode(a.sessionOpts.Mode)
 	}
 	extraEnv := append(append([]string(nil), a.configEnv...), a.sessionEnv...)
+	if a.backend == backendACP {
+		base, suffix := splitEffortSuffix(model)
+		if effort == "" {
+			effort = suffix // "gemini-4-argon-high" carries its level
+		}
+		cfg := acp.Config{
+			Agent:     "antigravity",
+			Command:   a.cmd,
+			Args:      append(append([]string(nil), a.cliExtraArgs...), "acp"),
+			Env:       core.MergeEnv(os.Environ(), extraEnv),
+			WorkDir:   core.SessionWorkDirFromEnv(extraEnv, a.workDir),
+			ExtraDirs: core.SessionExtraDirsFromEnv(extraEnv),
+			ResumeID:  sessionID,
+			Mode:      mode,
+			Model:     base,
+		}
+		a.mu.Unlock()
+		cfg.Effort = a.effortForModel(model, effort)
+		s, err := acp.Start(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		// agy takes a prompt sent during a turn: it ends the running one and
+		// continues with the new message (verified with agy 1.5.10).
+		return acp.SteeringSession{Session: s}, nil
+	}
 	cfg := sessionConfig{
 		cmd:       a.cmd,
 		extraArgs: append([]string(nil), a.cliExtraArgs...),

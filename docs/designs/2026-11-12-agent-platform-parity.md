@@ -486,6 +486,24 @@ Echo 侧（独立仓库，单独 PR）：
 | T6.1 | 移植上游 `agent/acp` 通用适配器 | T1.* | |
 | T6.2 | agy、Kimi 改走 ACP（配置开关）：轮内插入、热切换 model / thinking / mode、审批转发、Kimi 的 plan 模式 | T6.1 | 两个 agent 达到与 Claude / Codex 相同的能力矩阵 |
 
+**P6 实现记录（2026-11-18）**
+
+- **T6.1**：没有照搬上游的 `agent/acp`（它是一个独立的 agent 类型，写入不设期限，`Send` 要等整轮结束，恢复失败会悄悄开新会话），而是写成 kimi、agy 共用的库 `agent/acp`：JSON-RPC 写入有期限；`initialize`（声明支持表单提问）→ `session/resume`（或 `session/load`，回放的历史不当成新输出）/ `session/new`；恢复不到的会话报“会话不存在”，引擎会重置；`Send` 立即返回，输出按事件流出，本轮结束才发结果；工具调用之前的文字作为思考；`session/cancel` 中断本轮（进程和会话保留）；`usage_update` 用于 `/context`；权限请求转成聊天里的审批卡片，表单提问（`elicitation/create`）转成 P3 的提问卡片；进程退出时本轮以错误结束、事件流关闭。
+- **T6.2**：kimi、antigravity 增加 `backend = "acp"`（默认仍是每轮一个 `-p` 进程）。ACP 下：model / 思考强度 / mode 在运行中的会话里切换（`session/set_mode`、`session/set_config_option`、agy 的 `session/set_model`），设置不了 mode 就拒绝启动，不会以更宽的模式运行；`/stop` 中断本轮；提问卡片；`/compact` 走 CLI 自己的命令（两者 ACP 都有 `compact`）。Kimi 在 ACP 下有 default / plan / auto / yolo 四种模式（plan 模式可用）；agy 没有 bypass 模式，bypassPermissions 时用 auto 并由 echo-client 自动批准其余请求，离开 bypass 时先停止自动批准。
+- **轮内插入（与 §3 原判断不同）**：实测 Kimi Code 2.5.3 的 ACP 在轮中收到新的 `session/prompt` 会直接拒绝（`turn.agent_busy`），所以 Kimi 不声明 Steer，轮内消息进入队列；agy 1.5.10 收到新 prompt 会结束当前轮并带着上下文继续新的一轮，echo-client 把两次 prompt 当作同一轮（最后一个 prompt 结束才发结果），agy 声明 Steer。
+- **验证**：`agent/acp/session_test.go` 用测试二进制模拟 ACP 服务（文本、工具、审批、表单提问、中断、插话、恢复失败、进程退出、用量）；`go test -tags live -run TestLive ./agent/acp` 用真实 CLI 跑过：Kimi 在 plan 模式下完成一轮并切回 default，agy 完成一轮、中断一轮后会话仍在。
+- **其它**：额外目录在 CLI 声明 `additionalDirectories` 时随 `session/new`、`session/resume` 一起传入（两者都声明了）。
+- **未做**：agy 默认模式下“只读操作直接执行”改由 agy 自己判断（ACP 不再经过 PreToolUse hook）。
+
+**P6 review（2026-11-18，Codex + Kimi Code）**：
+
+- **`/compact`（高）**：以前 `/compact` 和普通消息一样加了交互提示前缀，到 CLI 那里不再是命令，而压缩期间引擎还会自动批准所有权限请求。现在 ACP 会话实现 `NativeCompactor`，原样发送 `/compact`；Kimi 在 prompt 返回后才真正完成压缩，本轮会等它报告完成（最多 2 分钟）；压缩期间的任何工具请求一律拒绝（引擎改动，对 Claude 同样适用）。
+- **顺序（高）**：prompt 在 `Send` / `Steer` 返回前就写出，`/stop` 的取消不会跑到它前面；所有写入都受调用方的期限约束（`/stop` 的 15 秒）。
+- **“允许”不会变成永久授权（高）**：用户点允许只选 `allow_once`；只有 echo-client 自己的 bypass（agy）在没有别的选项时才用 `allow_always`。
+- **未回答的卡片**：本轮结束时还没回答的审批 / 提问会被撤回（回 cancelled），引擎不会卡在过期的卡片上。
+- **插话被拒**：被 agent 拒绝的插话在本轮结束时提示“这条消息没有被接收”，不再被成功结果掩盖。
+- **其它**：换模型后按新模型的思考档位校验；长时间只输出文字 / 思考时每 20 秒发一个不显示的活动事件，引擎不会误判超时；多选答案里的选项可以带逗号，答案对不上选项时拒绝提交（decline），不会提交缺项的表单；进程退出与新消息同时发生时不会触发 WaitGroup 误用；声明为 false / null 的能力不算支持；恢复时会话不存在（被删除）引擎会改开新会话并补发历史，不会每条消息都失败。
+
 ### P7 Echo 协同（echo-client 约 3 天，Echo 仓库另计）
 
 | ID | 任务 | 依赖 | 验收 |

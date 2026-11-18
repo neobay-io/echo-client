@@ -76,8 +76,10 @@ func TestNewAgentsInModeTable(t *testing.T) {
 		{"antigravity", "auto", "auto", PermissionModeAuto, true},
 		{"antigravity", "yolo", "bypassPermissions", PermissionModeBypass, true},
 		{"kimi", "yolo", "bypassPermissions", PermissionModeBypass, true},
-		{"kimi", "auto", "", "", false},
-		{"kimi", "plan", "", "", false},
+		// kimi acp modes (P6); prompt mode lists only bypass.
+		{"kimi", "auto", "auto", PermissionModeAuto, true},
+		{"kimi", "plan", "plan", PermissionModePlan, true},
+		{"kimi", "dangerously", "", "", false},
 	}
 	for _, c := range cases {
 		native, canonical, ok := ResolvePermissionMode(c.agent, c.raw)

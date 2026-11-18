@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chenhg5/cc-connect/agent/acp"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -24,9 +25,15 @@ func init() {
 }
 
 // modeBypass is the only mode Kimi Code's prompt mode offers: `kimi -p` runs
-// every tool without asking and rejects --plan, --yolo and --auto. Real mode
-// switching needs `kimi acp` (P6).
+// every tool without asking and rejects --plan, --yolo and --auto. With
+// backend = "acp" (`kimi acp`, P6) all of Kimi's modes are available.
 const modeBypass = core.PermissionModeBypass
+
+// Backends: one `kimi -p` per turn (default), or a resident `kimi acp`.
+const (
+	backendPrint = "print"
+	backendACP   = "acp"
+)
 
 // effortEnv makes Kimi Code force a thinking effort for one invocation. It
 // binds to the [thinking] config section's forcedEffort, which applies to the
@@ -46,6 +53,8 @@ type Agent struct {
 	sessionEnv     []string
 	sessionOpts    core.AgentSessionOptions // per-chat overrides for the next StartSession
 	catalog        *modelCatalog
+	backend        string // backendPrint | backendACP
+	mode           string // permission mode (ACP backend)
 	mu             sync.Mutex
 }
 
@@ -68,10 +77,33 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	reasoningLevel, _ := opts["reasoning_level"].(string)
-	// Require an explicit opt-in: a missing or safer-sounding mode must not
-	// silently become "run everything".
-	if mode, _ := opts["mode"].(string); !core.IsBypassPermissionMode("kimi", mode) {
-		return nil, fmt.Errorf(`kimi: set mode = "bypassPermissions" (got %q): kimi -p runs every tool without asking and has no other modes yet`, strings.TrimSpace(mode))
+	backend := backendPrint
+	if b, _ := opts["backend"].(string); strings.TrimSpace(b) != "" {
+		switch strings.ToLower(strings.TrimSpace(b)) {
+		case backendPrint, "prompt", "-p":
+		case backendACP:
+			backend = backendACP
+		default:
+			return nil, fmt.Errorf(`kimi: backend must be "print" or "acp" (got %q)`, b)
+		}
+	}
+	rawMode, _ := opts["mode"].(string)
+	mode := modeBypass
+	if backend == backendPrint {
+		// Require an explicit opt-in: a missing or safer-sounding mode must
+		// not silently become "run everything".
+		if !core.IsBypassPermissionMode("kimi", rawMode) {
+			return nil, fmt.Errorf(`kimi: set mode = "bypassPermissions" (got %q): kimi -p runs every tool without asking; set backend = "acp" for Kimi's other modes`, strings.TrimSpace(rawMode))
+		}
+	} else {
+		if strings.TrimSpace(rawMode) == "" {
+			rawMode = core.PermissionModeDefault
+		}
+		native, _, ok := core.ResolvePermissionMode("kimi", rawMode)
+		if !ok {
+			return nil, fmt.Errorf("kimi: unknown mode %q", rawMode)
+		}
+		mode = native
 	}
 
 	cmd, extraArgs, err := resolveCommand(opts)
@@ -87,6 +119,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:   extraArgs,
 		configEnv:      core.ParseConfigEnv(opts),
 		timeout:        timeoutOption(opts),
+		backend:        backend,
+		mode:           mode,
 	}
 	a.catalog = newModelCatalog(a.fetchModels)
 	return a, nil
@@ -143,9 +177,58 @@ func (a *Agent) Name() string { return "kimi" }
 // Capabilities implements core.CapabilityProvider: chat login uses Kimi
 // Code's device-code flow (`kimi login`); the CLI has no logout.
 func (a *Agent) Capabilities() core.AgentCapabilities {
-	return core.AgentCapabilities{
+	caps := core.AgentCapabilities{
 		Auth: core.AuthCaps{Login: true, Status: true, Flow: core.AuthFlowDeviceCode},
 	}
+	if a.backend == backendACP {
+		// kimi acp: settings change inside the session, /stop cancels the
+		// turn, questions come as forms. It refuses a prompt during a turn,
+		// so no steering (messages queue instead).
+		caps.LiveModel, caps.LiveMode, caps.Interrupt, caps.AskUser = true, true, true, true
+	}
+	return caps
+}
+
+// ApplyLiveSettings implements core.LiveSettingsApplier: a `kimi acp`
+// session switches model, thinking and mode in place. Prompt-mode sessions
+// cannot; the engine restarts them instead.
+func (a *Agent) ApplyLiveSettings(ctx context.Context, session core.AgentSession, opts core.AgentSessionOptions) error {
+	s, ok := asACP(session)
+	if !ok {
+		return fmt.Errorf("kimi: this session cannot change settings while running")
+	}
+	a.mu.Lock()
+	model, effort, mode := a.model, a.reasoningLevel, a.mode
+	a.mu.Unlock()
+	if opts.Model != "" {
+		model = strings.TrimSpace(opts.Model)
+	}
+	if opts.ReasoningLevel != "" {
+		effort = normalizeEffort(opts.ReasoningLevel)
+	}
+	if opts.Mode != "" {
+		mode = opts.Mode
+	}
+	return s.Apply(ctx, model, a.effortForModel(model, effort), mode)
+}
+
+func asACP(session core.AgentSession) (*acp.Session, bool) {
+	switch s := session.(type) {
+	case *acp.Session:
+		return s, true
+	case acp.SteeringSession:
+		return s.Session, true
+	}
+	return nil, false
+}
+
+// CompressCommand implements core.ContextCompressor: `kimi acp` runs the
+// /compact command; prompt mode has none.
+func (a *Agent) CompressCommand() string {
+	if a.backend == backendACP {
+		return "/compact"
+	}
+	return ""
 }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -248,17 +331,44 @@ func effortDesc(level string) string {
 
 // ── ModeSwitcher ───────────────────────────────────────────────
 
-// SetMode accepts only bypass-equivalent values; anything else would be a
-// promise Kimi's prompt mode cannot keep.
+// SetMode: prompt mode accepts only bypass-equivalent values (anything else
+// would be a promise `kimi -p` cannot keep); the ACP backend takes Kimi's
+// modes.
 func (a *Agent) SetMode(mode string) {
-	if !core.IsBypassPermissionMode("kimi", mode) {
-		slog.Warn("kimi: only bypassPermissions is available in prompt mode", "mode", mode)
+	if a.backend != backendACP {
+		if !core.IsBypassPermissionMode("kimi", mode) {
+			slog.Warn("kimi: only bypassPermissions is available in prompt mode", "mode", mode)
+		}
+		return
 	}
+	native, _, ok := core.ResolvePermissionMode("kimi", mode)
+	if !ok {
+		slog.Warn("kimi: unknown mode", "mode", mode)
+		return
+	}
+	a.mu.Lock()
+	a.mode = native
+	a.mu.Unlock()
 }
 
-func (a *Agent) GetMode() string { return modeBypass }
+func (a *Agent) GetMode() string {
+	if a.backend != backendACP {
+		return modeBypass
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mode
+}
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
+	if a.backend == backendACP {
+		return []core.PermissionModeInfo{
+			{Key: core.PermissionModeDefault, Name: "Default", NameZh: "默认", Desc: "Ask before tools run", DescZh: "工具运行前确认"},
+			{Key: core.PermissionModePlan, Name: "Plan", NameZh: "计划", Desc: "Read-only planning, no tool execution", DescZh: "只读规划，不执行工具"},
+			{Key: core.PermissionModeAuto, Name: "Auto", NameZh: "自动", Desc: "Kimi approves safe operations, asks for the rest", DescZh: "Kimi 自动批准安全操作，其余确认"},
+			{Key: modeBypass, Name: "YOLO", NameZh: "全部放行", Desc: "Approve everything", DescZh: "不经确认执行所有工具"},
+		}
+	}
 	return []core.PermissionModeInfo{{
 		Key:    modeBypass,
 		Name:   "Bypass (prompt mode)",
@@ -285,6 +395,9 @@ func (a *Agent) SetSessionOptions(opts core.AgentSessionOptions) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	if a.backend == backendACP {
+		return a.startACP(ctx, sessionID)
+	}
 	a.mu.Lock()
 	model, effort := a.model, a.reasoningLevel
 	if a.sessionOpts.Model != "" {
@@ -308,6 +421,40 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 	return newKimiSession(ctx, cfg, sessionID), nil
+}
+
+// startACP runs `kimi acp` for the chat, resuming sessionID.
+func (a *Agent) startACP(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	a.mu.Lock()
+	model, effort, mode := a.model, a.reasoningLevel, a.mode
+	if a.sessionOpts.Model != "" {
+		model = strings.TrimSpace(a.sessionOpts.Model)
+	}
+	if a.sessionOpts.ReasoningLevel != "" {
+		effort = normalizeEffort(a.sessionOpts.ReasoningLevel)
+	}
+	if a.sessionOpts.Mode != "" {
+		mode = a.sessionOpts.Mode
+	}
+	extraEnv := append(append([]string(nil), a.configEnv...), a.sessionEnv...)
+	cfg := acp.Config{
+		Agent:     "kimi",
+		Command:   a.cmd,
+		Args:      append(append([]string(nil), a.cliExtraArgs...), "acp"),
+		Env:       core.MergeEnv(os.Environ(), extraEnv),
+		WorkDir:   core.SessionWorkDirFromEnv(extraEnv, a.workDir),
+		ExtraDirs: core.SessionExtraDirsFromEnv(extraEnv),
+		ResumeID:  sessionID,
+		Mode:      mode,
+		Model:     model,
+	}
+	a.mu.Unlock()
+	cfg.Effort = a.effortForModel(model, effort)
+	s, err := acp.Start(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // effortForModel drops an effort the chosen model does not support (e.g. a

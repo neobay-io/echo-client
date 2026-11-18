@@ -134,8 +134,10 @@ func TestOnlyBypassModeIsOffered(t *testing.T) {
 	if a.GetMode() != core.PermissionModeBypass {
 		t.Fatalf("GetMode = %q", a.GetMode())
 	}
-	if _, _, ok := core.ResolvePermissionMode("kimi", "auto"); ok {
-		t.Fatal("auto must not resolve for kimi: nothing reviews actions in prompt mode")
+	// "auto" is Kimi's own reviewed mode (ACP backend), never a bypass alias;
+	// prompt mode does not list it.
+	if core.IsBypassPermissionMode("kimi", "auto") {
+		t.Fatal("auto must not mean bypass for kimi")
 	}
 	if !core.IsBypassPermissionMode("kimi", "yolo") || !core.IsBypassPermissionMode("kimi", "bypassPermissions") {
 		t.Fatal("yolo/bypassPermissions must be bypass for kimi (Echo workers)")
@@ -293,5 +295,46 @@ func TestNewRequiresExplicitBypassMode(t *testing.T) {
 		if _, err := New(map[string]any{"cmd": cmd, "mode": mode}); err != nil {
 			t.Errorf("mode %q rejected: %v", mode, err)
 		}
+	}
+}
+
+// P6: backend = "acp" offers Kimi's modes, live settings, interrupt and
+// native /compact; prompt mode keeps bypass only.
+func TestACPBackend(t *testing.T) {
+	if _, err := New(map[string]any{"cmd": "/bin/sh", "backend": "acp", "mode": "plan"}); err != nil {
+		t.Fatalf("acp with plan: %v", err)
+	}
+	if _, err := New(map[string]any{"cmd": "/bin/sh", "mode": "plan"}); err == nil {
+		t.Fatal("prompt mode accepted plan")
+	}
+	if _, err := New(map[string]any{"cmd": "/bin/sh", "backend": "rpc", "mode": "yolo"}); err == nil {
+		t.Fatal("unknown backend accepted")
+	}
+	raw, err := New(map[string]any{"cmd": "/bin/sh", "backend": "acp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := raw.(*Agent)
+	if a.GetMode() != core.PermissionModeDefault || len(a.PermissionModes()) != 4 {
+		t.Fatalf("mode %q, modes %+v", a.GetMode(), a.PermissionModes())
+	}
+	a.SetMode("yolo")
+	if a.GetMode() != core.PermissionModeBypass {
+		t.Fatalf("SetMode(yolo) -> %q", a.GetMode())
+	}
+	caps := core.CapabilitiesOf(a)
+	if !caps.LiveModel || !caps.LiveMode || !caps.Interrupt || caps.Steer || !caps.Compact {
+		t.Fatalf("caps = %+v", caps)
+	}
+	if errs := core.ValidateCapabilities(a); len(errs) > 0 {
+		t.Fatalf("capabilities: %v", errs)
+	}
+	// A prompt-mode session cannot switch live.
+	if err := a.ApplyLiveSettings(context.Background(), newKimiSession(context.Background(), sessionConfig{}, ""), core.AgentSessionOptions{Model: "m"}); err == nil {
+		t.Fatal("prompt session switched live")
+	}
+	print := &Agent{}
+	if print.CompressCommand() != "" || core.CapabilitiesOf(print).Compact {
+		t.Fatal("prompt mode offers /compact")
 	}
 }

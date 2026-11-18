@@ -319,3 +319,26 @@ func TestCommandApprovalNamesDirectory(t *testing.T) {
 		t.Fatalf("non-command preview changed: %q", got)
 	}
 }
+
+// P6: backend = "acp" adds live settings, interrupt, steering and /compact.
+func TestACPBackend(t *testing.T) {
+	if _, err := New(map[string]any{"cmd": "/bin/sh", "backend": "grpc"}); err == nil {
+		t.Fatal("unknown backend accepted")
+	}
+	raw, err := New(map[string]any{"cmd": "/bin/sh", "backend": "acp", "mode": "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := raw.(*Agent)
+	caps := core.CapabilitiesOf(a)
+	if !caps.LiveModel || !caps.LiveMode || !caps.Interrupt || !caps.Steer || !caps.Compact {
+		t.Fatalf("caps = %+v", caps)
+	}
+	if errs := core.ValidateCapabilities(a); len(errs) > 0 {
+		t.Fatalf("capabilities: %v", errs)
+	}
+	print := &Agent{}
+	if print.CompressCommand() != "" || core.CapabilitiesOf(print).Steer {
+		t.Fatal("prompt mode offers ACP features")
+	}
+}

@@ -3151,6 +3151,18 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		envVars,
 		session.Settings(),
 	)
+	if err != nil && errors.Is(err, ErrAgentSessionNotFound) && session.AgentSessionID != "" {
+		// The agent no longer has the session (deleted, or from another
+		// account): start a new one and replay the chat's history, as when
+		// a turn finds it missing.
+		slog.Warn("agent session not found at start; starting a new one", "session_key", sessionKey, "agent_session", session.AgentSessionID)
+		session.mu.Lock()
+		session.AgentSessionID = ""
+		session.NeedsReplay = true
+		session.mu.Unlock()
+		e.sessions.Save()
+		agentSession, err = e.startAgentSession(e.ctx, "", sessionKey, envVars, session.Settings())
+	}
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		slog.Error("failed to start interactive session", "error", err, "elapsed", startElapsed)
@@ -6206,9 +6218,11 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 			}
 			return
 		case EventPermissionRequest:
+			// Compaction needs no tools: whatever is asked during it is
+			// refused, never approved behind the chat's back.
 			_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
-				Behavior:     "allow",
-				UpdatedInput: event.ToolInputRaw,
+				Behavior: "deny",
+				Message:  "Tools are not allowed while compacting the conversation.",
 			})
 		}
 	}

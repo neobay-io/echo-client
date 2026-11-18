@@ -987,10 +987,15 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# mode = "bypassPermissions"  # required, and the only mode: `kimi -p` runs every tool without asking;
-#                             # echo-client refuses to start Kimi without it
-#                             # 必填且唯一的模式：`kimi -p` 不经确认执行所有工具；不写就不会启动
-#                             # (plan/default/auto need ACP, planned) / 其他模式需要 ACP（规划中）
+# mode = "bypassPermissions"  # with the default backend: required, and the only mode (`kimi -p` runs
+#                             # every tool without asking); echo-client refuses to start Kimi without it
+#                             # 默认后端下必填且唯一的模式：`kimi -p` 不经确认执行所有工具；不写就不会启动
+# # backend = "acp"           # run `kimi acp` instead: modes default | plan | auto | bypassPermissions (yolo),
+#                             # model / thinking / mode switch in the running session, /stop cancels the turn,
+#                             # questions come as cards, /compact is native. A message sent during a turn
+#                             # waits in the queue (Kimi refuses it mid-turn).
+#                             # 改用 `kimi acp`：可用 default | plan | auto | bypassPermissions 四种模式，会话中切换
+#                             # 模型 / 思考 / 模式，/stop 中断本轮，提问以卡片出现，/compact 原生；轮内消息进入队列
 # model = "kimi-code/k3"      # optional; /model lists the aliases from `kimi provider list`
 # reasoning_level = "high"    # optional; low | high | max, per model (passed as KIMI_MODEL_THINKING_EFFORT)
 # # cmd = "/path/to/kimi"     # optional
@@ -1020,6 +1025,11 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "default"
+# # backend = "acp"           # run `agy acp` instead: settings switch in the running session, /stop cancels
+#                             # the turn, /steer (or a message during a turn) continues it, /compact is native.
+#                             # bypassPermissions there uses agy's auto mode and approves the rest in echo-client.
+#                             # 改用 `agy acp`：会话中切换设置，/stop 中断本轮，轮内消息接着本轮，/compact 原生；
+#                             # bypassPermissions 使用 agy 的 auto 模式，其余审批由 echo-client 自动通过
 # model = "gemini-4-argon"    # optional; base model from `agy models`, effort via reasoning_level
 # reasoning_level = "medium"  # optional; low | medium | high | xhigh | max, per model
 #
