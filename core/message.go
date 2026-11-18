@@ -243,6 +243,10 @@ const (
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	// EventBackground is the text of a turn the agent ran by itself while
+	// the engine's turn waited for its prompt to be taken: posted as its own
+	// message, it does not end the turn (see BackgroundReporter).
+	EventBackground EventType = "background"
 )
 
 // Event represents a single piece of agent output streamed back to the engine.

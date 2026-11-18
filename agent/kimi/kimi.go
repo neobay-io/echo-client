@@ -552,3 +552,11 @@ func kimiCodeHome(extraEnv ...string) string {
 	}
 	return filepath.Join(userHome, ".kimi-code")
 }
+
+// SessionsAreExclusive implements core.ExclusiveSessions: over the resident
+// backend a session is open in one process at a time.
+func (a *Agent) SessionsAreExclusive() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.backend == backendACP
+}

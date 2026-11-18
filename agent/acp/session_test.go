@@ -123,7 +123,17 @@ func runFakeACP() {
 				continue
 			}
 			if text == "/compact" {
-				// Like Kimi: the command returns at once, compaction reports later.
+				// Like Kimi: the command returns at once, compaction reports
+				// later (2.6 first says it started).
+				if os.Getenv("ACP_FAKE_COMPACT_STARTED") == "1" {
+					chunk("Context compaction started — it runs in the background and the compacted context applies once it finishes.")
+				}
+				if os.Getenv("ACP_FAKE_COMPACT_EARLY") == "1" {
+					// The report comes before the prompt's answer.
+					chunk("Compaction completed.")
+					ok(map[string]any{"stopReason": "end_turn"})
+					continue
+				}
 				ok(map[string]any{"stopReason": "end_turn"})
 				go func() {
 					time.Sleep(300 * time.Millisecond)
@@ -143,6 +153,11 @@ func runFakeACP() {
 		default:
 			send(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32601, "message": "unknown " + method}})
 		}
+	}
+	// Input ended: record the session on the way out, as Kimi does.
+	if mark := os.Getenv("ACP_FAKE_EXIT_MARK"); mark != "" {
+		time.Sleep(200 * time.Millisecond)
+		_ = os.WriteFile(mark, []byte("saved"), 0o600)
 	}
 }
 
@@ -237,6 +252,7 @@ func startFake(t *testing.T, cfg Config, yolo bool) (*Session, fakeLog) {
 	if yolo {
 		env = append(env, "ACP_FAKE_YOLO=1")
 	}
+	env = append(env, cfg.Env...) // extra settings for the fake
 	cfg.Agent = "kimi"
 	cfg.Command = os.Args[0]
 	cfg.Args = []string{"-test.run=^TestHelperACPServer$"}
@@ -582,6 +598,39 @@ func TestNativeCompact(t *testing.T) {
 	}
 }
 
+// Kimi Code 2.6 says the compaction started before the prompt returns;
+// the turn still waits for its report.
+func TestNativeCompactStartedNotice(t *testing.T) {
+	s, _ := startFake(t, Config{Env: []string{"ACP_FAKE_COMPACT_STARTED=1"}}, false)
+	if err := s.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := describe(collect(t, s, nil))
+	if !strings.Contains(got, "Compaction completed.") {
+		t.Fatalf("turn ended before the compaction reported: %s", got)
+	}
+}
+
+// The report can come before the /compact prompt's answer is handled: the
+// turn then ends at once instead of waiting for a report already seen.
+func TestNativeCompactReportBeforeAnswer(t *testing.T) {
+	old := compactWait
+	compactWait = 10 * time.Second
+	t.Cleanup(func() { compactWait = old })
+	s, _ := startFake(t, Config{Env: []string{"ACP_FAKE_COMPACT_STARTED=1", "ACP_FAKE_COMPACT_EARLY=1"}}, false)
+	start := time.Now()
+	if err := s.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := describe(collect(t, s, nil))
+	if !strings.Contains(got, "Compaction completed.") {
+		t.Fatalf("events = %s", got)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("waited %s for a report already received", d)
+	}
+}
+
 // Review: the thinking levels of the model just chosen count.
 func TestEffortOfNewModel(t *testing.T) {
 	s, _ := startFake(t, Config{}, false)
@@ -619,5 +668,31 @@ func TestAllowOnceOnlyAndFalseCapabilities(t *testing.T) {
 		if supported(json.RawMessage(raw)) != want {
 			t.Errorf("supported(%q) != %v", raw, want)
 		}
+	}
+}
+
+// Close lets an idle CLI exit on its own when its input ends (it saves the
+// last turn then), and kills it only if it does not.
+func TestCloseLetsIdleAgentExit(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "saved")
+	s, _ := startFake(t, Config{Env: []string{"ACP_FAKE_EXIT_MARK=" + mark}}, false)
+	if s == nil {
+		t.Fatal("start failed")
+	}
+	if err := s.Send("hi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for ev := range s.Events() {
+		if ev.Type == core.EventResult {
+			break
+		}
+	}
+	start := time.Now()
+	_ = s.Close()
+	if _, err := os.Stat(mark); err != nil {
+		t.Fatalf("the agent was killed before it saved: %v", err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("Close took %s", d)
 	}
 }

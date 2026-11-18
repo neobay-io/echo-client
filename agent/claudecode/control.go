@@ -189,6 +189,12 @@ func (cs *claudeSession) Steer(prompt string, images []core.ImageAttachment, fil
 // Interrupt implements core.Interrupter: the running turn stops, the process
 // and its conversation stay.
 func (cs *claudeSession) Interrupt(ctx context.Context) error {
+	if cs.promptWaiting() {
+		// Our prompt waits behind a turn Claude started itself: interrupt
+		// would stop that one and ours would run afterwards. The engine
+		// stops the process instead.
+		return errors.New("the prompt has not started yet")
+	}
 	cs.interrupting.Store(true)
 	if _, err := cs.controlRequest(ctx, map[string]any{"subtype": "interrupt"}); err != nil {
 		cs.interrupting.Store(false)

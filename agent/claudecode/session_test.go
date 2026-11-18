@@ -98,8 +98,10 @@ func TestAgentSetReasoningLevelAutoClearsExplicitEffort(t *testing.T) {
 func TestBuildClaudeSessionArgsOmitsOptionalValues(t *testing.T) {
 	args := buildClaudeSessionArgs("", "", "", "default", nil, nil)
 
+	if i := slices.Index(args, "--permission-mode"); i < 0 || args[i+1] != "default" {
+		t.Fatalf("default mode must be passed explicitly (the user's settings may say auto): %v", args)
+	}
 	for _, forbidden := range []string{
-		"--permission-mode",
 		"--resume",
 		"--model",
 		"--allowedTools",

@@ -297,6 +297,7 @@ const (
 
 	MsgModelDefault    MsgKey = "model_default"
 	MsgModelListTitle  MsgKey = "model_list_title"
+	MsgModelListEmpty  MsgKey = "model_list_empty"
 	MsgModelUsage      MsgKey = "model_usage"
 	MsgEffortCurrent   MsgKey = "effort_current"
 	MsgEffortDefault   MsgKey = "effort_default"
@@ -1878,6 +1879,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "可用模型:\n",
 		LangJapanese:           "利用可能なモデル:\n",
 		LangSpanish:            "Modelos disponibles:\n",
+	},
+	MsgModelListEmpty: {
+		LangEnglish:            "(The agent did not return its model list just now. Try /model again, or use `/model <model_name>`.)",
+		LangChinese:            "（agent 这次没有返回模型列表。请再发一次 /model，或直接用 `/model <模型名>`。）",
+		LangTraditionalChinese: "（agent 這次沒有回傳模型列表。請再發一次 /model，或直接用 `/model <模型名>`。）",
+		LangJapanese:           "（エージェントからモデル一覧を取得できませんでした。もう一度 /model を送るか、`/model <モデル名>` を使ってください。）",
+		LangSpanish:            "(El agente no devolvió su lista de modelos. Prueba /model de nuevo o usa `/model <nombre_del_modelo>`.)",
 	},
 	MsgModelUsage: {
 		LangEnglish:            "Usage: `/model <number>` or `/model <model_name>`",

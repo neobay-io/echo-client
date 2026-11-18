@@ -42,6 +42,8 @@ type Session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	cmd    *exec.Cmd
+	stdin  io.Closer
+	exited chan struct{} // closed when the process has exited
 	rpc    *rpcClient
 	alive  atomic.Bool
 	// replaying: session/load replays the history as updates; those are
@@ -70,6 +72,9 @@ type Session struct {
 	// compacting; compactSignal is closed when it reports.
 	compactReturned bool
 	compactSignal   chan struct{}
+	// compactReported: the CLI already reported the compaction (it can come
+	// before the /compact prompt's answer is handled).
+	compactReported bool
 	ended           bool            // the process ended: no new prompts (guards prompts.Add)
 	steerErrs       []string        // steered prompts that failed during the turn
 	lastActivity    time.Time       // last activity event of the turn
@@ -156,6 +161,8 @@ func Start(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("acp: start %s: %w", cfg.Agent, err)
 	}
 	s.cmd = cmd
+	s.stdin = stdin
+	s.exited = make(chan struct{})
 	s.rpc = newRPCClient(stdin)
 	s.rpc.onNotify = s.onNotification
 	s.rpc.onRequest = s.onRequest
@@ -164,6 +171,7 @@ func Start(ctx context.Context, cfg Config) (*Session, error) {
 	go func() {
 		s.rpc.readLoop(stdout)
 		_ = cmd.Wait()
+		close(s.exited)
 		s.processEnded()
 	}()
 
@@ -520,6 +528,7 @@ func (s *Session) startPrompt(ctx context.Context, params map[string]any, newTur
 		}
 		s.interrupting = false
 		s.compacting = compact
+		s.compactReported = false
 		s.steerErrs = nil
 		s.text.Reset()
 		s.thought.Reset()
@@ -546,6 +555,14 @@ func (s *Session) startPrompt(ctx context.Context, params map[string]any, newTur
 // /compact prompt returned.
 var compactWait = 2 * time.Minute
 
+// compactsInBackground reports whether a /compact prompt's reply means the
+// compaction goes on after the prompt returned: no reply yet, or one that
+// says it runs in the background.
+func compactsInBackground(reply string) bool {
+	reply = strings.ToLower(strings.TrimSpace(reply))
+	return reply == "" || strings.Contains(reply, "in the background")
+}
+
 // finishPrompt waits for one session/prompt. The turn ends (one
 // EventResult or EventError) when the last prompt in flight returns: a
 // steered prompt continues the turn.
@@ -559,8 +576,10 @@ func (s *Session) finishPrompt(wait func(context.Context) (json.RawMessage, erro
 		_ = json.Unmarshal(raw, &resp)
 	}
 	s.mu.Lock()
-	if s.inflight == 1 && s.compacting && err == nil && resp.StopReason != "cancelled" && s.text.Len() == 0 {
-		// The CLI compacts in the background and reports when done.
+	if s.inflight == 1 && s.compacting && err == nil && resp.StopReason != "cancelled" && !s.compactReported && compactsInBackground(s.text.String()) {
+		// The CLI compacts in the background and reports when done (Kimi
+		// Code: 2.5 says nothing until then, 2.6 says it started). A prompt
+		// sent meanwhile would be dropped, so the turn waits.
 		s.compactReturned = true
 		signal := make(chan struct{})
 		s.compactSignal = signal
@@ -725,6 +744,9 @@ func (s *Session) onNotification(method string, params json.RawMessage) {
 			} else {
 				s.thought.WriteString(text)
 			}
+		}
+		if s.compacting && inTurn && u.Kind == "agent_message_chunk" && !compactsInBackground(text) {
+			s.compactReported = true // a report, not the "started" notice
 		}
 		if s.compactReturned && s.compactSignal != nil && u.Kind == "agent_message_chunk" {
 			close(s.compactSignal) // the background compaction reported
@@ -1041,9 +1063,28 @@ func (s *Session) CurrentSessionID() string {
 
 func (s *Session) Alive() bool { return s.alive.Load() }
 
-// Close stops the agent process.
+// closeGrace is how long Close lets an idle CLI exit on its own once its
+// input ends: it records the last turn in its session store on the way
+// out, and a process killed right after a turn can lose that turn (Kimi
+// Code 2.5 then resumes with the prompt but not the reply).
+var closeGrace = 5 * time.Second
+
+// Close stops the agent process: an idle one is asked to exit first (end
+// of input), a busy one is killed at once.
 func (s *Session) Close() error {
 	s.alive.Store(false)
+	s.mu.Lock()
+	idle := s.inflight == 0 && !s.ended
+	s.ended = true // no prompt starts once Close decided
+	s.mu.Unlock()
+	if idle && s.stdin != nil && s.exited != nil {
+		_ = s.stdin.Close()
+		select {
+		case <-s.exited:
+		case <-time.After(closeGrace):
+			slog.Debug("acp: the agent did not exit when its input ended; stopping it", "agent", s.cfg.Agent)
+		}
+	}
 	s.cancel()
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = core.KillProcessGroup(s.cmd)

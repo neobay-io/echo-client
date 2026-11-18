@@ -1132,6 +1132,7 @@ func (e *Engine) runCronIsolatedTurn(ctx context.Context, jobID string, job *Cro
 			return lockErr
 		}
 		defer release()
+		e.releaseChatProcesses(resumeID)
 	}
 
 	// A cron run uses the bound chat's current model / effort / mode,
@@ -1930,6 +1931,14 @@ func (e *Engine) runManagedTurn(state *interactiveState, session *Session, agent
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				msg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if err := e.sendChunksWithPrefix(p, replyCtx, opts.Prefix, msg); err != nil {
+					return "", err
+				}
+			}
+		case EventBackground:
+			if text := strings.TrimSpace(event.Content); text != "" && !opts.Silent {
+				session.AddHistory("assistant", text)
+				e.sessions.Save()
+				if err := e.sendChunksWithPrefix(p, replyCtx, opts.Prefix, text); err != nil {
 					return "", err
 				}
 			}
@@ -3177,6 +3186,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	state = newInteractiveState(agentSession, p, replyCtx, quietMode)
 	state.localSessionID = session.ID
 	e.interactiveStates[sessionKey] = state
+	e.watchBackgroundOutput(state, session)
 
 	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.AgentSessionID, "elapsed", startElapsed)
 	return state
@@ -3397,6 +3407,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				msg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.Append(msg) {
 					e.send(p, replyCtx, msg)
+				}
+			}
+
+		case EventBackground:
+			if text := strings.TrimSpace(event.Content); text != "" {
+				sp.freeze()
+				session.AddHistory("assistant", text)
+				e.sessions.Save()
+				for _, chunk := range splitMessage(text, maxPlatformMessageLen) {
+					e.send(p, replyCtx, chunk)
 				}
 			}
 
@@ -5498,6 +5518,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				return
 			}
 			snapshot = e.saveModelPickerSnapshot(msg.SessionKey, contextID, modelPickerOptions(p.Name(), e.agent.Name(), current, models))
+			snapshot.CatalogEmpty = len(models) == 0
+			e.modelPickers[msg.SessionKey] = snapshot
 		} else if !valid || (len(args) > 2 && args[2] != snapshot.Token) {
 			reject()
 			return
@@ -5535,6 +5557,10 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				desc = " — " + desc
 			}
 			fmt.Fprintf(&sb, "%s%d. %s%s\n", marker, modelIndex+1, m.Name, desc)
+		}
+		if snapshot.CatalogEmpty {
+			sb.WriteString(e.i18n.T(MsgModelListEmpty))
+			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
 		sb.WriteString(e.i18n.T(MsgModelUsage))

@@ -13,6 +13,9 @@ type modelPickerSnapshot struct {
 	Context [32]byte
 	Models  []ModelOption
 	Created time.Time
+	// CatalogEmpty: the agent listed no models (Models may still hold the
+	// current one).
+	CatalogEmpty bool
 }
 
 func (e *Engine) modelPickerContext(sessionKey string) [32]byte {

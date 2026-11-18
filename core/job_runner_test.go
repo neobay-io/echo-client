@@ -606,3 +606,159 @@ func TestEngineSerializesInteractiveAndJobSessionStartup(t *testing.T) {
 		t.Fatalf("second env missing task-job: %s", second)
 	}
 }
+
+// planJobSession asks ExitPlanMode asks times; each decline gets the next
+// ask, and the last one ends the turn.
+type planJobSession struct {
+	jobTestSession
+	mu        sync.Mutex
+	responses []PermissionResult
+	asks      int
+}
+
+func (s *planJobSession) ask() {
+	s.events <- Event{Type: EventPermissionRequest, RequestID: "req", ToolName: ToolExitPlanMode,
+		ToolInputRaw: map[string]any{"plan": "1. Add the endpoint\n2. Test it"}}
+}
+
+func (s *planJobSession) RespondPermission(_ string, r PermissionResult) error {
+	s.mu.Lock()
+	s.responses = append(s.responses, r)
+	n := len(s.responses)
+	s.mu.Unlock()
+	if n < s.asks {
+		s.ask()
+	} else {
+		s.events <- Event{Type: EventText, Content: "Understood, stopping here."}
+		s.events <- Event{Type: EventResult, Content: "Understood, stopping here.", SessionID: "plan-session"}
+	}
+	return nil
+}
+
+// A plan-mode task: ExitPlanMode is declined and the plan is the output.
+func TestEngineJobRunnerKeepsPlanFromExitPlanMode(t *testing.T) {
+	s := &planJobSession{jobTestSession: jobTestSession{events: make(chan Event, 8)}, asks: 2}
+	s.onSend = func(string) { s.ask() }
+	engine := NewEngine("proj-plan", &planJobAgent{s: s}, nil, "", LangEnglish)
+
+	result, err := engine.JobRunner().Run(context.Background(), JobRequest{Project: "proj-plan", Prompt: "plan it"}, "job-plan", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Output != "1. Add the endpoint\n2. Test it" || result.SessionID != "plan-session" {
+		t.Fatalf("result = %+v, want the plan", result)
+	}
+	if len(s.responses) != 2 {
+		t.Fatalf("responses = %+v, want 2 declines", s.responses)
+	}
+	for _, r := range s.responses {
+		if r.Behavior != "deny" {
+			t.Fatalf("ExitPlanMode answered %+v, want deny", r)
+		}
+	}
+}
+
+// An agent that keeps asking is stopped after maxJobPlanAsks declines.
+func TestEngineJobRunnerStopsEndlessExitPlanMode(t *testing.T) {
+	s := &planJobSession{jobTestSession: jobTestSession{events: make(chan Event, 8)}, asks: maxJobPlanAsks + 5}
+	s.onSend = func(string) { s.ask() }
+	engine := NewEngine("proj-plan2", &planJobAgent{s: s}, nil, "", LangEnglish)
+
+	_, err := engine.JobRunner().Run(context.Background(), JobRequest{Project: "proj-plan2", Prompt: "plan it"}, "job-plan2", nil)
+	coded, ok := err.(interface{ Code() string })
+	if !ok || coded.Code() != JobErrorCodePermissionRequired {
+		t.Fatalf("err = %v, want %s", err, JobErrorCodePermissionRequired)
+	}
+	if len(s.responses) != maxJobPlanAsks {
+		t.Fatalf("declined %d times, want %d", len(s.responses), maxJobPlanAsks)
+	}
+}
+
+type planJobAgent struct{ s *planJobSession }
+
+func (a *planJobAgent) Name() string { return "job-test" }
+func (a *planJobAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.s, nil
+}
+func (a *planJobAgent) ListSessions(context.Context) ([]AgentSessionInfo, error) { return nil, nil }
+func (a *planJobAgent) Stop() error                                              { return nil }
+
+// An isolated cron run in plan mode: the same, the plan is its output.
+func TestIsolatedCronTurnKeepsPlan(t *testing.T) {
+	s := &planJobSession{jobTestSession: jobTestSession{events: make(chan Event, 8)}, asks: 1}
+	s.onSend = func(string) { s.ask() }
+	engine := NewEngine("proj-plan3", &planJobAgent{s: s}, nil, "", LangEnglish)
+
+	sid, out, err := engine.runIsolatedCronTurn(context.Background(), "cron:plan", "", "plan it", nil, AgentSessionOptions{})
+	if err != nil {
+		t.Fatalf("runIsolatedCronTurn: %v", err)
+	}
+	if out != "1. Add the endpoint\n2. Test it" || sid != "plan-session" {
+		t.Fatalf("got %q, %q; want the plan", sid, out)
+	}
+	if len(s.responses) != 1 || s.responses[0].Behavior != "deny" {
+		t.Fatalf("responses = %+v, want one decline", s.responses)
+	}
+}
+
+// emptyPlanSession asks ExitPlanMode with no plan: the plan is the text
+// written before the request; without one, the agent is told to write it.
+type emptyPlanSession struct {
+	jobTestSession
+	before    string
+	responses []PermissionResult
+}
+
+func (s *emptyPlanSession) RespondPermission(_ string, r PermissionResult) error {
+	s.responses = append(s.responses, r)
+	s.events <- Event{Type: EventResult, Content: "Understood.", SessionID: "p"}
+	return nil
+}
+
+func TestEngineJobRunnerPlanFromTextWhenRequestHasNone(t *testing.T) {
+	for _, before := range []string{"1. Step one\n2. Step two", ""} {
+		s := &emptyPlanSession{jobTestSession: jobTestSession{events: make(chan Event, 8)}, before: before}
+		s.onSend = func(string) {
+			if s.before != "" {
+				s.events <- Event{Type: EventText, Content: s.before}
+			}
+			s.events <- Event{Type: EventPermissionRequest, RequestID: "r", ToolName: ToolExitPlanMode, ToolInputRaw: map[string]any{}}
+		}
+		engine := NewEngine("proj-plan4", &emptyPlanAgent{s: s}, nil, "", LangEnglish)
+		result, err := engine.JobRunner().Run(context.Background(), JobRequest{Project: "proj-plan4", Prompt: "plan"}, "job-p4", nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if before != "" {
+			if result.Output != before {
+				t.Fatalf("output = %q, want the written plan", result.Output)
+			}
+			if !strings.Contains(s.responses[0].Message, "has been recorded") {
+				t.Fatalf("decline = %q", s.responses[0].Message)
+			}
+		} else if strings.Contains(s.responses[0].Message, "has been recorded") {
+			t.Fatalf("claimed a plan was recorded with none: %q", s.responses[0].Message)
+		}
+	}
+}
+
+type emptyPlanAgent struct{ s *emptyPlanSession }
+
+func (a *emptyPlanAgent) Name() string { return "job-test" }
+func (a *emptyPlanAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.s, nil
+}
+func (a *emptyPlanAgent) ListSessions(context.Context) ([]AgentSessionInfo, error) { return nil, nil }
+func (a *emptyPlanAgent) Stop() error                                              { return nil }
+
+// A later ExitPlanMode without a plan does not replace the plan kept from
+// an earlier one with whatever was written since.
+func TestPlanKeeperKeepsFirstPlan(t *testing.T) {
+	var k planKeeper
+	s := &jobTestSession{events: make(chan Event, 4)}
+	_, _ = k.handle(s, Event{ToolName: ToolExitPlanMode, ToolInputRaw: map[string]any{"plan": "1. Do it"}}, "")
+	_, _ = k.handle(s, Event{ToolName: ToolExitPlanMode, ToolInputRaw: map[string]any{}}, "Understood, stopping.")
+	if got := k.output("Understood."); got != "1. Do it" {
+		t.Fatalf("output = %q", got)
+	}
+}

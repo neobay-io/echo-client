@@ -637,6 +637,109 @@ Echo 侧（独立仓库，单独 PR）：
 9. `/stop` 后会话可以继续；`/compact`、`/usage`、`/status` 输出正确
 10. 作为 Echo worker 注册，执行一个带 `agent_options` 的任务
 
+### 7.1 整体验证记录（2026-11-18，P2–P8 全部提交之后）
+
+**方法**：
+- `e2e/parity_live_test.go`（build tag `live`，手动运行 `PARITY_AGENT=<agent> go test -tags live -run TestParity ./e2e`）用真实引擎、真实 agent CLI 和一个进程内的聊天平台，按上面第 2–9 条逐条执行，检查聊天里收到的内容和工作目录里的文件：
+  - 选模型后上下文仍在；选 effort 后 `/effort` 显示新档位；
+  - default 在聊天里审批，auto / bypass 写文件并跑命令；
+  - `/new` `/list` `/switch`；
+  - `/cron` 跑完后接着问“你上一条回复了什么”；`/timer`；
+  - 固定 loop 跑 3 次后暂停，之后不再运行；自定节奏 loop 由 agent 定下次时间（1 分钟），第 3 次后自己暂停；
+  - 插话（steer 或排队）；`/queue up` 调整顺序后按新顺序执行；
+  - `/stop` 后继续；`/compact` 完成后继续；`/usage`、`/status`。
+- 第 10 条用 Echo 仓库的 `tests/test_worker_gateway_agent_options_live.py`（`ECHO_LIVE_AGENT_SMOKE=1`）：进程内的 Echo 加一个真实的 echo-client worker（Claude），检查：
+  - 注册信息（features、CLI 版本、capabilities、默认模式）；
+  - 拒绝不认识的选项和值；
+  - bypass 通道上的 plan 任务不改文件、输出计划；
+  - 带 `resume_session_id` 的任务接着上一个任务的会话。
+- 另外跑了六个 CLI 的冒烟检查、Codex app-server 和 ACP（Kimi、agy）的 live 测试。
+
+**结果**（最后一轮全部修复之后；版本：Claude Code 2.1.326、Codex 0.153.0、Kimi Code 2.6.3（ACP）、agy 1.5.10（ACP））
+
+| # | 项目 | Claude Code | Codex | Kimi（ACP） | agy（ACP） |
+|---|---|---|---|---|---|
+| 1 | `/auth` 登出、登录 | 待使用者 | 待使用者 | 待使用者 | 待使用者 |
+| 2 | `/model` 列表 → 选择 → 上下文仍在 | ✅ | ✅ | ✅ | ✅（第一次 `/model` 偶尔取不到列表，会提示重试，重试即有） |
+| 3 | `/effort` 列表 → 选择生效 | ✅ | ✅ | ✅ | ✅ |
+| 4 | default 在聊天里审批；auto、bypass 写文件并跑命令 | ✅ | ✅（default 在沙箱内写文件不询问，联网时弹审批卡片） | ✅ | ✅ |
+| 5 | `/new` → `/list` → `/switch` → 上下文正确 | ✅ | ✅ | ✅ | ✅ |
+| 6 | `/cron` 绑定会话 → 聊天接着 cron 的结果继续；`/timer` | ✅ | ✅ | ✅ | ✅ |
+| 7 | 固定 loop 3 次 → 暂停；自定节奏 3 次 → agent 自己暂停 | ✅ | ✅ | ✅ | ✅ |
+| 8 | 插话；`/queue up` 调整顺序 | ✅ steer（纯文字回合的插话答复作为单独一条消息） | ✅ steer | ✅ 排队（Kimi 不接受回合中插话） | ✅ steer |
+| 9 | `/stop` 后继续；`/compact`、`/usage`、`/status` | ✅（`/usage`：5 小时 / 7 天额度） | ✅（`/usage`：7 天额度） | ✅（`/usage` 不支持，按设计） | ✅（`/usage` 不支持，按设计） |
+| 10 | Echo worker：注册信息、选项校验、plan 任务、续接会话 | ✅（进程内 Echo + 真实 worker） | — | — | — |
+
+- Claude 在实测中把 30 秒的 `sleep` 自己转到后台、先结束了这一轮，30 秒后又自己发起一轮回复 “SLEPT”。这条回复作为单独一条消息出现在聊天里，没有占用下一轮，正是上面修复的场景。
+- Kimi 在最后一轮复测时用完了账号的 5 小时额度（Kimi 日志里是 `APIProviderQuotaExhaustedError`），这时聊天里只显示 “(empty response)”，没有说明原因。Kimi 一栏用的是此前一轮的完整通过结果；之后对 ACP 的改动（压缩报告提前到达）有单元测试。额度用完时的提示留作后续：需要额度恢复后看 Kimi 通过 ACP 怎样报这个错误。
+
+第 10 条只用 Claude 通道做了真实验证；按任务选项的校验和执行路径对四个 agent 相同（`ValidateJobOptions` 按各自的能力检查），其它 agent 没有单独跑 Echo 任务。
+
+**验证中发现并修复的问题**（都有单元测试；复现用的 live 测试一并提交）
+
+- **Claude：结果归属**。有两种情况：
+  - 纯文字回合里的插话，Claude 要等这一轮的结果出来后才读到，然后再给出第二个结果；
+  - Claude 在后台跑的命令结束后，会自己发起一轮（`system/task_notification`）。
+
+  引擎以前把这些结果当成自己这一轮或下一轮的答复：真正的答复被当作过期事件丢掉，空闲时的则直接丢失。现在加了 `--replay-user-messages`，每条消息带上自己的 uuid，Claude 读到时按这个 uuid 回显，回合按回显归属（不回显 uuid 的旧版本按文字匹配）。
+  - 只有在有证据时（后台任务通知，或在我们的结果之后才读到的插话）才算 Claude 自己的回合。
+  - 这种回合的文字作为单独一条消息发到聊天并记入历史，不结束引擎的回合。投递按顺序进行：
+    - 有我们的提问在等时：作为 `EventBackground` 放进那一轮的事件流，由引擎在那一轮的答复之前发出；
+    - 没有提问在等时（出现在我们上一轮答复之后）：交给每个聊天一个的有序投递，等当时正在进行的那一轮处理完再发。
+  - 后台任务在我们的回合中途结束时，Claude 会把通知并进当前回合（回显 `<task-notification>`），这时不会有单独的回合。
+  - 这种回合里的工具请求在非 bypass 模式下拒绝（没有聊天回合能显示卡片）；bypass 模式照常自动批准。
+  - 我们的提问还排在 Claude 自己的回合后面时，`/stop` 不发中断，改为结束进程（否则中断会打到那个回合上，我们的提问随后照常执行）。没有 Claude 自己的回合在跑时照常中断。
+
+  第一版用“扣住结果 15 秒”的做法，review 指出有关闭后发送、丢失原答复等问题，已整体替换。
+- **Claude、Codex：default 模式不询问**。
+  - Claude：default 不传 `--permission-mode`，于是用户自己 `~/.claude/settings.json` 的 `defaultMode`（这台机器是 `auto`）生效。现在总是显式传入。
+  - Codex：default 沿用 `~/.codex/config.toml`，其中 `approvals_reviewer = "auto_review"` 让需要审批的操作被自动审查。现在 default / plan 的审批一律转到聊天（沙箱仍按用户配置；`approval_policy = "never"` 时改用 `on-request`）。
+  - Codex 的 default 在工作区沙箱内写文件本来就不询问，只在需要出沙箱（如联网）时询问，验收按这个口径检查。
+- **会话只能被一个进程打开的 agent（Codex app-server、Kimi ACP）：绑定聊天会话的 cron 每次都失败**。聊天的常驻进程占着会话，cron 的进程恢复时，Codex 报 “thread already has an active writer”，Kimi 报内部错误。现在这类 agent 声明 `ExclusiveSessions`：cron 拿到会话锁后先关掉聊天里空闲的进程，聊天下一条消息再恢复会话，能看到 cron 的那一轮。Claude、agy 可以同时打开，不受影响。
+- **Kimi（ACP）：最后一轮丢失**。Kimi 在回答 `session/prompt` 之后才把这一轮写进会话记录，进程被立即杀掉时这一轮只剩提问。表现为：cron 在聊天的会话上跑完后，聊天接着问时 Kimi 看不到 cron 的回复。现在空闲的 ACP 进程先关闭输入、等它自己退出（最多 5 秒，实测 Kimi 约 50 ms、agy 约 1.3 秒）再杀；忙的进程仍立即结束。
+- **plan 模式的 Echo 任务 / 隔离 cron 一定失败**。Claude 在 plan 模式结束时请求 `ExitPlanMode`，任务执行器把所有权限请求都当失败。现在拒绝退出计划模式，并把计划作为输出：
+  - 请求里没有计划时，用此前写出的文字；
+  - 两者都没有时，要求把计划写在回复里；
+  - 最多拒绝 3 次。
+- **Codex 自动升级卡住**。服务进程读外置卷上的 codex 时被 macOS 隐私保护挂住（见 §9），升级前的备份复制无限期等待。现在复制最多 2 分钟，超时不再在进程内重试。
+- **Kimi Code 2.6 的 `/compact` 提前结束**。验证期间 Kimi 自动升级到 2.6.3：
+  - `/compact` 会先回一句 “Context compaction started — it runs in the background…”，约十几秒后才报告 “Compaction completed”；
+  - 压缩期间发来的消息会被直接丢弃，返回空回复。
+
+  原来只在 `/compact` 没有回复时等待，现在回复说明“在后台进行”时也等到报告完成。
+- **`/model` 拿不到列表时显示空列表**：改为说明这次没取到，并提示重试或直接用模型名。判断依据是 agent 返回的列表本身，不受“当前模型”补位的影响。
+
+**验证修复的 review（Codex + Kimi Code，三轮）**
+- **第一轮**（针对“扣住结果”的第一版插话修复）：
+  - 计时器在进程退出后向已关闭的通道发送；
+  - 计时器和真实结果竞争，结果可能落到下一轮；
+  - 一有输出就不再兜底；
+  - 记录顺序和写入顺序不一致，写失败时删错记录；
+  - 第二个结果只含插话的答复时，原答复丢失；
+  - `ExitPlanMode` 没带计划时，输出成了“好的，停下”。
+
+  前五条随方案整体替换而解决（写入和记录在同一把锁下，失败时删掉自己那条），最后一条改为用之前写出的文字作为计划，两者都没有时要求写出计划。
+- **第二轮**：
+  - 被丢弃的插话记录会抢走后来 `/compact` 的回显：没匹配上的回显优先归给我们的提问，我们的提问被读到时清掉它之前没回显的插话；
+  - 提问排在 Claude 自己的回合后面时 `/stop` 打错回合：改为结束进程；
+  - 后台消息乱序、写盘阻塞读取：改为每个聊天一个有序投递，读取方只排队，并按回合状态决定先后；
+  - 每条 system 消息都发会话 ID、空闲时塞满事件通道：只在 ID 变化时发；
+  - 有当前模型时“列表为空”的提示不出现：改看原始列表；
+  - ACP 的 Close 和新一轮竞争：Close 在锁内先标记结束，之后不再开始新提问。
+- **第三轮**：
+  - 被丢弃的插话和后来的提问文字相同时仍会抢走回显：改为按 uuid 对应（Claude 2.1 回显我们给的 uuid；`/compact` 先回显输出，再回显我们的消息）；
+  - 后台消息仍可能抢在引擎还没处理完的答复前面（`steerOK` 落后于会话）：改由会话在回合结束时给出顺序信号；
+  - 关掉独占会话的进程时可能关错 `/switch` 刚换上的进程：改为在锁内按指针摘下再关闭；
+  - Kimi 的压缩报告早于 `/compact` 的应答被处理时会白等 2 分钟：先记下“已报告”。
+  - Kimi：以 `<task-notification>` 开头的用户消息会被当成任务通知（改为先按 uuid 匹配）；任何未回显的提问都会让 `/stop` 结束进程（改为只在 Claude 自己的回合在跑时）；第二次不带计划的 `ExitPlanMode` 会用后来的文字覆盖已记下的计划（改为不覆盖；事件流关闭时也用计划）。
+- **说明**：Kimi 认为 bypass 模式下 Claude 自己回合的工具请求也应拒绝。这里保持自动批准（聊天选择了全部放行，后台任务结束后接着做是这个模式的预期），非 bypass 模式拒绝；已写入代码注释和上面的说明。
+
+**需要使用者一起完成的部分**
+- 第 1 条（`/auth` 登出、登录）：会退出真实账号，按约定和使用者一起做。
+- 第 10 条接真实的 Echo 服务：Echo 需要部署 `d83fc05`（含迁移 `20261118_01`），本次没有部署 Echo。
+- 平台实机检查（`2026-11-18-platform-acceptance.md` §2）：需要在真实的飞书、Telegram 聊天里操作。
+- Kimi、agy 的 ACP 是可选的（`backend = "acp"`），现有配置仍是每轮一个进程；要用 ACP 需要改配置。
+
 ## 8. 待决问题（需要你确认）
 
 > 2026-11-17：文档已确认，1–6、8 按建议执行；7（Echo 协议扩展的时机与 Echo 仓库由谁改）仍待定，到 P7 前再确认。
@@ -656,6 +759,7 @@ Echo 侧（独立仓库，单独 PR）：
 - **CLI 变化快**：agy 几乎每天发版，Kimi Code 2.x 刚推出，Codex 每周都有版本。对策：启动时探测 `--help` 能力（沿用上游 kimi 的做法），doctor 提示版本，冒烟脚本每次升级后跑一遍。
 - **自动升级可能把能用的 CLI 升坏**：新版本删掉旧参数的情况已经发生过（Codex 删除 `--full-auto`，Kimi Code 删除 `--print` 等）。对策：T10.5 升级后冒烟检查加回滚；结合启动时探测 `--help` 能力。
 - **CLI 装在外置卷上**：standalone codex 的 `~/.codex/packages` 链接到 `/Volumes/extended/...`。开机时外置卷还没挂载的话，服务找不到 codex。对策：T0.5 的 doctor 检查二进制能不能解析、所在卷有没有挂载；T10.3 在探测失败时发通知。
+  - **（2026-11-18 整体验证时发现）** 外置卷上的文件受 macOS 隐私保护（TCC）。服务进程对 echo-client 的“完全磁盘访问权限”授权按二进制的 cdhash 匹配，而本地编译是 ad-hoc 签名，每次重新编译、部署后授权就对不上，读外置卷的 `open()` 会一直等待授权：两个服务里的 codex、qoder（qodercli 也在外置卷上）都会卡住，codex 的自动升级卡在备份复制上。代码侧：备份复制加了 2 分钟上限，超时不再在进程内重试。根治需要使用者决定：给 echo-client 用固定的签名身份签名（授权就跟着身份，不跟着 cdhash），或者把这些 CLI 装到内置盘；在那之前，每次部署后要在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”里重新授权 `echo-client`。
 - **未公开接口**：Claude 的部分控制请求随时可能变。对策：只作为增强，失败就回退。
 - **设备码登录的前置条件**：Codex 需要在 ChatGPT 安全设置中启用设备码；Kimi `provider list --json` 会输出密钥。对策：在文档中写明；读取结果一律脱敏。
 - **改动面大**：`core/engine.go` 9000 行。对策：新逻辑尽量放进新文件（capabilities、auth、steer），engine 只做接线；每个阶段单独 PR。

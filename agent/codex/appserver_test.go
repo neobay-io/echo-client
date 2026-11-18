@@ -827,3 +827,18 @@ func TestExecBackendCannotCompact(t *testing.T) {
 		t.Fatal("exec session compacted")
 	}
 }
+
+// Default mode forwards approvals to the chat even when the user's Codex
+// config reviews them automatically or never asks (§5.2).
+func TestAppServerDefaultModeAsksInChat(t *testing.T) {
+	fake := installFakeAppServer(t)
+	t.Setenv("ECHO_FAKE_CODEX_CONFIG", `{"approval_policy":"never","approvals_reviewer":"auto_review","sandbox_mode":"read-only"}`)
+	_, s := startFakeSession(t, "default", "")
+	_ = s.Send("hi", nil, nil)
+	collectText(t, s, nil)
+	p := fake.last(t, "turn/start")
+	sb, _ := p["sandboxPolicy"].(map[string]any)
+	if p["approvalPolicy"] != "on-request" || p["approvalsReviewer"] != "user" || sb["type"] != "readOnly" {
+		t.Fatalf("default turn = %v", p)
+	}
+}

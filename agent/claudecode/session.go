@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,19 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
+	// Turn attribution (see "Turns Claude starts by itself" below).
+	trackMu   sync.Mutex
+	sentMsgs  []sentMsg // written to Claude, not echoed yet (in write order)
+	nextMsgID uint64
+	echoSeen  bool // Claude echoes user messages (--replay-user-messages)
+	turnOpen  bool // a turn for our prompt is running
+	bgTurn    bool // a turn Claude started by itself is running
+	// bgTasks: background tasks Claude started (task id); pendingNotif:
+	// their completions not yet taken into a turn.
+	bgTasks        map[string]bool
+	pendingNotif   int
+	bgText         strings.Builder
+	bgHandler      func(core.BackgroundOutput)
 	cmd            *exec.Cmd
 	stdin          io.WriteCloser
 	stdinMu        sync.Mutex
@@ -133,11 +147,19 @@ func buildClaudeSessionArgs(model, reasoningLevel, sessionID, mode string, allow
 		"--verbose",
 		"--input-format", "stream-json",
 		"--permission-prompt-tool", "stdio",
+		// Echoes each user message when Claude takes it: tells whether a
+		// steered message joined the turn or comes after its result.
+		"--replay-user-messages",
 	}
 
-	if mode != "" && mode != "default" {
-		args = append(args, "--permission-mode", mode)
+	// Always explicit: without the flag Claude takes the user's own
+	// permissions.defaultMode (e.g. "auto"), and a chat in default mode
+	// would not ask. ("default" is what Claude 2.1 calls "manual"; older
+	// versions know only "default".)
+	if mode == "" {
+		mode = "default"
 	}
+	args = append(args, "--permission-mode", mode)
 	if isClaudeSessionID(sessionID) {
 		args = append(args, "--resume", sessionID)
 	}
@@ -220,12 +242,29 @@ func (cs *claudeSession) readLoop(stdout io.ReadCloser, stderrBuf *bytes.Buffer)
 
 		switch eventType {
 		case "system":
+			cs.noteTask(raw)
 			cs.handleSystem(raw)
 		case "assistant":
+			if cs.inBackgroundTurn() {
+				cs.collectBackground(raw)
+				return nil
+			}
 			cs.handleAssistant(raw)
 		case "user":
+			if replay, _ := raw["isReplay"].(bool); replay {
+				cs.noteEcho(raw)
+				return nil
+			}
+			if cs.inBackgroundTurn() {
+				return nil
+			}
 			cs.handleUser(raw)
 		case "result":
+			if cs.inBackgroundTurn() {
+				cs.finishBackground(raw)
+				return nil
+			}
+			cs.endTurn()
 			cs.handleResult(raw)
 		case "control_request":
 			cs.resumeWorkSeen.Store(true)
@@ -278,6 +317,12 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 		cs.resumeWorkSeen.Store(true)
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
+		// Every system message carries the id; tell the engine only when it
+		// changes (between turns nobody reads the events, and they would
+		// fill the channel).
+		if prev, _ := cs.sessionID.Load().(string); prev == sid {
+			return
+		}
 		cs.sessionID.Store(sid)
 		evt := core.Event{Type: core.EventText, SessionID: sid}
 		select {
@@ -478,13 +523,26 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
 
-	// Bypass mode approves tools without asking, but a question or a plan is
+	background := cs.inBackgroundTurn()
+	// Bypass mode approves tools without asking (in turns Claude starts
+	// itself too: the chat allowed everything), but a question or a plan is
 	// for the user to answer, whatever the mode.
 	if cs.autoApprove.Load() && !core.IsUserDecisionTool(toolName) {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior:     "allow",
 			UpdatedInput: input,
+		})
+		return
+	}
+
+	if background {
+		// No chat turn is waiting to show a card: a turn Claude started by
+		// itself cannot ask.
+		slog.Info("claudeSession: declining a request from a turn Claude started itself", "tool", toolName)
+		_ = cs.RespondPermission(requestID, core.PermissionResult{
+			Behavior: "deny",
+			Message:  "No one can answer this now: you started this turn yourself. Do not use tools that need approval; say in your reply what you would do, and the user can ask for it.",
 		})
 		return
 	}
@@ -691,7 +749,7 @@ func (cs *claudeSession) sendUserMessage(prompt string, images []core.ImageAttac
 		return msg
 	}
 	if len(images) == 0 {
-		return cs.writeJSON(userMessage(prompt))
+		return cs.writeUserMessage(userMessage(prompt), prompt, priority != "")
 	}
 
 	normalizedImages := make([]core.ImageAttachment, 0, len(images))
@@ -716,7 +774,7 @@ func (cs *claudeSession) sendUserMessage(prompt string, images []core.ImageAttac
 		textPart += "\n\n(Local files: " + strings.Join(refs, ", ") + ")"
 	}
 
-	return cs.writeJSON(userMessage(textPart))
+	return cs.writeUserMessage(userMessage(textPart), textPart, priority != "")
 }
 
 // RespondPermission writes a control_response to the Claude process stdin.
@@ -762,7 +820,26 @@ func (cs *claudeSession) RespondPermission(requestID string, result core.Permiss
 func (cs *claudeSession) writeJSON(v any) error {
 	cs.stdinMu.Lock()
 	defer cs.stdinMu.Unlock()
+	return cs.writeJSONLocked(v)
+}
 
+// writeUserMessage writes a user message and records it for turn
+// attribution, in the order the messages reach Claude. The message gets a
+// uuid of its own: Claude echoes it back when it takes the message.
+func (cs *claudeSession) writeUserMessage(v map[string]any, text string, steered bool) error {
+	cs.stdinMu.Lock()
+	defer cs.stdinMu.Unlock()
+	uuid := newMessageUUID()
+	v["uuid"] = uuid
+	id := cs.noteSent(uuid, text, steered)
+	if err := cs.writeJSONLocked(v); err != nil {
+		cs.noteUnsent(id)
+		return err
+	}
+	return nil
+}
+
+func (cs *claudeSession) writeJSONLocked(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -821,4 +898,303 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// ── Turns Claude starts by itself ───────────────────────────────
+//
+// Claude can run a turn nobody here asked for: when a background task it
+// started finishes (system/task_notification), or to answer a message
+// steered in after the turn's result was out (a turn that is one text
+// answer has no step at which to take it). Such a turn's result must not
+// end the engine's turn — the engine would take it for the answer to its
+// own prompt (or drain it as stale) and the real answer would be lost.
+//
+// With --replay-user-messages Claude echoes each user message when it
+// takes it, so a turn for our prompt starts at that echo. A turn counts as
+// Claude's own only on evidence: a task notification, or a steered message
+// taken while no turn of ours runs. Its output goes to the background
+// handler (the engine posts it to the chat) instead of the event stream,
+// and tool requests in it are declined: no chat turn can show a card.
+// Without echoes (an older CLI), every result ends the engine's turn, as
+// before.
+
+// sentMsg is a user message written to Claude and not echoed yet.
+type sentMsg struct {
+	id      uint64
+	uuid    string
+	text    string
+	steered bool
+}
+
+// newMessageUUID returns a random (version 4) UUID.
+func newMessageUUID() string {
+	var b [16]byte
+	_, _ = crand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// maxSentMsgs bounds the records: a message Claude drops is never echoed.
+const maxSentMsgs = 64
+
+func (cs *claudeSession) noteSent(uuid, text string, steered bool) uint64 {
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	cs.nextMsgID++
+	cs.sentMsgs = append(cs.sentMsgs, sentMsg{id: cs.nextMsgID, uuid: uuid, text: text, steered: steered})
+	if len(cs.sentMsgs) > maxSentMsgs {
+		cs.sentMsgs = cs.sentMsgs[len(cs.sentMsgs)-maxSentMsgs:]
+	}
+	return cs.nextMsgID
+}
+
+// noteUnsent drops the record of a message whose write failed.
+func (cs *claudeSession) noteUnsent(id uint64) {
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	for i, m := range cs.sentMsgs {
+		if m.id == id {
+			cs.sentMsgs = append(cs.sentMsgs[:i], cs.sentMsgs[i+1:]...)
+			return
+		}
+	}
+}
+
+// noteEcho handles Claude taking a user message: the record with the
+// echoed uuid (else, for a CLI that does not echo it, the same text). Other
+// echoes are not ours (a slash command's output; a background task's
+// notice). Our prompt opens our turn; a steered message taken while none
+// runs starts a turn of Claude's own (the answer comes after our result).
+func (cs *claudeSession) noteEcho(raw map[string]any) {
+	text := ""
+	if msg, ok := raw["message"].(map[string]any); ok {
+		text = messageText(msg["content"])
+	}
+	echoUUID, _ := raw["uuid"].(string)
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	cs.echoSeen = true
+	byUUID := -1
+	for i, m := range cs.sentMsgs {
+		if echoUUID != "" && m.uuid == echoUUID {
+			byUUID = i
+			break
+		}
+	}
+	if byUUID < 0 && strings.HasPrefix(strings.TrimSpace(text), "<task-notification>") {
+		// Claude took a background task's completion: into the running
+		// turn of ours (no turn of its own follows), or as a turn of its own.
+		if cs.pendingNotif > 0 {
+			cs.pendingNotif--
+		}
+		if !cs.turnOpen {
+			cs.bgTurn = true
+		}
+		return
+	}
+	if len(cs.sentMsgs) == 0 {
+		return
+	}
+	idx := byUUID
+	if idx < 0 {
+		for i, m := range cs.sentMsgs {
+			if m.text == text {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	m := cs.sentMsgs[idx]
+	if !m.steered {
+		// Claude takes messages in order: steered ones written before this
+		// prompt and not echoed were dropped.
+		kept := cs.sentMsgs[:0]
+		for i, r := range cs.sentMsgs {
+			if i > idx || (!r.steered && i != idx) {
+				kept = append(kept, r)
+			}
+		}
+		cs.sentMsgs = kept
+	} else {
+		cs.sentMsgs = append(cs.sentMsgs[:idx], cs.sentMsgs[idx+1:]...)
+	}
+	switch {
+	case !m.steered:
+		cs.turnOpen = true
+		cs.bgTurn = false // whatever ran before it has ended
+	case !cs.turnOpen:
+		cs.bgTurn = true
+	}
+}
+
+// noteTask follows Claude's background tasks: when one finishes, Claude
+// takes the notice into the running turn (echoing it) or, with none
+// running, starts a turn of its own. Foreground commands are tasks too;
+// their completion is the tool result.
+func (cs *claudeSession) noteTask(raw map[string]any) {
+	subtype, _ := raw["subtype"].(string)
+	id, _ := raw["task_id"].(string)
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	switch subtype {
+	case "task_started":
+		if bg, _ := raw["is_backgrounded"].(bool); bg && id != "" {
+			if cs.bgTasks == nil {
+				cs.bgTasks = map[string]bool{}
+			}
+			cs.bgTasks[id] = true
+		}
+	case "task_updated":
+		if patch, _ := raw["patch"].(map[string]any); patch != nil && id != "" {
+			if bg, _ := patch["is_backgrounded"].(bool); bg {
+				if cs.bgTasks == nil {
+					cs.bgTasks = map[string]bool{}
+				}
+				cs.bgTasks[id] = true
+			}
+		}
+	case "task_notification":
+		file, _ := raw["output_file"].(string)
+		// A background task's output goes to a file (one started before a
+		// resume is not in bgTasks); a foreground command's does not.
+		if cs.bgTasks[id] || (id != "" && file != "") {
+			delete(cs.bgTasks, id)
+			cs.pendingNotif++
+		}
+	}
+}
+
+// promptWaiting reports whether our prompt is written but not yet taken
+// while a turn of Claude's own runs: an interrupt would stop that turn,
+// not ours.
+func (cs *claudeSession) promptWaiting() bool {
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	return cs.echoSeen && !cs.turnOpen && (cs.bgTurn || cs.pendingNotif > 0) && cs.promptRecordedLocked()
+}
+
+// promptRecordedLocked: a prompt of ours is written and not taken yet.
+func (cs *claudeSession) promptRecordedLocked() bool {
+	for _, m := range cs.sentMsgs {
+		if !m.steered {
+			return true
+		}
+	}
+	return false
+}
+
+func (cs *claudeSession) inBackgroundTurn() bool {
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	return cs.echoSeen && !cs.turnOpen && (cs.bgTurn || cs.pendingNotif > 0)
+}
+
+// endTurn: the result of our turn arrived. If no echo opened the turn (a
+// CLI that does not echo our uuid, for a slash command), the prompt it
+// answered is the oldest one still recorded.
+func (cs *claudeSession) endTurn() {
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	if !cs.turnOpen {
+		for i, m := range cs.sentMsgs {
+			if !m.steered {
+				cs.sentMsgs = append(cs.sentMsgs[:i], cs.sentMsgs[i+1:]...)
+				break
+			}
+		}
+	}
+	cs.turnOpen = false
+}
+
+func (cs *claudeSession) collectBackground(raw map[string]any) {
+	msg, _ := raw["message"].(map[string]any)
+	items, _ := msg["content"].([]any)
+	cs.trackMu.Lock()
+	defer cs.trackMu.Unlock()
+	for _, it := range items {
+		item, _ := it.(map[string]any)
+		if item["type"] == "text" {
+			if text, _ := item["text"].(string); strings.TrimSpace(text) != "" {
+				if cs.bgText.Len() > 0 {
+					cs.bgText.WriteString("\n\n")
+				}
+				cs.bgText.WriteString(text)
+			}
+		}
+	}
+}
+
+// finishBackground ends a turn Claude started itself and hands its text to
+// the background handler.
+func (cs *claudeSession) finishBackground(raw map[string]any) {
+	content := ""
+	isError, _ := raw["is_error"].(bool)
+	subtype, _ := raw["subtype"].(string)
+	if !isError && !strings.HasPrefix(subtype, "error_") {
+		content = strings.TrimSpace(claudeResultContent(raw))
+	}
+	cs.trackMu.Lock()
+	if content == "" {
+		content = strings.TrimSpace(cs.bgText.String())
+	}
+	cs.bgText.Reset()
+	if cs.bgTurn {
+		cs.bgTurn = false
+	} else if cs.pendingNotif > 0 {
+		cs.pendingNotif--
+	}
+	handler := cs.bgHandler
+	// With a prompt of ours waiting, the engine's turn for it reads the
+	// event stream: the output goes there, in order before that answer.
+	// Otherwise it came after our last answer and goes to the handler.
+	beforePrompt := cs.promptRecordedLocked()
+	cs.trackMu.Unlock()
+	if sid, ok := raw["session_id"].(string); ok && sid != "" {
+		cs.sessionID.Store(sid)
+	}
+	if content == "" {
+		return
+	}
+	if beforePrompt {
+		select {
+		case cs.events <- core.Event{Type: core.EventBackground, Content: content}:
+		case <-cs.ctx.Done():
+		}
+		return
+	}
+	if handler == nil {
+		slog.Info("claudeSession: output of a turn Claude started itself, with no chat to show it", "chars", len(content))
+		return
+	}
+	handler(core.BackgroundOutput{Text: content})
+}
+
+// OnBackgroundOutput implements core.BackgroundReporter.
+func (cs *claudeSession) OnBackgroundOutput(handler func(core.BackgroundOutput)) {
+	cs.trackMu.Lock()
+	cs.bgHandler = handler
+	cs.trackMu.Unlock()
+}
+
+// messageText is the text of a user message's content (a string, or text
+// blocks).
+func messageText(content any) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, it := range c {
+			if item, ok := it.(map[string]any); ok && item["type"] == "text" {
+				text, _ := item["text"].(string)
+				b.WriteString(text)
+			}
+		}
+		return b.String()
+	}
+	return ""
 }

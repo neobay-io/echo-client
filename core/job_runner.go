@@ -185,6 +185,7 @@ func (r engineJobRunner) Run(
 
 	sessionID := agentSession.CurrentSessionID()
 	var textBuffer jobTextBuffer
+	var plan planKeeper
 
 	for {
 		select {
@@ -192,7 +193,7 @@ func (r engineJobRunner) Run(
 			return nil, ctx.Err()
 		case event, ok := <-agentSession.Events():
 			if !ok {
-				output := textBuffer.String()
+				output := plan.output(textBuffer.String())
 				if output == "" {
 					return nil, fmt.Errorf("job session exited without result")
 				}
@@ -260,6 +261,7 @@ func (r engineJobRunner) Run(
 				if output == "" {
 					output = textBuffer.String()
 				}
+				output = plan.output(output)
 				if onEvent != nil {
 					onEvent(JobEvent{
 						Type:      string(EventResult),
@@ -299,6 +301,11 @@ func (r engineJobRunner) Run(
 						CreatedAt: time.Now().UTC(),
 					})
 				}
+				if handled, err := plan.handle(agentSession, event, textBuffer.String()); err != nil {
+					return nil, err
+				} else if handled {
+					continue
+				}
 				return nil, &codedJobError{
 					code: JobErrorCodePermissionRequired,
 					msg: fmt.Sprintf(
@@ -309,6 +316,54 @@ func (r engineJobRunner) Run(
 			}
 		}
 	}
+}
+
+// maxJobPlanAsks bounds how often a background turn declines ExitPlanMode
+// before it gives up on the turn.
+const maxJobPlanAsks = 3
+
+// planKeeper serves a background turn (an Echo task, an isolated cron run)
+// that runs in plan mode: no one can approve leaving plan mode there, so it
+// keeps the plan the agent puts in ExitPlanMode, declines the request, and
+// the plan becomes the turn's output.
+type planKeeper struct {
+	plan string
+	asks int
+}
+
+// handle answers ev if it is an ExitPlanMode request, reporting whether it
+// did. written is the turn's text so far: the plan, when the request
+// carries none.
+func (k *planKeeper) handle(s AgentSession, ev Event, written string) (bool, error) {
+	if ev.ToolName != ToolExitPlanMode || k.asks >= maxJobPlanAsks {
+		return false, nil
+	}
+	k.asks++
+	plan, _ := ev.ToolInputRaw["plan"].(string)
+	if strings.TrimSpace(plan) == "" && k.plan == "" {
+		plan = written // a plan already kept is not replaced by later chatter
+	}
+	msg := "This task asks only for the plan, which has been recorded. Do not leave plan mode or make changes; end your turn."
+	if strings.TrimSpace(plan) != "" {
+		k.plan = strings.TrimSpace(plan)
+	} else if k.plan == "" {
+		msg = "This task asks only for the plan. Write the complete plan in your reply, without leaving plan mode or making changes, and end your turn."
+	}
+	if err := s.RespondPermission(ev.RequestID, PermissionResult{
+		Behavior: "deny",
+		Message:  msg,
+	}); err != nil {
+		return true, fmt.Errorf("decline ExitPlanMode: %w", err)
+	}
+	return true, nil
+}
+
+// output is the turn's output: the plan, if the agent made one.
+func (k *planKeeper) output(out string) string {
+	if k.plan != "" {
+		return k.plan
+	}
+	return out
 }
 
 // retireStatesForAgentSession marks chats whose agent process runs one of
@@ -438,6 +493,7 @@ func (e *Engine) runIsolatedCronTurn(
 
 	sessionID := agentSession.CurrentSessionID()
 	var buf jobTextBuffer
+	var plan planKeeper
 	workSeen := false
 	for {
 		select {
@@ -445,7 +501,7 @@ func (e *Engine) runIsolatedCronTurn(
 			return sessionID, buf.String(), ctx.Err()
 		case event, ok := <-agentSession.Events():
 			if !ok {
-				return sessionID, buf.String(), nil
+				return sessionID, plan.output(buf.String()), nil
 			}
 			if event.SessionID != "" {
 				sessionID = event.SessionID
@@ -466,7 +522,7 @@ func (e *Engine) runIsolatedCronTurn(
 				if out == "" {
 					out = buf.String()
 				}
-				return sessionID, out, nil
+				return sessionID, plan.output(out), nil
 			case EventError:
 				evErr := event.Error
 				if evErr == nil {
@@ -474,6 +530,12 @@ func (e *Engine) runIsolatedCronTurn(
 				}
 				return sessionID, buf.String(), cronResumeError(evErr, agentSessionID, workSeen)
 			case EventPermissionRequest:
+				if handled, err := plan.handle(agentSession, event, buf.String()); err != nil {
+					return sessionID, buf.String(), err
+				} else if handled {
+					workSeen = true
+					continue
+				}
 				return sessionID, buf.String(), fmt.Errorf(
 					"cron session hit a permission request for tool %q; run the project in bypass/yolo mode for unattended cron",
 					event.ToolName,

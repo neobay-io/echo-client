@@ -136,13 +136,21 @@ func takeUpgradeSnapshot(name, route, path, version string, healthy bool, backup
 	return snap, nil
 }
 
+// errCopyTimeout: a copy did not finish in time (see cloneFile).
+var errCopyTimeout = errors.New("copy timed out")
+
 // copyExecutable copies src to dst (which must not exist) with src's mode,
 // as a copy-on-write clone where the platform can make one.
 func copyExecutable(src, dst string) error {
-	if cloneFile(src, dst) == nil {
+	err := cloneFile(src, dst)
+	if err == nil {
 		return nil
 	}
 	_ = os.Remove(dst)
+	if errors.Is(err, errCopyTimeout) {
+		// The same open would hang here too, with no way to stop it.
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err

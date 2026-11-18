@@ -594,8 +594,16 @@ func (s *appServerSession) turnSettingsLocked(params map[string]any) bool {
 		params["approvalsReviewer"] = "user"
 		params["sandboxPolicy"] = map[string]any{"type": "dangerFullAccess"}
 	default: // default, plan
-		params["approvalPolicy"] = s.defaults.ApprovalPolicy
-		params["approvalsReviewer"] = s.defaults.ApprovalsReviewer
+		// The user's sandbox and approval policy, but approvals always go
+		// to the chat: a config-wide auto_review (or "never") would make
+		// default the same as auto (§5.2: default forwards approvals as
+		// cards).
+		policy := s.defaults.ApprovalPolicy
+		if policy == nil || policy == "never" {
+			policy = "on-request"
+		}
+		params["approvalPolicy"] = policy
+		params["approvalsReviewer"] = "user"
 		params["sandboxPolicy"] = s.defaults.sandboxPolicy(s.extraDirs)
 		plan = s.mode == "plan"
 	}
