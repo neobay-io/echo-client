@@ -395,7 +395,7 @@ func (a *Agent) SetSessionOptions(opts core.AgentSessionOptions) {
 // Capabilities declares what core cannot derive from optional interfaces.
 func (a *Agent) Capabilities() core.AgentCapabilities {
 	return core.AgentCapabilities{
-		Auth: core.AuthCaps{Login: true, Status: true, Flow: core.AuthFlowURLCode},
+		Auth: core.AuthCaps{Login: true, Status: true, Logout: true, Flow: core.AuthFlowURLCode},
 	}
 }
 

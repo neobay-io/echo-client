@@ -21,3 +21,6 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 	}
 	return nil
 }
+
+// KillGroupOnCancel is a no-op on Windows; cancellation kills the process.
+func KillGroupOnCancel(cmd *exec.Cmd) {}

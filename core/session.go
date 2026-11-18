@@ -73,6 +73,16 @@ func (s *Session) AddHistory(role, content string) {
 	})
 }
 
+// dropLastHistory removes the last entry if it is role/content (a turn that
+// was put back in the queue before reaching the agent).
+func (s *Session) dropLastHistory(role, content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n := len(s.History); n > 0 && s.History[n-1].Role == role && s.History[n-1].Content == content {
+		s.History = s.History[:n-1]
+	}
+}
+
 func (s *Session) ClearHistory() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

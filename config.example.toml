@@ -154,8 +154,14 @@ level = "info" # debug, info, warn, error
 # - kimi: builtin（`kimi upgrade --yes`，针对实际解析到的那份，例如 ~/.kimi-code/bin/kimi）
 # - antigravity: builtin（`agy update`）
 
-# Remote Claude login: disabled by default, explicit administrators + private chats only.
-# Uses the official CLI and accepts one-time authorization codes, NOT persistent tokens.
+# Remote agent CLI login: disabled by default, explicit administrators + private chats only.
+# Runs each CLI's own login and accepts one-time authorization codes, NOT persistent tokens.
+#   /auth [status|login|logout] [claude|codex|kimi|agy]   (no name: the project's agent)
+#   Claude, agy: open the link, then send /auth code <code>
+#   Codex, Kimi: open the link and enter the shown code; nothing is sent back
+#     (Codex needs device-code login enabled in ChatGPT's security settings)
+#   logout needs `/auth logout <agent> confirm` and logs the CLI out for every
+#   chat and service on the machine; Kimi Code and agy have no logout command.
 # [agent_auth]
 # enabled = true
 # allowed_user_ids = ["ou_xxx", "7394290413"]

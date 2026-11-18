@@ -735,7 +735,7 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 						if keepSnapshot {
 							return
 						}
-						snap.removeBackup()
+						snap.removeBackup(m.backupDir())
 						m.clearInFlight(name)
 					}()
 				}
@@ -759,6 +759,14 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 				// Smoke check, also after a failed or timed-out installer:
 				// that is when a half-finished install is most likely.
 				_, version, problems := m.cliProblems(ctx, name, cfgTarget, runner, probeTimeout)
+				if ctx.Err() != nil {
+					// Stopping mid-check: the problems may only be the
+					// cancellation. The next start checks the install.
+					keepSnapshot = true
+					res.Err = fmt.Errorf("upgrade interrupted by shutdown: %w", ctx.Err())
+					results = append(results, res)
+					return
+				}
 				res.AfterVersion = version
 				if len(problems) > 0 && snap.Healthy {
 					what := "the upgrade"
@@ -768,7 +776,11 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 					if updateErr != nil {
 						what += fmt.Sprintf(" (installer error: %v)", updateErr)
 					}
-					res.Err = m.rollbackAfterFailedCheck(ctx, snap, &res, problems, runner, cfgTarget, probeTimeout, what)
+					var rollbackFailed bool
+					rollbackFailed, res.Err = m.rollbackAfterFailedCheck(ctx, snap, &res, problems, runner, cfgTarget, probeTimeout, what)
+					// A failed rollback keeps the record and backup, so the
+					// next start tries again.
+					keepSnapshot = rollbackFailed
 					m.recordFailure(name, cfgTarget, res.Err.Error())
 					results = append(results, res)
 					return

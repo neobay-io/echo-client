@@ -360,6 +360,26 @@ Echo 侧（独立仓库，单独 PR）：
 | T2.5 | agy：PTY 跑 `agy acp --login`，转发 URL、回贴 code；status 用 `agy -p /usage` 探测 | T2.1, T1.2 | 真实登录一轮 |
 | T2.6 | Feishu、Telegram 私聊登录卡片；code / token 脱敏审计 | T2.1 | 两个平台各走通一次 |
 
+**P2 实现记录（2026-11-18）**
+
+- **T2.1**：`AgentAuthManager` 改为按 agent 的登录驱动（`core/agent_auth_drivers.go` 的 `authDriver`：`start`、`prompt` 解析登录提示、`status`、`logout`、覆盖登录的环境变量），仍然每个服务同时只允许一个登录。`/auth [status|login|logout] [claude|codex|kimi|agy]`，不写名字时用当前项目的 agent（需要它声明了登录能力）；`/auth code`、`/auth cancel` 作用于自己发起的那个登录。登录成功或退出后，只有用这个 agent 的项目会在下一轮重启进程。
+- **T2.2 Claude**：PTY 登录不变；`status` 显示登录方式、订阅和过期时间（`claude auth status`）；新增 `logout`（`claude auth logout`）。
+- **T2.3 Codex**：`codex login --device-auth`（PTY），从输出里取 `auth.openai.com` 的链接和 `XXXX-XXXX` 代码；不需要回贴，CLI 轮询到授权就结束。`status` 用 `codex login status`，`logout` 用 `codex logout`。需要先在 ChatGPT 安全设置里启用设备码登录。P4 之后可改走 app-server 的 `account/login/start`。
+- **T2.4 Kimi**：`kimi login --region <本机已存的区域>`（不传会交互式询问区域），取 `kimi.com` / `kimi.ai` 的链接（链接里带 `user_code`）。没有 status 命令：看 `~/.kimi-code/credentials/*.json` 里有没有 refresh token（只判断是否存在，不读出值）。没有 logout 命令，`/auth logout kimi` 明确提示。
+- **T2.5 agy**：PTY 跑 `agy acp --login`，取 `accounts.google.com` 的链接，等出现 “paste the authorization code” 后提示 `/auth code`。`status` 用 `agy -p /usage`（登录时输出额度）。没有 logout 命令。
+- **T2.6**：登录提示在支持按钮的平台（飞书、Telegram）是卡片：“取消登录”，设备码登录多一个“查看状态”；按钮发出的仍是 `/auth …` 命令，私聊和管理员检查照常生效。退出登录需要 `/auth logout <agent> confirm`。审计：`/auth` 消息不进历史、不发给 agent，引用里出现时整体脱敏；status / logout 的 CLI 输出只取第一行；飞书解析失败的富文本不再把原文写进错误日志。所有链接都要求 https、没有端口和用户信息，且主机在各 CLI 的白名单内。
+- **测试**：所有驱动在测试里都换成假的，测试不会运行真实的登录、状态或退出。真实登录 / 退出各一轮留到最后的整体验证时和你一起做（会让本机 CLI 退出登录）。
+
+**P2 review（2026-11-18，Codex + Kimi Code，范围：P10 收尾 `c7cb7504` 和 P2）**：两边合并后 16 个问题，全部修复：
+
+- 升级回滚：备份改为独立副本（APFS 上是写时复制克隆，不占空间），就地改写二进制的更新器不会把备份一起改掉；安装程序删掉二进制后也能恢复；回滚失败时保留记录和备份，下次启动重试；回滚只改符号链接，从最里层开始，回到旧二进制就停，指向同一位置的链接（相对 / 绝对、`/var` 与 `/private/var`）不动；从状态文件读回的记录要和当前安装的 CLI 路径一致才处理，备份只在备份目录里删；关闭服务时正在做的升后检查不再误判为失败。
+- 登录：PTY 登录、status、logout 都按进程组结束，并限制输出等待时间；登录和退出不会同时进行；设备码只从完整的行里解析，链接里带的 `user_code` 必须是普通代码；Kimi 没有存过区域时要求 `/auth login kimi mainland-cn|global`，并遵循 `KIMI_CODE_HOME`；登录结束后的状态检查用新的 30 秒期限；logout 失败只记退出码，不记 CLI 输出。
+- 按钮：Telegram 和飞书的按钮回调现在带上私聊标记（飞书根据之前收到的 p2p 消息记住私聊），“取消登录”“查看状态”不再被拒绝。
+- 升级期间排队：消息在开始前碰上新开始的升级时放回队首，不丢。
+- CLI 变化检测看的是适配器实际运行的二进制（Kimi、agy 的配置路径或安装目录）。
+- 已是最新判断：预发布版本（`1.2.3-rc1`）低于正式版。
+- 另外修复：工作区 `git fetch` 超时后，ssh 子进程占着输出会让命令永远不返回（这台机器上连 `example.invalid` 的 ssh 会挂住，测试因此卡死）；git 命令现在也按进程组结束。
+
 ### P3 Claude Code 深度能力（约 4 天）
 
 | ID | 任务 | 依赖 | 验收 |

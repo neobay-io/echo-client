@@ -493,11 +493,9 @@ func main() {
 		engines = append(engines, engine)
 	}
 
-	agentAuthMgr = core.NewAgentAuthManager(buildAgentAuthConfig(cfg.AgentAuth), func() {
+	agentAuthMgr = core.NewAgentAuthManager(buildAgentAuthConfig(cfg.AgentAuth), func(agent string) {
 		for _, engine := range engines {
-			if engine.GetAgent().Name() == "claudecode" {
-				engine.RefreshInteractiveAuth()
-			}
+			engine.RefreshInteractiveAuthFor(agent)
 		}
 	})
 	for _, engine := range engines {

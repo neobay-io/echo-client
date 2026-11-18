@@ -504,7 +504,9 @@ func (p *Platform) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	} else {
 		sessionKey = fmt.Sprintf("telegram:%d:%d", chatID, cb.From.ID)
 	}
-	rctx := replyContext{chatID: chatID, messageID: msgID}
+	// A button press in a private chat is a private-chat message too
+	// (commands such as /auth check it).
+	rctx := replyContext{chatID: chatID, messageID: msgID, private: cb.Message.Chat.Type == "private"}
 
 	// Card navigation callbacks (act:/nav: prefixes) — update the card in place.
 	if strings.HasPrefix(data, "act:") || strings.HasPrefix(data, "nav:") {

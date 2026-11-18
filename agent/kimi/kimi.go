@@ -140,6 +140,14 @@ func normalizeEffort(raw string) string {
 
 func (a *Agent) Name() string { return "kimi" }
 
+// Capabilities implements core.CapabilityProvider: chat login uses Kimi
+// Code's device-code flow (`kimi login`); the CLI has no logout.
+func (a *Agent) Capabilities() core.AgentCapabilities {
+	return core.AgentCapabilities{
+		Auth: core.AuthCaps{Login: true, Status: true, Flow: core.AuthFlowDeviceCode},
+	}
+}
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -169,6 +177,15 @@ func (a *Agent) GetModel() string {
 }
 
 // AvailableModels lists the model aliases Kimi Code's own picker offers.
+// CLIPath implements core.CLIPathProvider: the binary resolved at start
+// (possibly off PATH, or a configured cmd), which the engine watches for
+// upgrades.
+func (a *Agent) CLIPath() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cmd
+}
+
 // InvalidateModelCache implements core.ModelCacheInvalidator: after a CLI
 // upgrade the model list is fetched again.
 func (a *Agent) InvalidateModelCache() { a.catalog.invalidate() }

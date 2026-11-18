@@ -36,3 +36,10 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 	}
 	return nil
 }
+
+// KillGroupOnCancel makes context cancellation kill cmd's process group, for
+// commands that already lead their own group (a PTY child is a session
+// leader); UseProcessGroup would conflict with that.
+func KillGroupOnCancel(cmd *exec.Cmd) {
+	cmd.Cancel = func() error { return KillProcessGroup(cmd) }
+}

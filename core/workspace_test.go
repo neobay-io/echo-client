@@ -158,7 +158,9 @@ func TestSetupWorkspaceFallsBackToLocalBaseWhenFetchFails(t *testing.T) {
 	repoPath := initGitRepo(t)
 	worktreePath := filepath.Join(t.TempDir(), "worktrees", "task-local-fallback")
 
-	if _, err := runGit(repoPath, "remote", "add", "origin", "ssh://git@example.invalid/repo.git"); err != nil {
+	// A remote that fails at once without the network (an unreachable ssh
+	// host can take minutes to fail, depending on the machine's ssh setup).
+	if _, err := runGit(repoPath, "remote", "add", "origin", "file://"+filepath.Join(t.TempDir(), "missing.git")); err != nil {
 		t.Fatalf("git remote add origin: %v", err)
 	}
 	localMainSHA, err := runGit(repoPath, "rev-parse", "main")

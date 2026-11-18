@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -47,6 +48,9 @@ type quotedMessage struct {
 }
 
 type Platform struct {
+	// privateChats remembers chat IDs that messages reported as p2p, so card
+	// button presses (which carry no chat type) keep the private-chat flag.
+	privateChats          sync.Map
 	appID                 string
 	appSecret             string
 	reactionEmoji         string
@@ -307,6 +311,9 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		sessionKey = fmt.Sprintf("feishu:%s:%s", chatID, userID)
 	}
 	rctx := replyContext{messageID: messageID, chatID: chatID, private: chatType == "p2p"}
+	if chatType == "p2p" && chatID != "" {
+		p.privateChats.Store(chatID, true)
+	}
 	quoted := p.fetchQuotedMessage(msg.ParentId, msg.RootId)
 
 	switch msgType {
@@ -1112,7 +1119,11 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	} else {
 		sessionKey = fmt.Sprintf("feishu:%s:%s", chatID, userID)
 	}
-	rctx := replyContext{messageID: messageID, chatID: chatID}
+	// Card callbacks carry no chat type. A chat is private if a message from
+	// it said so (Feishu's own p2p chat type); otherwise the press is treated
+	// as a group one, so commands that need a private chat refuse it.
+	_, private := p.privateChats.Load(chatID)
+	rctx := replyContext{messageID: messageID, chatID: chatID, private: private && chatID != ""}
 
 	if (strings.HasPrefix(data, "nav:") || strings.HasPrefix(data, "act:")) && p.cardNavHandler != nil {
 		if card := p.cardNavHandler(data, sessionKey); card != nil {
@@ -1559,7 +1570,8 @@ func (p *Platform) parsePostContent(messageID, raw string) ([]string, []core.Ima
 			return p.extractPostParts(messageID, &lang)
 		}
 	}
-	slog.Error("feishu: failed to parse post content", "raw", raw)
+	// Not the content itself: it may be an /auth code or other secret.
+	slog.Error("feishu: failed to parse post content", "message_id", messageID, "raw_len", len(raw))
 	return nil, nil
 }
 

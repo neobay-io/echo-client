@@ -150,7 +150,7 @@ func TestAuthCommandFollowsCapabilities(t *testing.T) {
 	e := NewEngine("project", &noRoutingAuthAgent{}, []Platform{p}, "", LangEnglish)
 	m, _ := testAuthManager(0)
 	started := false
-	m.start = func(context.Context) (authProcess, error) {
+	m.drivers["claudecode"].start = func(context.Context, authLoginOptions) (authProcess, error) {
 		started = true
 		return nil, context.Canceled
 	}
@@ -162,7 +162,7 @@ func TestAuthCommandFollowsCapabilities(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !strings.Contains(strings.Join(p.sent, "\n"), "not available for this project's agent") {
+	if !strings.Contains(strings.Join(p.sent, "\n"), "not available for this agent") {
 		t.Fatalf("replies = %#v", p.sent)
 	}
 }

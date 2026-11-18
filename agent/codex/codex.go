@@ -108,6 +108,14 @@ func normalizeReasoningLevel(raw string) string {
 
 func (a *Agent) Name() string { return "codex" }
 
+// Capabilities implements core.CapabilityProvider: chat login uses Codex's
+// device-code flow (`codex login --device-auth`).
+func (a *Agent) Capabilities() core.AgentCapabilities {
+	return core.AgentCapabilities{
+		Auth: core.AuthCaps{Login: true, Status: true, Logout: true, Flow: core.AuthFlowDeviceCode},
+	}
+}
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

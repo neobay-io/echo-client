@@ -188,7 +188,7 @@ func TestAuthRefusesDeclarationsWithoutImplementation(t *testing.T) {
 		p := &authTestPlatform{}
 		e := NewEngine("project", &noRoutingAuthAgent{}, []Platform{p}, "", LangEnglish)
 		m, _ := testAuthManager(0)
-		m.start = func(context.Context) (authProcess, error) {
+		m.drivers["claudecode"].start = func(context.Context, authLoginOptions) (authProcess, error) {
 			started = true
 			return nil, context.Canceled
 		}
@@ -200,10 +200,16 @@ func TestAuthRefusesDeclarationsWithoutImplementation(t *testing.T) {
 		return started, strings.Join(p.sent, "\n")
 	}
 
-	// A non-Claude adapter declaring auth must not reach Claude's login.
+	// A non-Claude adapter's login goes to its own driver (stubbed to fail
+	// in tests), never to Claude's.
 	codex := &declaringAgent{caps: AgentCapabilities{Auth: AuthCaps{Login: true, Status: true, Flow: AuthFlowDeviceCode}}}
-	if started, sent := run(codex, "/auth login"); started || !strings.Contains(sent, "not available") {
+	if started, sent := run(codex, "/auth login"); started || !strings.Contains(sent, "Codex authentication failed") {
 		t.Fatalf("codex auth: started=%v reply=%q", started, sent)
+	}
+	// A flow its driver does not implement is refused.
+	codexURL := &declaringAgent{caps: AgentCapabilities{Auth: AuthCaps{Login: true, Status: true, Flow: AuthFlowURLCode}}}
+	if started, sent := run(codexURL, "/auth login"); started || !strings.Contains(sent, "not available") {
+		t.Fatalf("codex url-code auth: started=%v reply=%q", started, sent)
 	}
 	// Status-only declaration does not permit login.
 	statusOnly := &claudeNamedAgent{declaringAgent{caps: AgentCapabilities{Auth: AuthCaps{Status: true, Flow: AuthFlowURLCode}}}}

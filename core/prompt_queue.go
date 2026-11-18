@@ -149,6 +149,25 @@ func (e *Engine) enqueuePrompt(queueKey, localSessionID, agentSessionID string, 
 	return e.enqueuePromptLocked(state, queueKey, localSessionID, agentSessionID, "user", "", msg)
 }
 
+// enqueuePromptFront puts a user message at the head of a queue (a turn that
+// could not start and keeps its place).
+func (e *Engine) enqueuePromptFront(queueKey, localSessionID, agentSessionID string, msg *Message) error {
+	e.promptQueueMu.Lock()
+	defer e.promptQueueMu.Unlock()
+	state := e.promptQueues[queueKey]
+	if state == nil {
+		state = &promptQueueState{}
+		e.promptQueues[queueKey] = state
+	}
+	if _, err := e.enqueuePromptLocked(state, queueKey, localSessionID, agentSessionID, "user", "", msg); err != nil {
+		return err
+	}
+	last := state.Items[len(state.Items)-1]
+	copy(state.Items[1:], state.Items[:len(state.Items)-1])
+	state.Items[0] = last
+	return nil
+}
+
 func (e *Engine) enqueuePromptLocked(state *promptQueueState, queueKey, localSessionID, agentSessionID, source, jobID string, msg *Message) (int, error) {
 	if len(state.Items) >= maxPromptQueueItems {
 		return 0, fmt.Errorf("queue full")

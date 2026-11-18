@@ -2542,6 +2542,12 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 	}
 	defer agentTurn.Unlock()
 
+	// An upgrade may have begun since this message was accepted or dequeued:
+	// put it back at the head of the queue rather than turn it away.
+	if e.requeueForUpgrade(p, msg, session) {
+		return
+	}
+
 	turnStart := time.Now()
 	prompt := e.buildAgentPrompt(session, msg)
 
@@ -2557,6 +2563,10 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 	state.mu.Unlock()
 
 	if state.agentSession == nil {
+		if e.requeueForUpgrade(p, msg, session) {
+			session.dropLastHistory("user", prompt)
+			return
+		}
 		e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to start agent session"))
 		return
 	}
@@ -2815,6 +2825,23 @@ func (e *Engine) queueUntilUpgradeDone(p Platform, msg *Message, clearPendingAtt
 		e.clearPendingAttachments(msg.SessionKey) // they travel with the queued message
 	}
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf("⏳ %s upgrade is in progress. Your message is queued (#%d) and will be sent when it finishes.", e.agentUpgradeName(), pos))
+	e.drainQueueAfterUpgrade(queueKey)
+	return true
+}
+
+// requeueForUpgrade puts a message that is about to start back at the head
+// of its chat's queue while the agent's CLI is being upgraded. It reports
+// false (and does nothing) when no upgrade is running or the queue is full.
+func (e *Engine) requeueForUpgrade(p Platform, msg *Message, session *Session) bool {
+	if !e.agentUpgradeBlocksNewTurns() {
+		return false
+	}
+	queueKey, agentSessionID := e.promptQueueKey(msg.SessionKey, session)
+	if err := e.enqueuePromptFront(queueKey, session.ID, agentSessionID, msg); err != nil {
+		slog.Warn("could not requeue message during agent upgrade", "session", msg.SessionKey, "error", err)
+		return false
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("⏳ %s upgrade is in progress. Your message is queued (#%d) and will be sent when it finishes.", e.agentUpgradeName(), 1))
 	e.drainQueueAfterUpgrade(queueKey)
 	return true
 }

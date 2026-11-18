@@ -50,8 +50,37 @@ func latestAgentVersion(ctx context.Context, runner AgentUpgradeCommandRunner, c
 	return lastAgentVersion(out)
 }
 
-// atOrAboveVersion reports whether installed is known to be >= latest.
+// atOrAboveVersion reports whether installed is known to be >= latest. A
+// prerelease (1.2.3-rc1) is below its release (1.2.3); two prereleases of the
+// same version are compared only for equality.
 func atOrAboveVersion(installed, latest string) bool {
 	ok, cmp := compareVersionStrings(installed, latest)
-	return ok && cmp >= 0
+	if !ok || cmp < 0 {
+		return false
+	}
+	if cmp > 0 {
+		return true
+	}
+	instPre, latestPre := prereleaseOf(installed), prereleaseOf(latest)
+	switch {
+	case instPre == "":
+		return true
+	case latestPre == "":
+		return false
+	default:
+		return instPre == latestPre
+	}
+}
+
+// prereleaseOf returns the prerelease part of a version ("rc1" in
+// "codex-cli 1.2.3-rc1"), or "".
+func prereleaseOf(v string) string {
+	v = extractAgentVersion(v)
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i] // build metadata does not count
+	}
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		return v[i+1:]
+	}
+	return ""
 }

@@ -69,7 +69,7 @@ func (p *fakeAuthProcess) finish(err error) {
 func testAuthManager(timeout time.Duration) (*AgentAuthManager, <-chan *fakeAuthProcess) {
 	m := NewAgentAuthManager(AgentAuthConfig{Enabled: true, AllowedUserIDs: []string{"admin"}, Timeout: timeout}, nil)
 	processes := make(chan *fakeAuthProcess, 1)
-	m.start = func(ctx context.Context) (authProcess, error) {
+	m.drivers["claudecode"].start = func(ctx context.Context, _ authLoginOptions) (authProcess, error) {
 		p := newFakeAuthProcess(ctx)
 		processes <- p
 		go func() {
@@ -77,7 +77,21 @@ func testAuthManager(timeout time.Duration) (*AgentAuthManager, <-chan *fakeAuth
 		}()
 		return p, nil
 	}
-	m.probe = func(context.Context) (bool, error) { return true, nil }
+	m.drivers["claudecode"].status = func(context.Context) (authStatus, error) { return authStatus{LoggedIn: true}, nil }
+	// No test may run a real CLI login, status or logout.
+	for name, d := range m.drivers {
+		if name == "claudecode" {
+			continue
+		}
+		d.start = func(context.Context, authLoginOptions) (authProcess, error) {
+			return nil, errors.New("test: real CLI login")
+		}
+		d.status = func(context.Context) (authStatus, error) { return authStatus{}, errors.New("test: real CLI status") }
+		if d.logout != nil {
+			d.logout = func(context.Context) error { return errors.New("test: real CLI logout") }
+		}
+	}
+	m.drivers["claudecode"].logout = func(context.Context) error { return errors.New("test: real CLI logout") }
 	return m, processes
 }
 
@@ -118,13 +132,13 @@ func TestAgentAuthOwnerIsolationAndSuccess(t *testing.T) {
 	owner := authOwner{"project", "private:admin", "admin"}
 	updates := make(chan authUpdate, 4)
 	refreshed := make(chan struct{})
-	m.refresh = func() { close(refreshed) }
-	if err := m.begin(context.Background(), owner, func(u authUpdate) { updates <- u }); err != nil {
+	m.refresh = func(string) { close(refreshed) }
+	if err := m.begin(context.Background(), "claudecode", owner, func(u authUpdate) { updates <- u }); err != nil {
 		t.Fatal(err)
 	}
 	p := <-processes
-	if update := waitAuthUpdate(t, updates, "link"); update.url != testAuthURL {
-		t.Fatalf("URL = %q", update.url)
+	if update := waitAuthUpdate(t, updates, "link"); update.prompt.URL != testAuthURL {
+		t.Fatalf("URL = %q", update.prompt.URL)
 	}
 	for _, other := range []authOwner{
 		{"other-project", owner.SessionKey, owner.UserID},
@@ -138,7 +152,7 @@ func TestAgentAuthOwnerIsolationAndSuccess(t *testing.T) {
 			t.Fatalf("accepted cancellation from %#v", other)
 		}
 	}
-	if err := m.begin(context.Background(), owner, func(authUpdate) {}); err == nil {
+	if err := m.begin(context.Background(), "claudecode", owner, func(authUpdate) {}); err == nil {
 		t.Fatal("accepted concurrent login")
 	}
 	for _, bad := range []string{"sk-ant-oat01-token", "code\ncommand", "code\rcommand", "code with spaces", "", strings.Repeat("x", 2049)} {
@@ -180,7 +194,7 @@ func TestAgentAuthCancellationTimeoutAndRevocation(t *testing.T) {
 			m, _ := testAuthManager(timeout)
 			owner := authOwner{"project", "chat", "admin"}
 			updates := make(chan authUpdate, 4)
-			if err := m.begin(context.Background(), owner, func(u authUpdate) { updates <- u }); err != nil {
+			if err := m.begin(context.Background(), "claudecode", owner, func(u authUpdate) { updates <- u }); err != nil {
 				t.Fatal(err)
 			}
 			waitAuthUpdate(t, updates, "link")
@@ -207,15 +221,15 @@ func TestAgentAuthFailedLoginNeverRefreshes(t *testing.T) {
 	for _, mode := range []string{"exit", "logged-out", "status-error"} {
 		t.Run(mode, func(t *testing.T) {
 			m, processes := testAuthManager(time.Second)
-			m.refresh = func() { t.Error("failed login refreshed sessions") }
+			m.refresh = func(string) { t.Error("failed login refreshed sessions") }
 			switch mode {
 			case "logged-out":
-				m.probe = func(context.Context) (bool, error) { return false, nil }
+				m.drivers["claudecode"].status = func(context.Context) (authStatus, error) { return authStatus{}, nil }
 			case "status-error":
-				m.probe = func(context.Context) (bool, error) { return false, errors.New("secret response") }
+				m.drivers["claudecode"].status = func(context.Context) (authStatus, error) { return authStatus{}, errors.New("secret response") }
 			}
 			updates := make(chan authUpdate, 4)
-			if err := m.begin(context.Background(), authOwner{"p", "c", "admin"}, func(u authUpdate) { updates <- u }); err != nil {
+			if err := m.begin(context.Background(), "claudecode", authOwner{"p", "c", "admin"}, func(u authUpdate) { updates <- u }); err != nil {
 				t.Fatal(err)
 			}
 			p := <-processes
@@ -293,7 +307,7 @@ func TestAuthCommandsRequireAdminPrivateChat(t *testing.T) {
 			p := &authTestPlatform{}
 			e := NewEngine("project", &noRoutingAuthAgent{}, []Platform{p}, "", LangEnglish)
 			m, _ := testAuthManager(time.Second)
-			m.start = func(context.Context) (authProcess, error) {
+			m.drivers["claudecode"].start = func(context.Context, authLoginOptions) (authProcess, error) {
 				t.Error("forbidden login started")
 				return nil, errors.New("forbidden")
 			}
@@ -338,7 +352,7 @@ func TestAuthPendingPlainCodeIsNotRouted(t *testing.T) {
 	e.SetAgentAuthManager(m)
 	updates := make(chan authUpdate, 4)
 	owner := authOwner{"project", "chat", "admin"}
-	if err := m.begin(context.Background(), owner, func(u authUpdate) { updates <- u }); err != nil {
+	if err := m.begin(context.Background(), "claudecode", owner, func(u authUpdate) { updates <- u }); err != nil {
 		t.Fatal(err)
 	}
 	waitAuthUpdate(t, updates, "link")
@@ -544,18 +558,18 @@ func TestAgentAuthRealPTYLifecycle(t *testing.T) {
 				timeout = 500 * time.Millisecond
 			}
 			m, _ := testAuthManager(timeout)
-			m.start = func(ctx context.Context) (authProcess, error) {
+			m.drivers["claudecode"].start = func(ctx context.Context, _ authLoginOptions) (authProcess, error) {
 				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAuthPTYHelper$")
 				cmd.Env = MergeEnv(os.Environ(), []string{"ECHO_AUTH_PTY_HELPER=1", "GORACE=atexit_sleep_ms=0"})
 				file, err := pty.Start(cmd)
 				if err != nil {
 					return nil, err
 				}
-				return &claudeLoginProcess{File: file, cmd: cmd}, nil
+				return &authCLIProcess{File: file, cmd: cmd}, nil
 			}
 			owner := authOwner{"project", "chat", "admin"}
 			updates := make(chan authUpdate, 4)
-			if err := m.begin(context.Background(), owner, func(u authUpdate) { updates <- u }); err != nil {
+			if err := m.begin(context.Background(), "claudecode", owner, func(u authUpdate) { updates <- u }); err != nil {
 				t.Fatal(err)
 			}
 			waitAuthUpdate(t, updates, "link")
@@ -581,7 +595,7 @@ func TestAgentAuthRealPTYLifecycle(t *testing.T) {
 func TestAgentAuthEnvironmentOverride(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-token")
 	m, _ := testAuthManager(time.Second)
-	if err := m.begin(context.Background(), authOwner{"p", "c", "admin"}, func(authUpdate) {}); err == nil || err.Error() != "auth_override" {
+	if err := m.begin(context.Background(), "claudecode", authOwner{"p", "c", "admin"}, func(authUpdate) {}); err == nil || err.Error() != "auth_override" {
 		t.Fatalf("environment override error = %v", err)
 	}
 }

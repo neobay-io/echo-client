@@ -3,6 +3,7 @@ package core
 import (
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -12,6 +13,13 @@ import (
 // version can bring new models.
 type ModelCacheInvalidator interface {
 	InvalidateModelCache()
+}
+
+// CLIPathProvider is implemented by agents that run a CLI path they resolved
+// themselves (a configured cmd, or a vendor directory off PATH), so the
+// engine watches that binary rather than the one PATH lookup finds.
+type CLIPathProvider interface {
+	CLIPath() string
 }
 
 // agentCLIIdentity identifies the agent CLI binary on disk. An upgrade
@@ -26,11 +34,26 @@ func (a agentCLIIdentity) equal(b agentCLIIdentity) bool {
 	return a.path == b.path && a.size == b.size && a.mtime.Equal(b.mtime)
 }
 
-// agentCLIIdentityOf is replaced in tests.
-var agentCLIIdentityOf = func(agentType string) (agentCLIIdentity, bool) {
-	path, err := ResolveAgentCLI(agentType)
-	if err != nil {
-		return agentCLIIdentity{}, false
+// agentCLIIdentityOf identifies the binary agent runs. Replaced in tests.
+var agentCLIIdentityOf = func(agent Agent) (agentCLIIdentity, bool) {
+	var path string
+	if p, ok := agent.(CLIPathProvider); ok {
+		path = p.CLIPath()
+	}
+	if path == "" {
+		resolved, err := ResolveAgentCLI(agent.Name())
+		if err != nil {
+			return agentCLIIdentity{}, false
+		}
+		path = resolved
+	}
+	if !filepath.IsAbs(path) {
+		// A bare command name: the binary PATH lookup finds when it runs.
+		resolved, err := exec.LookPath(path)
+		if err != nil {
+			return agentCLIIdentity{}, false
+		}
+		path = resolved
 	}
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -54,7 +77,7 @@ func (e *Engine) noteAgentCLIChange() {
 	if e.agent == nil {
 		return
 	}
-	id, ok := agentCLIIdentityOf(e.agent.Name())
+	id, ok := agentCLIIdentityOf(e.agent)
 	if !ok {
 		return
 	}

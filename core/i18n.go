@@ -2597,15 +2597,15 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	// Builtin command descriptions
 	MsgKey("auth"): {
-		LangEnglish:            "Claude login: status | login | code <code> | cancel (admin private chat)",
-		LangChinese:            "Claude 登录：status | login | code <授权码> | cancel（管理员私聊）",
-		LangTraditionalChinese: "Claude 登入：status | login | code <授權碼> | cancel（管理員私聊）",
-		LangJapanese:           "Claude 認証: status | login | code <コード> | cancel（管理者の個別チャット）",
-		LangSpanish:            "Autenticación Claude: status | login | code <código> | cancel (chat privado de administrador)",
+		LangEnglish:            "Agent CLI login: status | login | logout [claude|codex|kimi|agy] | code <code> | cancel (admin private chat)",
+		LangChinese:            "Agent CLI 登录：status | login | logout [claude|codex|kimi|agy] | code <授权码> | cancel（管理员私聊）",
+		LangTraditionalChinese: "Agent CLI 登入：status | login | logout [claude|codex|kimi|agy] | code <授權碼> | cancel（管理員私聊）",
+		LangJapanese:           "エージェント CLI 認証: status | login | logout [claude|codex|kimi|agy] | code <コード> | cancel（管理者の個別チャット）",
+		LangSpanish:            "Inicio de sesión de CLI: status | login | logout [claude|codex|kimi|agy] | code <código> | cancel (chat privado de administrador)",
 	},
 	MsgKey("auth_usage"): {
-		LangEnglish: "Usage: /auth status | /auth login | /auth code <one-time authorization code> | /auth cancel. Never send persistent tokens.",
-		LangChinese: "用法：/auth status | /auth login | /auth code <一次性授权码> | /auth cancel。请勿发送长期 token。",
+		LangEnglish: "Usage: /auth [status|login|logout] [claude|codex|kimi|agy] | /auth code <one-time authorization code> | /auth cancel. Without an agent name, the project's agent is used. Never send persistent tokens.",
+		LangChinese: "用法：/auth [status|login|logout] [claude|codex|kimi|agy] | /auth code <一次性授权码> | /auth cancel。不写 agent 名称时使用当前项目的 agent。请勿发送长期 token。",
 	},
 	MsgKey("auth_denied"): {
 		LangEnglish: "Remote login is disabled or you are not an authorized administrator. Configure [agent_auth] and explicit allowed_user_ids.",
@@ -2616,8 +2616,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "请在管理员与机器人的私聊中使用 /auth。不接受转发、引用或带附件的授权消息。",
 	},
 	MsgKey("auth_unsupported"): {
-		LangEnglish: "Remote login is not available for this project's agent yet.",
-		LangChinese: "当前项目的 Agent 暂不支持远程登录。",
+		LangEnglish: "Chat login is not available for this agent. Name one that has it: /auth status claude|codex|kimi|agy.",
+		LangChinese: "这个 Agent 不支持在聊天里登录。可以指定支持的 agent：/auth status claude|codex|kimi|agy。",
 	},
 	MsgKey("mode_unknown"): {
 		LangEnglish:            "❌ Unknown permission mode `%s`; the mode was not changed.",
@@ -2679,8 +2679,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "daemon 环境中设置了 CLAUDE_CODE_OAUTH_TOKEN，请先移除该覆盖再进行浏览器登录，否则新 Claude 进程仍会使用该 token。",
 	},
 	MsgKey("auth_link"): {
-		LangEnglish: "Open this official Claude link in your browser:\n%s\n\nAfter authorizing, submit the one-time code using /auth code <code>. The code is handled by the CLI, not the Agent. Chat providers may retain your message; never paste a persistent token. /auth cancel aborts login.",
-		LangChinese: "请在浏览器中打开 Claude 官方授权链接：\n%s\n\n授权后发送 /auth code <一次性授权码>。授权码只交给 CLI，不会发送给 Agent。聊天平台可能保留消息，请勿粘贴长期 token。可用 /auth cancel 取消。",
+		LangEnglish: "Open this official %s login link in your browser:\n%s\n\nAfter authorizing, submit the one-time code using /auth code <code>. The code is handled by the CLI, not the Agent. Chat providers may retain your message; never paste a persistent token. /auth cancel aborts login.",
+		LangChinese: "请在浏览器中打开 %s 官方登录链接：\n%s\n\n授权后发送 /auth code <一次性授权码>。授权码只交给 CLI，不会发送给 Agent。聊天平台可能保留消息，请勿粘贴长期 token。可用 /auth cancel 取消。",
 	},
 	MsgKey("auth_code_hint"): {
 		LangEnglish: "Login is pending. This message was not sent to the Agent. Submit only a one-time code using /auth code <code>, or use /auth cancel.",
@@ -2699,36 +2699,76 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "请等待授权链接，或等待已提交的授权码处理完成。如需重新提交，请取消后重新登录。",
 	},
 	MsgKey("auth_submitted"): {
-		LangEnglish: "Authorization code submitted. Waiting for Claude to complete login.",
-		LangChinese: "授权码已提交，正在等待 Claude 完成登录。",
+		LangEnglish: "Authorization code submitted. Waiting for %s to complete login.",
+		LangChinese: "授权码已提交，正在等待 %s 完成登录。",
 	},
 	MsgKey("auth_success"): {
-		LangEnglish: "Claude login completed. Running replies are allowed to finish; cached Claude processes will be replaced before their next turn. Local sessions and history are retained. Missing transcripts require separate recovery.",
-		LangChinese: "Claude 登录成功。正在运行的回复会继续完成，旧 Claude 进程会在下一轮启动前替换。本地会话和历史保留；缺失的 transcript 仍需单独恢复。",
+		LangEnglish: "%s login completed. Running replies are allowed to finish; cached agent processes will be replaced before their next turn. Local sessions and history are retained.",
+		LangChinese: "%s 登录成功。正在运行的回复会继续完成，旧的 agent 进程会在下一轮开始前替换。本地会话和历史保留。",
 	},
 	MsgKey("auth_failed"): {
-		LangEnglish: "Claude authentication failed or its CLI response could not be verified. Try /auth login again; also check that Claude CLI is installed and reachable.",
-		LangChinese: "Claude 认证失败，或无法验证 CLI 的结果。请重新 /auth login，并确认 Claude CLI 已安装且网络可用。",
+		LangEnglish: "%s authentication failed or its CLI response could not be verified. Try /auth login again; also check that the CLI is installed and the network is reachable.",
+		LangChinese: "%s 认证失败，或无法验证 CLI 的结果。请重新 /auth login，并确认 CLI 已安装且网络可用。",
 	},
 	MsgKey("auth_timeout"): {
-		LangEnglish: "Claude login timed out. Start again with /auth login.",
-		LangChinese: "Claude 登录已超时，请重新发送 /auth login。",
+		LangEnglish: "%s login timed out. Start again with /auth login.",
+		LangChinese: "%s 登录已超时，请重新发送 /auth login。",
 	},
 	MsgKey("auth_cancelled"): {
-		LangEnglish: "Claude login cancelled.",
-		LangChinese: "Claude 登录已取消。",
+		LangEnglish: "%s login cancelled.",
+		LangChinese: "%s 登录已取消。",
 	},
 	MsgKey("auth_pending"): {
-		LangEnglish: "A Claude login is pending for this chat. /auth cancel aborts it.",
-		LangChinese: "当前私聊有进行中的 Claude 登录，可用 /auth cancel 取消。",
+		LangEnglish: "A %s login is pending for this chat. /auth cancel aborts it.",
+		LangChinese: "当前私聊有进行中的 %s 登录，可用 /auth cancel 取消。",
 	},
 	MsgKey("auth_logged_in"): {
-		LangEnglish: "Claude CLI reports logged in. This credential check does not verify a live model request.",
-		LangChinese: "Claude CLI 显示已登录。此凭证检查不等于实时模型请求验证。",
+		LangEnglish: "%s CLI reports logged in%s. This credential check does not verify a live model request.",
+		LangChinese: "%s CLI 显示已登录%s。此凭证检查不等于实时模型请求验证。",
+	},
+	MsgKey("auth_device"): {
+		LangEnglish: "To log in %s, open this official link in your browser:\n%s\n\nand enter the code: %s\n\nNothing needs to be sent back here; the CLI finishes on its own once you approve. /auth cancel aborts login.",
+		LangChinese: "登录 %s：请在浏览器中打开官方链接：\n%s\n\n并输入代码：%s\n\n不需要回贴任何内容，授权后 CLI 会自动完成登录。可用 /auth cancel 取消。",
+	},
+	MsgKey("auth_button_cancel"): {
+		LangEnglish: "Cancel login",
+		LangChinese: "取消登录",
+	},
+	MsgKey("auth_button_status"): {
+		LangEnglish: "Check status",
+		LangChinese: "查看状态",
+	},
+	MsgKey("auth_region_required"): {
+		LangEnglish: "Kimi Code needs a login region: send /auth login kimi mainland-cn (kimi.com) or /auth login kimi global (kimi.ai).",
+		LangChinese: "Kimi Code 登录需要指定区域：发送 /auth login kimi mainland-cn（kimi.com）或 /auth login kimi global（kimi.ai）。",
+	},
+	MsgKey("auth_code_not_needed"): {
+		LangEnglish: "This login does not take a code here: approve it in the browser and the CLI finishes on its own.",
+		LangChinese: "这个登录不需要在这里提交代码：在浏览器里授权后 CLI 会自动完成。",
+	},
+	MsgKey("auth_expires"): {
+		LangEnglish: "expires %s",
+		LangChinese: "%s 过期",
+	},
+	MsgKey("auth_logout_confirm"): {
+		LangEnglish: "This logs %s out on this machine, for every chat and every echo-client service that uses it. Send /auth logout %s confirm to proceed.",
+		LangChinese: "这会让本机的 %s 退出登录，所有使用它的聊天和 echo-client 服务都会受影响。确认请发送 /auth logout %s confirm。",
+	},
+	MsgKey("auth_logout_done"): {
+		LangEnglish: "%s logged out. Cached agent processes will be replaced before their next turn; use /auth login to log in again.",
+		LangChinese: "%s 已退出登录。旧的 agent 进程会在下一轮开始前替换；可用 /auth login 重新登录。",
+	},
+	MsgKey("auth_logout_unsupported"): {
+		LangEnglish: "%s has no logout command.",
+		LangChinese: "%s 没有退出登录的命令。",
+	},
+	MsgKey("auth_logout_failed"): {
+		LangEnglish: "%s logout failed. Check the service log.",
+		LangChinese: "%s 退出登录失败，请查看服务日志。",
 	},
 	MsgKey("auth_logged_out"): {
-		LangEnglish: "Claude CLI is not logged in. Use /auth login.",
-		LangChinese: "Claude CLI 未登录，请使用 /auth login。",
+		LangEnglish: "%s CLI is not logged in. Use /auth login %s.",
+		LangChinese: "%s CLI 未登录，请使用 /auth login %s。",
 	},
 	MsgBuiltinCmdNew: {
 		LangEnglish:            "Start a new session, arg: [name]",

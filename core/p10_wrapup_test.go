@@ -93,7 +93,7 @@ func TestAgentCLIChangeRetiresIdleSessions(t *testing.T) {
 	var mu sync.Mutex
 	id := agentCLIIdentity{path: "/u/.local/share/claude/versions/2.1.326", size: 1}
 	prev := agentCLIIdentityOf
-	agentCLIIdentityOf = func(string) (agentCLIIdentity, bool) {
+	agentCLIIdentityOf = func(Agent) (agentCLIIdentity, bool) {
 		mu.Lock()
 		defer mu.Unlock()
 		return id, true

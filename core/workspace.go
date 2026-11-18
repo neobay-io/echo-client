@@ -13,7 +13,9 @@ import (
 	"time"
 )
 
-const workspaceCommandTimeout = 30 * time.Second
+// workspaceCommandTimeout bounds each git command; a var for tests.
+var workspaceCommandTimeout = 30 * time.Second
+
 const workspaceBranchPrefix = "echo/"
 
 var workspaceRepoLocks sync.Map
@@ -982,6 +984,10 @@ func runGitCommand(dir string, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	// On timeout kill git's whole process group: an ssh child of `git fetch`
+	// otherwise keeps the output pipes open and Run never returns.
+	UseProcessGroup(cmd)
+	cmd.WaitDelay = 5 * time.Second
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
