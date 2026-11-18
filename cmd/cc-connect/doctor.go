@@ -33,7 +33,8 @@ func runDoctor(args []string) {
 }
 
 // writeDoctorReport prints one block per agent type and reports whether any
-// CLI that is installed looked unhealthy (broken install or failed --version).
+// CLI that is installed looked unhealthy (broken install, failed --version,
+// or help no longer listing an option the adapter passes).
 func writeDoctorReport(ctx context.Context, w io.Writer, agents []string) (unhealthy bool) {
 	fmt.Fprintf(w, "PATH=%s\n\n", os.Getenv("PATH"))
 	for _, agentType := range agents {
@@ -55,6 +56,10 @@ func writeDoctorReport(ctx context.Context, w io.Writer, agents []string) (unhea
 			}
 			if info.VersionErr != "" {
 				fmt.Fprintf(w, "   version check failed: %s\n", info.VersionErr)
+				unhealthy = true
+			} else if problems := core.CheckAgentCLIOptions(ctx, agentType, info.Selected.Path); len(problems) > 0 {
+				// The same check upgrades run before keeping a new version.
+				fmt.Fprintf(w, "   options: %s\n", strings.Join(problems, "; "))
 				unhealthy = true
 			}
 		}

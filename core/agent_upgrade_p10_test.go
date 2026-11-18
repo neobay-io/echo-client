@@ -85,7 +85,9 @@ func TestUpgradeTargetsTheBinaryAgentsRun(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].Err != nil {
 		t.Fatalf("Run = %#v, %v", results, err)
 	}
-	if len(ran) != 3 || ran[0] != "'"+standaloneCodexPath+"' --version" || ran[1] != codexStandaloneInstallCommand {
+	// Version, latest-release lookup, installer, version (smoke check).
+	if len(ran) != 4 || ran[0] != "'"+standaloneCodexPath+"' --version" || !strings.HasPrefix(ran[1], "npm view '@openai/codex' version") ||
+		ran[2] != codexStandaloneInstallCommand || ran[3] != ran[0] {
 		t.Fatalf("commands = %#v", ran)
 	}
 	st := mgr.Statuses(context.Background())
@@ -116,7 +118,7 @@ func TestExplicitCommandsWinOverDetectedRoute(t *testing.T) {
 	if _, err := mgr.Run(context.Background(), "codex"); err != nil {
 		t.Fatal(err)
 	}
-	if len(ran) != 3 || ran[0] != "/abs/codex --version" || ran[1] != "my-upgrade" {
+	if len(ran) != 4 || ran[0] != "/abs/codex --version" || ran[2] != "my-upgrade" || ran[3] != ran[0] {
 		t.Fatalf("commands = %#v", ran)
 	}
 }
@@ -243,10 +245,13 @@ func TestUpgradeFailuresAreNotifiedAndPersisted(t *testing.T) {
 	mgr := NewAgentUpgradeManager(cfg)
 	mgr.SetStatePath(path)
 	mgr.SetCommandRunner(func(_ context.Context, cmd string) (string, error) {
-		if cmd == "custom-upgrade" {
+		switch cmd {
+		case "custom-upgrade":
 			return "curl: (28) timed out", errors.New("exit status 28")
+		case "codex --version":
+			return "codex 1.0.0", nil
 		}
-		return "codex 1.0.0", nil
+		return "", errors.New("offline") // latest-release lookup
 	})
 	var notes []string
 	mgr.SetNotifier(func(_, _, text string) error { notes = append(notes, text); return nil })

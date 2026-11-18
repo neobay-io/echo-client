@@ -245,6 +245,11 @@ func (e *Engine) completePromptTurn(startKey string, sessionKey string, session 
 }
 
 func (e *Engine) drainPromptQueue(queueKey string) {
+	if e.agentUpgradeBlocksNewTurns() {
+		// A queued turn would only be turned away now; run it afterwards.
+		e.drainQueueAfterUpgrade(queueKey)
+		return
+	}
 	item, ok := e.popNextQueuedPrompt(queueKey)
 	if !ok {
 		return

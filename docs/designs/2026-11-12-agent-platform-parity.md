@@ -434,7 +434,7 @@ Echo 侧（独立仓库，单独 PR）：
 - Telegram：换算后撞名的命令（如 `deploy-prod` 和 `deploy_prod`）里，本来就合法的名字保留，换算来的那个不注册并打警告；`SendFile` 只接受普通文件（拒绝管道和设备文件），自己打开文件、按检查过的大小读取并负责关闭；超过 1024 字的说明按 4096 字（UTF-16 计数）切成多条纯文本发送，说明发送失败时文件照发并返回错误。
 - 日志脱敏：`-p`、`--prompt` 后面的参数一律脱敏（包括以 `-` 开头的提示词）；`--print` 只在后面不是选项时脱敏。
 - 测试：`TestJobManagerReloadMarksNonTerminalJobsOrphaned` 原来在磁盘写入前就重新加载，偶尔失败；改为等 runner 被调用后再加载。
-- 未改：`send-file` 可以发送服务进程读得到的任何绝对路径，飞书和 Telegram 一致；是否限制在工作目录内待定。
+- 不改：`send-file` 可以发送服务进程读得到的任何绝对路径，飞书和 Telegram 一致；2026-11-18 决定不限制在工作目录内。
 
 ### P10 Agent 空闲自动升级（约 3 天）
 
@@ -455,7 +455,16 @@ Echo 侧（独立仓库，单独 PR）：
 - **T10.1**：每个目标先按服务自己的 PATH 定位 CLI（与 agent 进程一致），版本探测直接执行这个二进制；按实际路径识别安装路线（Codex：standalone / npm / Homebrew；Claude：native / Homebrew / npm；Gemini：npm / Homebrew；Qoder：自更新），没有手动配置命令时自动选用对应的升级命令（Codex standalone 用官方安装脚本）。手动配置的 `version_command` / `update_command` 始终优先。命令执行改为非登录 shell（`/bin/sh -c`），不再读 `~/.profile`。PATH 上有其他副本时在日志和 `/agent-upgrade status` 里告警。本机实测四个目标都定位正确。
 - **T10.3**：自动运行失败时日志带上错误和输出尾部；计划、失败退避、每个目标的上次结果、通知会话都持久化到 `<data_dir>/agent-upgrade-state.json`；`/agent-upgrade status` 显示二进制路径、安装路线、副本告警、上次结果；新增 `/agent-upgrade notify on|off|list`（仅 `allowed_user_ids`），版本变化或失败时通知已登记的会话。
 - **T10.4**：下次运行时间按“上次运行 + 间隔”计算并持久化，重启不再重新计时；服务停机期间错过的运行在启动约 2 分钟后补上；新增 `window = "HH:MM-HH:MM"`（可跨午夜）；空闲判断加入 Echo 任务、隔离 cron 运行和 relay 轮次；用户缓存目录下的文件锁让两个服务不会同时升级同一个 CLI，持有锁期间另一个服务的新消息也会等待。
-- **尚未做**：升级期间的新消息仍然是提示稍后重试，而不是排队；另一个服务进程里正在运行的轮次看不到（锁只保证不会同时升级）；T10.2、T10.5、T10.7（T10.6 随 P1 完成，见上）。
+- **尚未做**：另一个服务进程里正在运行的轮次看不到（锁只保证不会同时升级）；T10.7（T10.6 随 P1 完成，见上；T10.2、T10.5 见下）。
+
+**P10 收尾（2026-11-18，T10.2、T10.5、升级期间排队）**
+
+- **T10.2 先检查再升级**：升级前先查最新版本：Claude、Codex、Gemini、Kimi 用 npm registry 的 `latest`（`npm view <包> version`；这是所有渠道里最新的版本，已经不低于它就肯定是最新），Qoder 用 `qodercli update --check`，agy 没有便宜的查法，交给它自己的更新器判断。已经是最新就跳过（“already the latest version”），不再重装；查不到时照常升级。可用 `latest_command` 覆盖。
+- **T10.2 / T10.5 冒烟检查与回滚**：升级前记录安装状态：解析路径上的每个符号链接及其原目标（包括 Codex 的 `standalone/current` 这种目录链接）；二进制就地替换的 CLI（Kimi、agy）在状态目录里留一个硬链接备份（不占空间；跨卷时不备份，那些 CLI 自己保留旧版本）。升级后（安装命令失败或超时也一样）检查：二进制能解析、`--version` 成功、`--help` 里仍有适配器会传的每个选项（各 agent 包用 `core.RegisterAgentCLIChecks` 登记，`echo-client doctor` 也显示这项检查）。升级前通过、升级后不通过就回滚：链接改回原目标，就地替换的从硬链接恢复，npm 安装重装旧版本，Homebrew 不支持回滚。回滚算失败：会通知、计入退避。升级前就不通过的不回滚（不是这次升级弄坏的）。可用 `smoke_check = false` 关掉选项检查。
+- **中断恢复**：记录写进状态文件（`in_flight`），升级结束才删除；服务在升级中途被杀掉的话，下次启动时检查，弄坏了就按记录回滚并通知。
+- **T10.5 升级后生效**：每轮开始前比较 CLI 二进制（解析后的路径、大小、修改时间）。变了（本服务或另一个服务升级、手动升级、Claude 自己的后台更新）就让所有聊天在下一轮重启 agent 进程并 resume 原会话（不打断正在进行的轮次），并清空 Kimi、agy 的模型列表缓存。
+- **升级期间排队**：聊天消息不再提示“稍后重试”，而是进入该聊天的队列（回复“已排队 #N”），升级结束后自动发送；队列里原有的消息也等升级结束再发。不能排队的消息（未知的 `/` 命令）仍提示稍后重试。
+- **本机验证**：六个 CLI 当前版本全部通过选项检查（`go test -tags live -run TestAgentCLIChecksPassOnInstalledCLIs ./cmd/cc-connect`）。
 
 ### P9 文档与测试（贯穿）
 

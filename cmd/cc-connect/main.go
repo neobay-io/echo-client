@@ -1049,6 +1049,10 @@ func buildAgentUpgradeConfig(cfg config.AgentUpdatesConfig) core.AgentUpgradeCon
 		if src.MaxFailures > 0 {
 			target.MaxFailures = src.MaxFailures
 		}
+		target.LatestCommand = strings.TrimSpace(src.LatestCommand)
+		if src.SmokeCheck != nil {
+			target.SmokeCheckOff = !*src.SmokeCheck
+		}
 		result.Targets[name] = target
 	}
 	apply("claudecode", cfg.ClaudeCode)

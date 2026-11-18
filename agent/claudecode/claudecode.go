@@ -23,6 +23,12 @@ import (
 
 func init() {
 	core.RegisterAgent("claudecode", New)
+	// Options newSession passes; checked after each CLI upgrade.
+	core.RegisterAgentCLIChecks("claudecode", core.AgentCLICheck{
+		Args: []string{"--help"},
+		Flags: []string{"--output-format", "--input-format", "--verbose", "--permission-prompt-tool",
+			"--permission-mode", "--resume", "--model", "--effort", "--allowedTools", "--append-system-prompt", "--add-dir"},
+	})
 }
 
 // Agent drives Claude Code CLI using --input-format stream-json

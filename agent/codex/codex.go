@@ -21,6 +21,19 @@ import (
 
 func init() {
 	core.RegisterAgent("codex", New)
+	// Options Send passes to `codex exec` and `codex exec resume`; checked
+	// after each CLI upgrade.
+	core.RegisterAgentCLIChecks("codex",
+		core.AgentCLICheck{
+			Args: []string{"exec", "--help"},
+			Flags: []string{"--json", "--skip-git-repo-check", "--model", "-c", "--add-dir", "--image", "--cd",
+				"--dangerously-bypass-approvals-and-sandbox"},
+		},
+		core.AgentCLICheck{
+			Args:  []string{"exec", "resume", "--help"},
+			Flags: []string{"--json", "--skip-git-repo-check", "--model", "-c", "--image", "--dangerously-bypass-approvals-and-sandbox"},
+		},
+	)
 }
 
 // Agent drives OpenAI Codex CLI using `codex exec --json`.

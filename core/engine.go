@@ -150,7 +150,13 @@ type Engine struct {
 	displaySaveFunc  func(thinkingMaxLen, toolMaxLen *int) error
 	configReloadFunc func() (*ConfigReloadResult, error)
 	agentUpgradeMgr  *AgentUpgradeManager
-	agentAuthMgr     *AgentAuthManager
+	// Last seen agent CLI binary (noteAgentCLIChange).
+	agentCLIMu     sync.Mutex
+	agentCLISeen   agentCLIIdentity
+	agentCLISeenOK bool
+	// Queue keys waiting for an agent upgrade to finish (drainQueueAfterUpgrade).
+	upgradeDrains sync.Map
+	agentAuthMgr  *AgentAuthManager
 
 	cronScheduler *CronScheduler
 
@@ -1358,7 +1364,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	if e.agentUpgradeBlocksNewTurns() {
-		e.reply(p, msg.ReplyCtx, e.agentUpgradeBlockedMessage())
+		if !queueEligible || !e.queueUntilUpgradeDone(p, msg, content != "" && pendingAttach != nil) {
+			e.reply(p, msg.ReplyCtx, e.agentUpgradeBlockedMessage())
+		}
 		return
 	}
 
@@ -1399,10 +1407,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 	if e.agentUpgradeBlocksNewTurns() {
+		// An upgrade began after the check above: queue this message too.
 		session.Unlock()
 		finalKey := e.completePromptTurn(queueKey, msg.SessionKey, session)
-		go e.drainPromptQueue(finalKey)
-		e.reply(p, msg.ReplyCtx, e.agentUpgradeBlockedMessage())
+		if !e.queueUntilUpgradeDone(p, msg, content != "" && pendingAttach != nil) {
+			e.reply(p, msg.ReplyCtx, e.agentUpgradeBlockedMessage())
+		}
+		e.drainQueueAfterUpgrade(finalKey)
 		return
 	}
 	if content != "" && pendingAttach != nil {
@@ -2789,15 +2800,54 @@ func (e *Engine) agentStartFailedMessage(what string) string {
 	return fmt.Sprintf(e.i18n.T(MsgError), what)
 }
 
-func (e *Engine) agentUpgradeBlockedMessage() string {
-	agentName := "agent"
-	if e.agent != nil && strings.TrimSpace(e.agent.Name()) != "" {
-		agentName = e.agent.Name()
+// queueUntilUpgradeDone queues a chat message that arrived while the agent's
+// CLI is being upgraded; it runs when the upgrade finishes. It reports false
+// if the message could not be queued (queue full).
+func (e *Engine) queueUntilUpgradeDone(p Platform, msg *Message, clearPendingAttach bool) bool {
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	queueKey, agentSessionID := e.promptQueueKey(msg.SessionKey, session)
+	pos, err := e.enqueuePrompt(queueKey, session.ID, agentSessionID, msg)
+	if err != nil {
+		slog.Warn("could not queue message during agent upgrade", "session", msg.SessionKey, "error", err)
+		return false
 	}
-	return fmt.Sprintf("⚠️ %s upgrade is in progress. Try again shortly.", agentName)
+	if clearPendingAttach {
+		e.clearPendingAttachments(msg.SessionKey) // they travel with the queued message
+	}
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf("⏳ %s upgrade is in progress. Your message is queued (#%d) and will be sent when it finishes.", e.agentUpgradeName(), pos))
+	e.drainQueueAfterUpgrade(queueKey)
+	return true
+}
+
+// drainQueueAfterUpgrade runs a chat's queued messages once the agent CLI
+// upgrade in progress finishes. One waiter per queue.
+func (e *Engine) drainQueueAfterUpgrade(queueKey string) {
+	if _, waiting := e.upgradeDrains.LoadOrStore(queueKey, struct{}{}); waiting {
+		return
+	}
+	go func() {
+		err := e.waitForAgentUpgrade(e.ctx)
+		// Before draining, so a drain that meets another upgrade can wait again.
+		e.upgradeDrains.Delete(queueKey)
+		if err == nil {
+			e.drainPromptQueue(queueKey)
+		}
+	}()
+}
+
+func (e *Engine) agentUpgradeName() string {
+	if e.agent != nil && strings.TrimSpace(e.agent.Name()) != "" {
+		return e.agent.Name()
+	}
+	return "agent"
+}
+
+func (e *Engine) agentUpgradeBlockedMessage() string {
+	return fmt.Sprintf("⚠️ %s upgrade is in progress. Try again shortly.", e.agentUpgradeName())
 }
 
 func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, replyCtx any, session *Session) *interactiveState {
+	e.noteAgentCLIChange()
 	e.interactiveMu.Lock()
 	quietMode := e.defaultQuiet
 	state, ok := e.interactiveStates[sessionKey]
@@ -7752,6 +7802,8 @@ func (e *Engine) cmdAgentUpgrade(p Platform, msg *Message, args []string) {
 			if last := st.LastResult; last != nil {
 				outcome := "no change"
 				switch {
+				case last.RolledBack:
+					outcome = "rolled back: " + truncateIf(last.Error, 160)
 				case last.Error != "":
 					outcome = "failed: " + truncateIf(last.Error, 160)
 				case last.Skipped:
@@ -7760,6 +7812,9 @@ func (e *Engine) cmdAgentUpgrade(p Platform, msg *Message, args []string) {
 					outcome = fmt.Sprintf("upgraded %s → %s", last.BeforeVersion, last.AfterVersion)
 				}
 				fmt.Fprintf(&sb, "  last attempt: %s, %s\n", last.At.Format(time.RFC3339), outcome)
+				if last.LatestVersion != "" {
+					fmt.Fprintf(&sb, "  latest release then: %s\n", last.LatestVersion)
+				}
 			}
 			fmt.Fprintf(&sb, "  busy sessions: %d\n", st.BusySessions)
 			if st.VersionErr != "" {
@@ -7862,9 +7917,15 @@ func (e *Engine) cmdAgentUpgrade(p Platform, msg *Message, args []string) {
 			if res.AfterVersion != "" {
 				fmt.Fprintf(&sb, "  after: %s\n", res.AfterVersion)
 			}
-			if res.Changed {
+			if res.LatestVersion != "" {
+				fmt.Fprintf(&sb, "  latest release: %s\n", res.LatestVersion)
+			}
+			switch {
+			case res.RolledBack:
+				sb.WriteString("  result: rolled back (the new version failed the smoke check)\n")
+			case res.Changed:
 				sb.WriteString("  result: updated\n")
-			} else {
+			default:
 				sb.WriteString("  result: no version change detected\n")
 			}
 			if res.Output != "" {

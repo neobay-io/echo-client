@@ -177,6 +177,17 @@ level = "info" # debug, info, warn, error
 # Upgrades wait until the agent has no chat turns, Echo jobs, cron runs or
 # relay turns, and a lock in the user cache dir keeps two echo-client services
 # from upgrading the same CLI at once.
+# Before upgrading, the newest release is looked up (npm registry, or
+# `qodercli update --check`); a CLI already at it is not reinstalled. After
+# upgrading, a smoke check runs: the CLI must report a version and its help
+# must still list every option echo-client passes. If an upgrade (or an
+# interrupted one, found on the next start) leaves a working CLI failing that
+# check, the previous version is restored: symlinks are repointed, and CLIs
+# that replace their binary in place get it back from a hard link kept
+# during the upgrade (npm installs are reinstalled at the old version;
+# Homebrew installs cannot be rolled back). Chat messages that arrive during
+# an upgrade are queued and sent when it finishes, and chats restart their
+# agent process on the next turn whenever the CLI changes on disk.
 # `/agent-upgrade notify on` (allowed_user_ids only) sends upgrade results and
 # failures to that chat.
 #
@@ -190,6 +201,8 @@ level = "info" # debug, info, warn, error
 # pin_version = ""              # exact version target when the detected route supports it (e.g. npm packages)
 # max_failures = 3              # after 3 consecutive failures, scheduled runs back off
 # failure_backoff_secs = 21600  # 6h backoff for scheduled runs; manual `/agent-upgrade run` still works
+# latest_command = "npm view @anthropic-ai/claude-code version"  # optional; prints the newest release
+# smoke_check = true            # false skips the help-options check (the version check still runs)
 #
 # [agent_updates.codex]
 # enabled = true

@@ -306,10 +306,16 @@ func remoteAuthImplemented(agentName, flow string) bool {
 func (e *Engine) SetAgentAuthManager(manager *AgentAuthManager) { e.agentAuthMgr = manager }
 
 func (e *Engine) RefreshInteractiveAuth() {
+	e.retireAllInteractiveStates()
+}
+
+// retireAllInteractiveStates makes every chat's next turn start a fresh agent
+// process, resuming the same agent session. It does not stop an in-flight
+// turn: the next turn retires the cached process before sending, under the
+// same startup serialization used by queues.
+func (e *Engine) retireAllInteractiveStates() {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
-	// Do not stop an in-flight turn. The next turn retires its cached process
-	// before sending, under the same startup serialization used by queues.
 	for _, state := range e.interactiveStates {
 		state.stale = true
 	}

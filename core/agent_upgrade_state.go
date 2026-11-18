@@ -20,6 +20,8 @@ type AgentUpgradeLastResult struct {
 	BeforeVersion string    `json:"before_version,omitempty"`
 	AfterVersion  string    `json:"after_version,omitempty"`
 	Changed       bool      `json:"changed,omitempty"`
+	LatestVersion string    `json:"latest_version,omitempty"`
+	RolledBack    bool      `json:"rolled_back,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	BinaryPath    string    `json:"binary_path,omitempty"`
 }
@@ -36,6 +38,7 @@ type agentUpgradeState struct {
 	Failures    map[string]agentUpgradeFailureState `json:"failures,omitempty"`
 	LastResults map[string]AgentUpgradeLastResult   `json:"last_results,omitempty"`
 	Notify      []AgentUpgradeNotifyChat            `json:"notify,omitempty"`
+	InFlight    map[string]upgradeSnapshot          `json:"in_flight,omitempty"`
 }
 
 // SetStatePath enables persistence of the schedule, failure backoff, last
@@ -71,6 +74,9 @@ func (m *AgentUpgradeManager) SetStatePath(path string) {
 		m.lastResults[name] = result
 	}
 	m.notifyChats = append([]AgentUpgradeNotifyChat(nil), state.Notify...)
+	for name, snap := range state.InFlight {
+		m.inFlight[name] = snap
+	}
 }
 
 // SetNotifier sets how notifications reach a chat (wired to the engine of the
@@ -92,6 +98,10 @@ func (m *AgentUpgradeManager) saveState() {
 		Failures:    make(map[string]agentUpgradeFailureState, len(m.failures)),
 		LastResults: make(map[string]AgentUpgradeLastResult, len(m.lastResults)),
 		Notify:      append([]AgentUpgradeNotifyChat(nil), m.notifyChats...),
+		InFlight:    make(map[string]upgradeSnapshot, len(m.inFlight)),
+	}
+	for name, snap := range m.inFlight {
+		state.InFlight[name] = snap
 	}
 	for name, failure := range m.failures {
 		state.Failures[name] = failure
@@ -133,6 +143,8 @@ func (m *AgentUpgradeManager) recordResult(res AgentUpgradeRunResult, automatic 
 		BeforeVersion: res.BeforeVersion,
 		AfterVersion:  res.AfterVersion,
 		Changed:       res.Changed,
+		LatestVersion: res.LatestVersion,
+		RolledBack:    res.RolledBack,
 		BinaryPath:    binaryPath,
 	}
 	if res.Err != nil {

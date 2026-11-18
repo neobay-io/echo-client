@@ -20,6 +20,11 @@ import (
 
 func init() {
 	core.RegisterAgent("gemini", New)
+	// Options Send passes; checked after each CLI upgrade.
+	core.RegisterAgentCLIChecks("gemini", core.AgentCLICheck{
+		Args:  []string{"--help"},
+		Flags: []string{"-p", "--output-format", "-y", "--approval-mode", "--resume", "-m", "--include-directories"},
+	})
 }
 
 // Agent drives the Gemini CLI in headless mode using -p --output-format stream-json.

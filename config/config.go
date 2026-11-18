@@ -94,6 +94,12 @@ type AgentUpdateTargetConfig struct {
 	PinVersion         string `toml:"pin_version,omitempty"`
 	FailureBackoffSecs int    `toml:"failure_backoff_secs,omitempty"`
 	MaxFailures        int    `toml:"max_failures,omitempty"`
+	// LatestCommand prints the newest release (default: npm registry, or
+	// `qodercli update --check`); a CLI already at it is not reinstalled.
+	LatestCommand string `toml:"latest_command,omitempty"`
+	// SmokeCheck (default true) checks after an upgrade that the CLI's help
+	// still lists the options echo-client passes, and rolls back otherwise.
+	SmokeCheck *bool `toml:"smoke_check,omitempty"`
 }
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.

@@ -75,6 +75,17 @@ func (c *modelCatalog) cached() []kimiModel {
 	return c.models
 }
 
+// invalidate makes the next lookup fetch the list again; the old list is
+// still served by cached until then.
+func (c *modelCatalog) invalidate() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.fetchedAt = time.Time{}
+	c.mu.Unlock()
+}
+
 func (c *modelCatalog) freshLocked() bool {
 	return !c.fetchedAt.IsZero() && time.Since(c.fetchedAt) < modelCatalogTTL
 }

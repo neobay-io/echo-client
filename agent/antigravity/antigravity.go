@@ -16,6 +16,13 @@ import (
 
 func init() {
 	core.RegisterAgent("antigravity", New)
+	// Options buildArgs passes (the hidden --gemini_dir is not listed in
+	// help); checked after each CLI upgrade.
+	core.RegisterAgentCLIChecks("antigravity", core.AgentCLICheck{
+		Args: []string{"--help"},
+		Flags: []string{"-p", "--output-format", "--conversation", "--mode", "--dangerously-skip-permissions",
+			"--model", "--effort", "--add-dir"},
+	})
 }
 
 // Agent drives the Antigravity CLI (agy) with one `agy -p --output-format
@@ -158,6 +165,10 @@ func (a *Agent) GetModel() string {
 
 // AvailableModels lists `agy models` grouped by base model; the effort part
 // of each id is chosen with /effort.
+// InvalidateModelCache implements core.ModelCacheInvalidator: after a CLI
+// upgrade the model list is fetched again.
+func (a *Agent) InvalidateModelCache() { a.catalog.invalidate() }
+
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	models := a.catalog.get(ctx)
 	options := make([]core.ModelOption, 0, len(models))

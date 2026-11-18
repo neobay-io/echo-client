@@ -15,6 +15,11 @@ import (
 
 func init() {
 	core.RegisterAgent("qoder", New)
+	// Options buildArgs passes; checked after each CLI upgrade.
+	core.RegisterAgentCLIChecks("qoder", core.AgentCLICheck{
+		Args:  []string{"--help"},
+		Flags: []string{"--print", "--output-format", "-w", "--add-dir", "--attachment", "--resume", "--permission-mode", "--model"},
+	})
 }
 
 // Agent drives Qoder CLI using `qodercli --print --output-format stream-json`.

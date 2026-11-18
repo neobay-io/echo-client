@@ -26,6 +26,12 @@ type AgentUpgradeTargetConfig struct {
 	PinVersion     string
 	FailureBackoff time.Duration
 	MaxFailures    int
+	// LatestCommand prints the newest release; "" picks one per CLI (npm
+	// registry, `qodercli update --check`). Up-to-date CLIs are not reinstalled.
+	LatestCommand string
+	// SmokeCheckOff skips the check that the CLI's help still lists the
+	// options the agent passes (the version check still runs).
+	SmokeCheckOff bool
 	// *Set mark commands the user configured explicitly; only defaults are
 	// replaced by the commands derived from the detected install route.
 	VersionCommandSet bool
@@ -78,8 +84,13 @@ type AgentUpgradeRunResult struct {
 	BeforeVersion string
 	AfterVersion  string
 	Changed       bool
-	Output        string
-	Err           error
+	// LatestVersion is the newest release found before upgrading, if any.
+	LatestVersion string
+	// RolledBack: the upgrade broke the CLI and the previous version was
+	// restored (Err says why).
+	RolledBack bool
+	Output     string
+	Err        error
 }
 
 type resolvedAgentUpgradeTarget struct {
@@ -111,6 +122,9 @@ type AgentUpgradeManager struct {
 	running     map[string]bool
 	failures    map[string]agentUpgradeFailureState
 	lastResults map[string]AgentUpgradeLastResult
+	// inFlight holds the snapshot of each upgrade in progress; persisted so
+	// an upgrade cut short by a crash is checked on the next start.
+	inFlight    map[string]upgradeSnapshot
 	notifyChats []AgentUpgradeNotifyChat
 	notifyFn    func(project, sessionKey, text string) error
 	statePath   string
@@ -133,6 +147,7 @@ func NewAgentUpgradeManager(cfg AgentUpgradeConfig) *AgentUpgradeManager {
 		running:      make(map[string]bool),
 		failures:     make(map[string]agentUpgradeFailureState),
 		lastResults:  make(map[string]AgentUpgradeLastResult),
+		inFlight:     make(map[string]upgradeSnapshot),
 		lockDir:      defaultAgentUpgradeLockDir(),
 		startupGrace: defaultAgentUpgradeStartupGrace,
 		wakeCh:       make(chan struct{}, 1),
@@ -265,6 +280,8 @@ func (m *AgentUpgradeManager) ApplyConfig(cfg AgentUpgradeConfig) {
 			if override.MaxFailures > 0 {
 				target.MaxFailures = override.MaxFailures
 			}
+			target.LatestCommand = strings.TrimSpace(override.LatestCommand)
+			target.SmokeCheckOff = override.SmokeCheckOff
 			base.Targets[name] = target
 		}
 	}
@@ -334,6 +351,7 @@ func (m *AgentUpgradeManager) Start(ctx context.Context) {
 	m.startOnce.Do(func() {
 		go func() {
 			defer close(m.loopDone)
+			m.recoverInterruptedUpgrades(ctx)
 			m.loop(ctx)
 		}()
 	})
@@ -659,13 +677,16 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 			if timeout <= 0 {
 				timeout = defaultAgentUpgradeTimeout
 			}
+			probeTimeout := versionProbeTimeout(timeout)
+			var beforeErr error
 			if strings.TrimSpace(cfgTarget.VersionCommand) != "" {
-				beforeCtx, cancel := context.WithTimeout(ctx, versionProbeTimeout(timeout))
+				beforeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 				out, err := runner(beforeCtx, cfgTarget.VersionCommand)
 				cancel()
 				if err == nil {
 					res.BeforeVersion = normalizeAgentUpgradeOutput(out)
 				}
+				beforeErr = err
 			}
 			if policyReason := evaluateTargetVersionPolicy(cfgTarget, res.BeforeVersion); policyReason != "" {
 				res.Skipped = true
@@ -675,24 +696,96 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 				return
 			}
 
+			// Skip the installer when the CLI is already the newest release.
+			selectedPath := ""
+			if resolved.info.Selected != nil {
+				selectedPath = resolved.info.Selected.Path
+			}
+			if cfgTarget.PinVersion == "" {
+				latestCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+				res.LatestVersion = latestAgentVersion(latestCtx, runner, latestVersionCommand(name, cfgTarget, selectedPath))
+				cancel()
+				if res.LatestVersion != "" && atOrAboveVersion(res.BeforeVersion, res.LatestVersion) {
+					res.Skipped = true
+					res.Reason = "already the latest version (" + res.LatestVersion + ")"
+					m.clearFailureState(name)
+					results = append(results, res)
+					return
+				}
+			}
+
+			// Record the install so a broken upgrade can be rolled back.
+			var snap *upgradeSnapshot
+			keepSnapshot := false
+			if selectedPath != "" {
+				problems := m.cliFlagProblems(ctx, name, selectedPath, cfgTarget, runner, probeTimeout)
+				if beforeErr != nil {
+					problems = append(problems, fmt.Sprintf("`--version` failed: %v", beforeErr))
+				}
+				if len(problems) > 0 {
+					slog.Warn("agent upgrade: CLI fails its smoke check before upgrading; it will not be rolled back", "agent", name, "problems", strings.Join(problems, "; "))
+				}
+				var err error
+				snap, err = takeUpgradeSnapshot(name, resolved.route, selectedPath, res.BeforeVersion, len(problems) == 0, m.backupDir())
+				if err != nil {
+					slog.Warn("agent upgrade: cannot record the install; no rollback possible", "agent", name, "error", err)
+				} else {
+					m.setInFlight(snap)
+					defer func() {
+						if keepSnapshot {
+							return
+						}
+						snap.removeBackup()
+						m.clearInFlight(name)
+					}()
+				}
+			}
+
 			runCtx, cancel := context.WithTimeout(ctx, timeout)
 			out, err := runner(runCtx, cfgTarget.UpdateCommand)
 			cancel()
 			res.Output = normalizeAgentUpgradeOutput(out)
-			if err != nil {
-				res.Err = err
-				m.recordFailure(name, cfgTarget, err.Error())
+			updateErr := err
+
+			if snap != nil && ctx.Err() != nil {
+				// The service is stopping: checks would fail for that reason
+				// alone. Keep the record; the next start checks the install.
+				keepSnapshot = true
+				res.Err = fmt.Errorf("upgrade interrupted by shutdown: %w", ctx.Err())
 				results = append(results, res)
 				return
 			}
-
-			if strings.TrimSpace(cfgTarget.VersionCommand) != "" {
-				afterCtx, cancel := context.WithTimeout(ctx, versionProbeTimeout(timeout))
+			if snap != nil {
+				// Smoke check, also after a failed or timed-out installer:
+				// that is when a half-finished install is most likely.
+				_, version, problems := m.cliProblems(ctx, name, cfgTarget, runner, probeTimeout)
+				res.AfterVersion = version
+				if len(problems) > 0 && snap.Healthy {
+					what := "the upgrade"
+					if res.AfterVersion != "" && res.AfterVersion != res.BeforeVersion {
+						what = "the upgrade to " + res.AfterVersion
+					}
+					if updateErr != nil {
+						what += fmt.Sprintf(" (installer error: %v)", updateErr)
+					}
+					res.Err = m.rollbackAfterFailedCheck(ctx, snap, &res, problems, runner, cfgTarget, probeTimeout, what)
+					m.recordFailure(name, cfgTarget, res.Err.Error())
+					results = append(results, res)
+					return
+				}
+			} else if updateErr == nil && strings.TrimSpace(cfgTarget.VersionCommand) != "" {
+				afterCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 				out, err := runner(afterCtx, cfgTarget.VersionCommand)
 				cancel()
 				if err == nil {
 					res.AfterVersion = normalizeAgentUpgradeOutput(out)
 				}
+			}
+			if updateErr != nil {
+				res.Err = updateErr
+				m.recordFailure(name, cfgTarget, updateErr.Error())
+				results = append(results, res)
+				return
 			}
 			res.Changed = res.BeforeVersion != "" && res.AfterVersion != "" && res.BeforeVersion != res.AfterVersion
 			m.clearFailureState(name)

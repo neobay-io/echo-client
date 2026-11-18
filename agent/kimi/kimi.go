@@ -16,6 +16,11 @@ import (
 
 func init() {
 	core.RegisterAgent("kimi", New)
+	// Options buildArgs passes; checked after each CLI upgrade.
+	core.RegisterAgentCLIChecks("kimi", core.AgentCLICheck{
+		Args:  []string{"--help"},
+		Flags: []string{"--prompt", "--output-format", "-S", "--model", "--add-dir"},
+	})
 }
 
 // modeBypass is the only mode Kimi Code's prompt mode offers: `kimi -p` runs
@@ -164,6 +169,10 @@ func (a *Agent) GetModel() string {
 }
 
 // AvailableModels lists the model aliases Kimi Code's own picker offers.
+// InvalidateModelCache implements core.ModelCacheInvalidator: after a CLI
+// upgrade the model list is fetched again.
+func (a *Agent) InvalidateModelCache() { a.catalog.invalidate() }
+
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	models := a.catalog.get(ctx)
 	options := make([]core.ModelOption, 0, len(models))
