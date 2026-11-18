@@ -838,8 +838,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell <command>\n  Run a shell command and return the output\n\n" +
 			"/stop\n  Stop current execution\n\n" +
+			"/cancel\n  Stop, drop queued messages and start a new session\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Manage scheduled cron tasks\n\n" +
 			"/loop [list|new|del|enable|disable]\n  Manage scheduled loop tasks\n\n" +
+			"/loop <interval|auto> <prompt>\n  Repeat a prompt; auto lets the agent pick each next run\n\n" +
+			"/timer <when> <prompt>\n  Run a prompt once later (30m, 14:30, 2026-11-20 09:00)\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
 			"/skills\n  List agent skills (from SKILL.md)\n\n" +
@@ -880,8 +883,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell <命令>\n  执行 Shell 命令并返回结果\n\n" +
 			"/stop\n  停止当前执行\n\n" +
+			"/cancel\n  停止、清空排队消息并开始新会话\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理 cron 定时任务\n\n" +
 			"/loop [list|new|del|enable|disable]\n  管理 loop 定时任务\n\n" +
+			"/loop <间隔|auto> <内容>\n  重复运行；auto 由 agent 决定下次时间\n\n" +
+			"/timer <时间> <内容>\n  稍后运行一次（30m、14:30、2026-11-20 09:00）\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
 			"/skills\n  列出 Agent Skills（来自 SKILL.md）\n\n" +
@@ -921,8 +927,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell <命令>\n  執行 Shell 命令並返回結果\n\n" +
 			"/stop\n  停止當前執行\n\n" +
+			"/cancel\n  停止、清空排隊訊息並開始新會話\n\n" +
 			"/cron [add|list|del|enable|disable]\n  管理 cron 定時任務\n\n" +
 			"/loop [list|new|del|enable|disable]\n  管理 loop 定時任務\n\n" +
+			"/loop <間隔|auto> <內容>\n  重複執行；auto 由 agent 決定下次時間\n\n" +
+			"/timer <時間> <內容>\n  稍後執行一次（30m、14:30、2026-11-20 09:00）\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
 			"/skills\n  列出 Agent Skills（來自 SKILL.md）\n\n" +
@@ -961,8 +970,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell <コマンド>\n  シェルコマンドを実行して結果を返す\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
+			"/cancel\n  停止してキューを消し、新しいセッションを開始\n\n" +
 			"/cron [add|list|del|enable|disable]\n  cron スケジュールタスク管理\n\n" +
 			"/loop [list|new|del|enable|disable]\n  loop スケジュールタスク管理\n\n" +
+			"/loop <間隔|auto> <内容>\n  繰り返し実行。auto は次回をエージェントが決める\n\n" +
+			"/timer <時刻> <内容>\n  後で一度だけ実行（30m、14:30、2026-11-20 09:00）\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
 			"/skills\n  エージェントスキル一覧（SKILL.md から）\n\n" +
@@ -1001,8 +1013,11 @@ var messages = map[MsgKey]map[Language]string{
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell <comando>\n  Ejecutar un comando shell y devolver la salida\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
+			"/cancel\n  Detener, vaciar la cola e iniciar una sesión nueva\n\n" +
 			"/cron [add|list|del|enable|disable]\n  Gestionar tareas cron programadas\n\n" +
 			"/loop [list|new|del|enable|disable]\n  Gestionar tareas loop programadas\n\n" +
+			"/loop <intervalo|auto> <texto>\n  Repetir; auto deja que el agente elija la próxima vez\n\n" +
+			"/timer <cuándo> <texto>\n  Ejecutar una vez más tarde (30m, 14:30, 2026-11-20 09:00)\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
 			"/skills\n  Listar skills del agente (desde SKILL.md)\n\n" +
@@ -2743,6 +2758,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看方案額度和花費",
 		LangJapanese:           "プランの上限と使用状況を表示",
 		LangSpanish:            "Ver límites del plan y gasto",
+	},
+	MsgKey("timer"): {
+		LangEnglish:            "Run a prompt once at a set time: /timer 30m <prompt>",
+		LangChinese:            "在指定时间运行一次：/timer 30m <内容>",
+		LangTraditionalChinese: "在指定時間執行一次：/timer 30m <內容>",
+		LangJapanese:           "指定時刻に一度だけ実行: /timer 30m <内容>",
+		LangSpanish:            "Ejecutar una vez a una hora: /timer 30m <texto>",
+	},
+	MsgKey("cancel"): {
+		LangEnglish:            "Stop the turn, drop queued messages and start a new session",
+		LangChinese:            "停止当前轮次、清空排队消息并开始新会话",
+		LangTraditionalChinese: "停止目前輪次、清空排隊訊息並開始新會話",
+		LangJapanese:           "ターンを停止し、キューを消して新しいセッションを開始",
+		LangSpanish:            "Detener el turno, vaciar la cola e iniciar una sesión nueva",
+	},
+	MsgKey("timer_usage"): {
+		LangEnglish: "Usage:\n/timer <when> <prompt> — run the prompt once\n/timer exec <when> <command> — run a shell command once\n/timer list\n/timer del <id>\n\n<when>: a delay (30m, 2h, 1h30m, 1d), a time (14:30, the next one) or a date (2026-11-20 09:00).",
+		LangChinese: "用法：\n/timer <时间> <内容> — 到时运行一次\n/timer exec <时间> <命令> — 到时运行一次 shell 命令\n/timer list\n/timer del <id>\n\n<时间>：延时（30m、2h、1h30m、1d）、时刻（14:30，下一个到来的）或日期（2026-11-20 09:00）。",
+	},
+	MsgKey("timer_added"): {
+		LangEnglish: "⏰ Timer `%s` set for %s (in %s)\nPrompt: `%s`",
+		LangChinese: "⏰ 定时 `%s` 已设置：%s（%s 后）\n内容：`%s`",
+	},
+	MsgKey("timer_empty"): {
+		LangEnglish: "No timers. Set one with /timer <when> <prompt>.",
+		LangChinese: "没有定时任务。用 /timer <时间> <内容> 设置。",
+	},
+	MsgKey("timer_list_title"): {
+		LangEnglish: "Timers (%d)",
+		LangChinese: "定时任务（%d）",
+	},
+	MsgKey("timer_not_found"): {
+		LangEnglish: "❌ Timer not found in this chat.",
+		LangChinese: "❌ 本聊天里没有这个定时任务。",
+	},
+	MsgKey("timer_deleted"): {
+		LangEnglish: "Deleted timer `%s`.",
+		LangChinese: "已删除定时任务 `%s`。",
+	},
+	MsgKey("cancel_done"): {
+		LangEnglish: "🛑 Cancelled: the turn is stopped, %d queued message(s) dropped, and a new session started.",
+		LangChinese: "🛑 已取消：当前轮次已停止，丢弃 %d 条排队消息，并开始了新会话。",
 	},
 	MsgKey("context"): {
 		LangEnglish:            "Show how much of the context window is used",

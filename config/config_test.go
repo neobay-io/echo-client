@@ -684,3 +684,38 @@ func TestValidateUpgradeWindow(t *testing.T) {
 		}
 	}
 }
+
+// T5.4: turn time limit and idle agent processes, global and per project.
+func TestTurnTimeAndIdleProcessConfig(t *testing.T) {
+	load := func(content string) (*Config, error) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	project := func(extra string) string {
+		return "[[projects]]\nname = \"demo\"\n" + extra + "\n[projects.agent]\ntype = \"codex\"\n\n[[projects.platforms]]\ntype = \"telegram\"\n"
+	}
+	cfg, err := load("max_turn_time_mins = 60\nagent_session_idle_timeout_mins = 30\n" + project("max_turn_time_mins = 0\nagent_session_idle_timeout_mins = 5"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *cfg.MaxTurnTimeMins != 60 || *cfg.AgentSessionIdleTimeoutMins != 30 {
+		t.Fatalf("global = %v %v", *cfg.MaxTurnTimeMins, *cfg.AgentSessionIdleTimeoutMins)
+	}
+	p := cfg.Projects[0]
+	if p.MaxTurnTimeMins == nil || *p.MaxTurnTimeMins != 0 || p.AgentSessionIdleTimeoutMins == nil || *p.AgentSessionIdleTimeoutMins != 5 {
+		t.Fatalf("project = %+v", p)
+	}
+	for _, bad := range []string{
+		"max_turn_time_mins = -1\n" + project(""),
+		"agent_session_idle_timeout_mins = -1\n" + project(""),
+		project("max_turn_time_mins = -5"),
+		project("agent_session_idle_timeout_mins = -5"),
+	} {
+		if _, err := load(bad); err == nil {
+			t.Errorf("accepted:\n%s", bad)
+		}
+	}
+}

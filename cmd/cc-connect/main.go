@@ -325,13 +325,29 @@ func main() {
 				engine.SetFirstEventTimeout(time.Duration(secs) * time.Second)
 			}
 		}
-		if cfg.TurnTimeoutMins != nil {
-			mins := *cfg.TurnTimeoutMins
+		// Turn time limit: the project's max_turn_time_mins, else the global
+		// turn_timeout_mins (or its upstream name max_turn_time_mins).
+		turnMins := cfg.TurnTimeoutMins
+		if turnMins == nil {
+			turnMins = cfg.MaxTurnTimeMins
+		}
+		if proj.MaxTurnTimeMins != nil {
+			turnMins = proj.MaxTurnTimeMins
+		}
+		if turnMins != nil {
+			mins := *turnMins
 			if mins <= 0 {
 				engine.SetTurnTimeout(0)
 			} else {
 				engine.SetTurnTimeout(time.Duration(mins) * time.Minute)
 			}
+		}
+		idleMins := cfg.AgentSessionIdleTimeoutMins
+		if proj.AgentSessionIdleTimeoutMins != nil {
+			idleMins = proj.AgentSessionIdleTimeoutMins
+		}
+		if idleMins != nil && *idleMins > 0 {
+			engine.SetAgentSessionIdleTimeout(time.Duration(*idleMins) * time.Minute)
 		}
 
 		// Wire default quiet mode: project-level overrides global

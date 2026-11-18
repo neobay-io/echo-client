@@ -430,8 +430,9 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	argsFile := filepath.Join(workDir, "args.txt")
 	stdinFile := filepath.Join(workDir, "stdin.txt")
 	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n" +
-		"cat > \"$CODEX_STDIN_FILE\"\n" +
+		// Write each file whole (temp file + rename): the test polls them.
+		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE.tmp\" && mv \"$CODEX_ARGS_FILE.tmp\" \"$CODEX_ARGS_FILE\"\n" +
+		"cat > \"$CODEX_STDIN_FILE.tmp\" && mv \"$CODEX_STDIN_FILE.tmp\" \"$CODEX_STDIN_FILE\"\n" +
 		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-stdin\"}'\n" +
 		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
 	scriptPath := filepath.Join(binDir, "codex")

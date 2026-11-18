@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,6 +182,9 @@ type Engine struct {
 	eventIdleTimeout  time.Duration
 	firstEventTimeout time.Duration
 	turnTimeout       time.Duration
+	// agentIdleTimeout (nanoseconds): close a chat's agent process after
+	// this long without a turn; 0 = never (agent_session_idle_timeout_mins).
+	agentIdleTimeout atomic.Int64
 
 	// Interactive agent session management
 	interactiveMu      sync.Mutex
@@ -189,6 +193,8 @@ type Engine struct {
 	agentSessionTurnMu sync.Mutex
 	agentSessionTurns  map[string]*agentSessionTurnLock // key = agentName + ":" + AgentSessionID
 	sessionTransitions sync.Map                         // sessionKey -> *sync.Mutex
+	cronRunsMu         sync.Mutex
+	cronRuns           map[string]*cronRun // sessionKey -> the chat's running scheduled turn
 	promptQueueMu      sync.Mutex
 	promptQueues       map[string]*promptQueueState
 	promptQueueSeq     uint64
@@ -258,6 +264,15 @@ type interactiveState struct {
 	// turnMu orders ending a turn against /stop sending an interrupt, so an
 	// interrupt meant for one turn can never reach the next.
 	turnMu sync.Mutex
+	// lastActive is when a turn last began or ended (guarded by mu).
+	lastActive time.Time
+	// localSessionID is the chat session the process was started for
+	// (guarded by Engine.interactiveMu); a process is never reused for
+	// another session of the chat (/new, /switch, /cancel).
+	localSessionID string
+	// replaced: returned to a turn of a session the chat has left; it has
+	// no process and is not installed.
+	replaced bool
 }
 
 type agentSessionTurnLock struct {
@@ -280,6 +295,7 @@ func newInteractiveState(agentSession AgentSession, p Platform, replyCtx any, qu
 		replyCtx:     replyCtx,
 		quiet:        quiet,
 		stopped:      make(chan struct{}),
+		lastActive:   time.Now(),
 	}
 }
 
@@ -289,6 +305,7 @@ func (s *interactiveState) beginTurn() func() {
 	s.mu.Lock()
 	s.turnDone = ch
 	s.steerOK = true
+	s.lastActive = time.Now()
 	s.mu.Unlock()
 	var once sync.Once
 	return func() {
@@ -300,6 +317,7 @@ func (s *interactiveState) beginTurn() func() {
 				s.turnDone = nil
 				s.steerOK = false
 			}
+			s.lastActive = time.Now()
 			s.mu.Unlock()
 			close(ch)
 		})
@@ -890,6 +908,66 @@ func (e *Engine) ProjectName() string {
 
 const loopPausePrimitive = "<loop-control>pause</loop-control>"
 
+// defaultSelfPacedInterval runs a self-paced loop when its agent names no
+// next time.
+const defaultSelfPacedInterval = "30m"
+
+// Bounds for <loop-control>next …</loop-control>.
+const (
+	minLoopNext = time.Minute
+	maxLoopNext = 7 * 24 * time.Hour
+)
+
+var loopNextPattern = regexp.MustCompile(`<loop-control>\s*next\s+([0-9]+\s*[smhd])\s*</loop-control>$`)
+
+// loopControlLine is the reply's final non-empty line. Loop control is read
+// only there: a tag quoted earlier in the reply (from a page or a tool's
+// output) must not reschedule or pause the loop.
+func loopControlLine(reply string) string {
+	lines := strings.Split(strings.TrimSpace(reply), "\n")
+	return strings.Trim(strings.TrimSpace(lines[len(lines)-1]), "`")
+}
+
+// loopPauseRequested reports whether the reply ends with the pause control.
+func loopPauseRequested(reply string) bool {
+	return strings.HasSuffix(loopControlLine(reply), loopPausePrimitive)
+}
+
+// parseLoopNext reads the agent's next-run delay from the reply's final
+// line, clamped to sane bounds.
+func parseLoopNext(reply string) (time.Duration, bool) {
+	m := loopNextPattern.FindStringSubmatch(loopControlLine(reply))
+	if m == nil {
+		return 0, false
+	}
+	d, _, err := ParseLoopIntervalSpec(strings.ReplaceAll(m[1], " ", ""))
+	if err != nil {
+		if strings.Contains(err.Error(), "too short") {
+			return minLoopNext, true
+		}
+		return 0, false
+	}
+	switch {
+	case d < minLoopNext:
+		d = minLoopNext
+	case d > maxLoopNext:
+		d = maxLoopNext
+	}
+	return d, true
+}
+
+func appendLoopPacing(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return prompt
+	}
+	return prompt + "\n\nThis task repeats on a schedule you choose. Make the final line of your response say when to run it next, for example <loop-control>next 20m</loop-control> (s, m, h or d; between 1m and 7d), or " + loopPausePrimitive + " to stop repeating."
+}
+
+// agentPassthroughCommands are agent slash commands sent to the agent as
+// they are, without the "not an echo-client command" notice.
+var agentPassthroughCommands = map[string]bool{"goal": true}
+
 func appendLoopPausePrimitive(prompt string) string {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -1037,7 +1115,9 @@ func (e *Engine) runCronIsolatedTurn(ctx context.Context, jobID string, job *Cro
 	}
 
 	prompt := job.Prompt
-	if job.IsLoopJob() && job.AutoPausePrimitive {
+	if job.IsLoopJob() && job.SelfPaced {
+		prompt = appendLoopPacing(prompt)
+	} else if job.IsLoopJob() && job.AutoPausePrimitive {
 		prompt = appendLoopPausePrimitive(prompt)
 	}
 
@@ -1054,11 +1134,24 @@ func (e *Engine) runCronIsolatedTurn(ctx context.Context, jobID string, job *Cro
 		defer release()
 	}
 
-	// A cron run uses the bound chat's current model / effort / mode.
+	// A cron run uses the bound chat's current model / effort / mode,
+	// unless the job sets its own (T5.3).
 	var cronOpts AgentSessionOptions
 	if s := e.sessions.ActiveSession(sessionKey); s != nil {
 		cronOpts = s.Settings()
 	}
+	if job.Model != "" {
+		cronOpts.Model = job.Model
+	}
+	if job.ReasoningLevel != "" {
+		cronOpts.ReasoningLevel = job.ReasoningLevel
+	}
+	if job.Mode != "" {
+		cronOpts.Mode = job.Mode
+	}
+	// /stop and /cancel in the chat stop this run (T5.4).
+	ctx, run := e.trackCronRun(sessionKey, ctx)
+	defer e.untrackCronRun(sessionKey, run)
 	finalID, output, runErr := e.runIsolatedCronTurn(ctx, syntheticKey, resumeID, prompt, e.sessionEnv(syntheticKey), cronOpts)
 
 	if !job.UsesNewSessionPerRun() && e.cronScheduler != nil {
@@ -1073,6 +1166,10 @@ func (e *Engine) runCronIsolatedTurn(ctx context.Context, jobID string, job *Cro
 		}
 	}
 
+	if runErr != nil && run.stopped.Load() {
+		slog.Info("cron: isolated turn stopped by the user", "job_id", jobID, "session_key", sessionKey)
+		return errCronStoppedByUser
+	}
 	if runErr != nil {
 		slog.Error("cron: isolated turn failed", "job_id", jobID, "session_key", sessionKey, "error", runErr)
 		if !job.Mute {
@@ -1092,16 +1189,27 @@ func (e *Engine) applyLoopPausePrimitive(sessionKey, jobID, assistantReply strin
 		return
 	}
 	job := e.cronScheduler.Store().Get(jobID)
-	if job == nil || !job.IsLoopJob() || !job.AutoPausePrimitive {
+	if job == nil || !job.IsLoopJob() || (!job.AutoPausePrimitive && !job.SelfPaced) {
 		return
 	}
-	if !strings.Contains(assistantReply, loopPausePrimitive) {
+	if !loopPauseRequested(assistantReply) {
+		// <loop-control>next 20m</loop-control>: the agent picks the next run.
+		if d, ok := parseLoopNext(assistantReply); ok {
+			if err := e.cronScheduler.RescheduleLoopAfter(jobID, d); err != nil {
+				slog.Warn("loop: failed to reschedule after primitive", "job_id", jobID, "error", err)
+				return
+			}
+			// A run queued meanwhile (chat busy) would ignore the new delay.
+			e.dropQueuedCronRuns(jobID, "the loop was rescheduled")
+			e.send(p, replyCtx, fmt.Sprintf("⏭ loop `%s` runs next in %s.", jobID, formatTimerRemaining(time.Now().Add(d), time.Now())))
+		}
 		return
 	}
 	if err := e.cronScheduler.DisableJob(jobID); err != nil {
 		slog.Warn("loop: failed to pause after primitive", "job_id", jobID, "session_key", sessionKey, "error", err)
 		return
 	}
+	e.dropQueuedCronRuns(jobID, "the loop was paused")
 	e.send(p, replyCtx, fmt.Sprintf("⏸ loop `%s` paused by agent primitive.", jobID))
 }
 
@@ -1163,6 +1271,7 @@ func (e *Engine) Start() error {
 	if err != nil {
 		return err
 	}
+	go e.runAgentIdleJanitor()
 
 	var startErrs []error
 	for i, p := range e.platforms {
@@ -2619,6 +2728,9 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 		return
 	}
 	defer agentTurn.Unlock()
+	if e.sessionReplaced(p, msg, session) {
+		return
+	}
 
 	// An upgrade may have begun since this message was accepted or dequeued:
 	// put it back at the head of the queue rather than turn it away.
@@ -2633,6 +2745,11 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 	session.AddHistory("user", prompt)
 
 	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
+	if state.replaced {
+		session.dropLastHistory("user", prompt)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueSkippedSessionChanged))
+		return
+	}
 
 	// Update reply context for this turn
 	state.mu.Lock()
@@ -2748,6 +2865,15 @@ func (e *Engine) processInteractiveMessageAsyncWithQueueKey(p Platform, msg *Mes
 			completeQueue()
 			return
 		}
+		if e.sessionReplaced(p, msg, session) {
+			if done != nil {
+				done(errSessionReplaced)
+			}
+			agentTurn.Unlock()
+			session.Unlock()
+			completeQueue()
+			return
+		}
 		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session, agentTurn)
 		if err != nil {
 			if done != nil {
@@ -2796,6 +2922,10 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 	e.i18n.DetectAndSet(msg.Content)
 
 	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
+	if state.replaced {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueSkippedSessionChanged))
+		return nil, "", time.Time{}, nil, errSessionReplaced
+	}
 
 	// Update reply context for this turn
 	state.mu.Lock()
@@ -2955,7 +3085,25 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	e.noteAgentCLIChange()
 	e.interactiveMu.Lock()
 	quietMode := e.defaultQuiet
+	// A turn of a session the chat has left (/new, /switch, /cancel while it
+	// waited) gets no process, and must not disturb the current one. Checked
+	// under interactiveMu: /cancel switches sessions before it cleans up, so
+	// a process installed before the switch is closed by that cleanup.
+	if session != nil {
+		if active := e.sessions.ActiveSessionID(sessionKey); active != "" && active != session.ID {
+			e.interactiveMu.Unlock()
+			st := newInteractiveState(nil, p, replyCtx, quietMode)
+			st.replaced = true
+			return st
+		}
+	}
 	state, ok := e.interactiveStates[sessionKey]
+	if ok && state.agentSession != nil && session != nil && state.localSessionID != "" && state.localSessionID != session.ID {
+		// The chat moved to another session since this process started (a
+		// turn of the old session must not keep it, nor the new session
+		// continue the old conversation).
+		state.stale = true
+	}
 	if ok && state.stale {
 		state.mu.Lock()
 		quietMode = state.quiet
@@ -2968,6 +3116,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	}
 	defer e.interactiveMu.Unlock()
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
+		state.touch()
 		return state
 	}
 
@@ -3014,6 +3163,7 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 	}
 
 	state = newInteractiveState(agentSession, p, replyCtx, quietMode)
+	state.localSessionID = session.ID
 	e.interactiveStates[sessionKey] = state
 
 	slog.Info("interactive session started", "session_key", sessionKey, "agent_session", session.AgentSessionID, "elapsed", startElapsed)
@@ -3589,6 +3739,8 @@ var builtinCommands = []struct {
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"loop"}, "loop"},
+	{[]string{"timer", "remind"}, "timer"},
+	{[]string{"cancel"}, "cancel"},
 	{[]string{"compress", "compact"}, "compress"},
 	{[]string{"collect"}, "collect"},
 	{[]string{"queue"}, "queue"},
@@ -3715,6 +3867,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCron(p, msg, args)
 	case "loop":
 		e.cmdLoop(p, msg, args)
+	case "timer":
+		e.cmdTimer(p, msg, args)
+	case "cancel":
+		e.cmdCancel(p, msg)
 	case "compress":
 		e.cmdCompress(p, msg)
 	case "collect":
@@ -3771,6 +3927,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		if skill := e.skills.Resolve(cmd); skill != nil {
 			e.executeSkill(p, msg, skill, args)
 			return true
+		}
+		// The agent's own commands go through without a notice (T5.2).
+		if agentPassthroughCommands[cmd] {
+			return false
 		}
 		// Not a cc-connect command — notify user, then fall through to agent
 		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgUnknownCommand), "/"+cmd))
@@ -5733,6 +5893,12 @@ func (e *Engine) cmdTTS(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdStop(p Platform, msg *Message) {
+	// A scheduled turn (cron, loop, timer) running in this chat stops first:
+	// it is what the chat is busy with.
+	if e.stopCronRun(msg.SessionKey) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+		return
+	}
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[msg.SessionKey]
 	e.interactiveMu.Unlock()
@@ -5886,15 +6052,19 @@ func withinDeadline(ctx context.Context, fn func() error) bool {
 }
 
 func (e *Engine) cmdCompress(p Platform, msg *Message) {
-	compressor, ok := e.agent.(ContextCompressor)
-	if !ok || compressor.CompressCommand() == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
-		return
-	}
-
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[msg.SessionKey]
 	e.interactiveMu.Unlock()
+
+	native := false
+	if hasState && state != nil && state.agentSession != nil {
+		_, native = state.agentSession.(NativeCompactor)
+	}
+	compressor, ok := e.agent.(ContextCompressor)
+	if !native && (!ok || compressor.CompressCommand() == "") {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNotSupported))
+		return
+	}
 
 	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCompressNoSession))
@@ -5935,8 +6105,20 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 			return
 		}
 
-		cmd := compressor.CompressCommand()
-		if err := state.agentSession.Send(cmd, nil, nil); err != nil {
+		if nc, ok := state.agentSession.(NativeCompactor); ok {
+			ctx, cancel := context.WithTimeout(e.ctx, compactStartTimeout)
+			err = nc.Compact(ctx)
+			cancel()
+		} else if compressor != nil && compressor.CompressCommand() != "" {
+			err = state.agentSession.Send(compressor.CompressCommand(), nil, nil)
+		} else {
+			err = ErrCompactUnsupported
+		}
+		if errors.Is(err, ErrCompactUnsupported) {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+			return
+		}
+		if err != nil {
 			e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
 			e.sendAgentError(p, msg.ReplyCtx, err)
 			return
@@ -6643,7 +6825,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) string {
 		}
 		sub, id := fields[0], fields[1]
 		job := e.cronScheduler.Store().Get(id)
-		if job == nil || job.SessionKey != sessionKey || job.IsLoopJob() {
+		if job == nil || job.SessionKey != sessionKey || job.JobKind() != "cron" {
 			return "Cron job not found for this session."
 		}
 		switch sub {
@@ -7229,7 +7411,7 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 	jobs := e.cronScheduler.Store().ListBySessionKey(msg.SessionKey)
 	filtered := jobs[:0]
 	for _, j := range jobs {
-		if !j.IsLoopJob() {
+		if j.JobKind() == "cron" {
 			filtered = append(filtered, j)
 		}
 	}
@@ -7323,7 +7505,7 @@ func (e *Engine) cmdCronDel(p Platform, msg *Message, args []string) {
 	}
 	id := args[0]
 	job := e.cronScheduler.Store().Get(id)
-	if job == nil || job.IsLoopJob() || job.SessionKey != msg.SessionKey {
+	if job == nil || job.JobKind() != "cron" || job.SessionKey != msg.SessionKey {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
 		return
 	}
@@ -7341,7 +7523,7 @@ func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable b
 	}
 	id := args[0]
 	job := e.cronScheduler.Store().Get(id)
-	if job == nil || job.IsLoopJob() || job.SessionKey != msg.SessionKey {
+	if job == nil || job.JobKind() != "cron" || job.SessionKey != msg.SessionKey {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
 		return
 	}
@@ -7384,7 +7566,12 @@ func (e *Engine) buildLoopJobFromInput(sessionKey, input string) (*CronJob, erro
 	}
 	fields := strings.Fields(strings.TrimSpace(input))
 	if len(fields) < 2 {
-		return nil, fmt.Errorf("usage: /loop <interval> <prompt> (examples: 5s, 30m, 12h, 5d)")
+		return nil, fmt.Errorf("usage: /loop <interval|auto> <prompt> (examples: 5s, 30m, 12h, 5d)")
+	}
+	// "auto": the agent paces the loop itself (T5.2); 30m is the fallback.
+	selfPaced := strings.EqualFold(fields[0], "auto")
+	if selfPaced {
+		fields[0] = defaultSelfPacedInterval
 	}
 	_, normalized, err := ParseLoopIntervalSpec(fields[0])
 	if err != nil {
@@ -7406,6 +7593,7 @@ func (e *Engine) buildLoopJobFromInput(sessionKey, input string) (*CronJob, erro
 		Prompt:             prompt,
 		Enabled:            true,
 		AutoPausePrimitive: true,
+		SelfPaced:          selfPaced,
 		CreatedAt:          time.Now(),
 	}, nil
 }
@@ -7419,7 +7607,7 @@ func (e *Engine) cmdLoop(p Platform, msg *Message, args []string) {
 		e.cmdLoopList(p, msg)
 		return
 	}
-	if _, _, err := ParseLoopIntervalSpec(args[0]); err == nil {
+	if _, _, err := ParseLoopIntervalSpec(args[0]); err == nil || strings.EqualFold(args[0], "auto") {
 		job, buildErr := e.buildLoopJobFromInput(msg.SessionKey, strings.Join(args, " "))
 		if buildErr != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", buildErr))
@@ -7429,7 +7617,11 @@ func (e *Engine) cmdLoop(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ %v", err))
 			return
 		}
-		notice := fmt.Sprintf("✅ Loop created\nID: `%s`\nSchedule: `%s`\nPrompt: `%s`\nPrimitive: on", job.ID, job.LoopInterval, truncateStr(job.Prompt, 60))
+		schedule := job.LoopInterval
+		if job.SelfPaced {
+			schedule = "auto (the agent picks each next run; " + job.LoopInterval + " if it does not)"
+		}
+		notice := fmt.Sprintf("✅ Loop created\nID: `%s`\nSchedule: `%s`\nPrompt: `%s`\nPrimitive: on", job.ID, schedule, truncateStr(job.Prompt, 60))
 		e.reply(p, msg.ReplyCtx, notice)
 		e.replyLoopCardIfSupported(p, msg, fmt.Sprintf("Created `%s`.", job.ID))
 		return
@@ -7453,7 +7645,7 @@ func (e *Engine) cmdLoop(p Platform, msg *Message, args []string) {
 	case "primitive":
 		e.cmdLoopPrimitive(p, msg, args[1:])
 	default:
-		e.reply(p, msg.ReplyCtx, "Usage:\n/loop <interval> <prompt>\n/loop list\n/loop new\n/loop del <id>\n/loop enable <id>\n/loop disable <id>\n/loop primitive <id> on|off\nIntervals: 5s, 30m, 12h, 5d")
+		e.reply(p, msg.ReplyCtx, "Usage:\n/loop <interval> <prompt>\n/loop auto <prompt>  (the agent decides when to run next)\n/loop list\n/loop new\n/loop del <id>\n/loop enable <id>\n/loop disable <id>\n/loop primitive <id> on|off\nIntervals: 5s, 30m, 12h, 5d")
 	}
 }
 
@@ -7478,7 +7670,9 @@ func (e *Engine) cmdLoopList(p Platform, msg *Message) {
 			status = "⏸"
 		}
 		desc := firstNonEmptyLine(j.Prompt)
-		if j.AutoPausePrimitive {
+		if j.SelfPaced {
+			desc += " [auto]"
+		} else if j.AutoPausePrimitive {
 			desc += " [primitive]"
 		}
 		fmt.Fprintf(&sb, "%s %s\n", status, desc)

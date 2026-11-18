@@ -49,7 +49,7 @@ date: 2026-11-12
 | 会话 `/list /switch /new /name /delete` | ✅（另有 `/attach`） | ✅ | — | — | `/delete` 只删本地记录，从不调用 `SessionDeleter` |
 | Cron 绑定同一会话 | ⚠️ 支持 `/cron session` 绑定；但 cron 写入后，常驻的 Claude 进程看不到这些轮次 | ✅ | — | — | 本地 API `CronAddRequest` 无 `agent_session_id` |
 | `/loop` | ✅ 固定间隔 + `<loop-control>pause</loop-control>` | ✅ | — | — | 无自定节奏 / goal |
-| 排队 | ✅ `/queue`（按聊天，20 条） | ✅ | — | — | 设计文档写的“按 agent 会话共享队列”未实现 |
+| 排队 | ✅ `/queue`（按聊天，20 条） | ✅ | — | — | 设计文档写的“按 agent 会话共享队列”未实现（P5 修订了设计文档：按聊天排队是有意的） |
 | 轮内插入 | ❌ | ❌ | — | — | |
 | `/stop` | ⚠️ 杀进程 | ⚠️ 杀进程 | — | — | 无优雅中断 |
 | `/compact` | ✅ | ⚠️ 当普通文本发给 `codex exec` | — | — | |
@@ -453,6 +453,31 @@ Echo 侧（独立仓库，单独 PR）：
 | T5.4 | `/cancel`；`max_turn_time_mins`；`agent_session_idle_timeout_mins`（移植上游） | — | |
 | T5.5 | 队列 key 与设计文档对齐（按 agent 会话共享）或修订设计文档；更新 `2026-07-22-prompt-queue.md` 的状态 | — | |
 | T5.6 | `/compact` 对四个 agent 都走原生实现 | T4.1 | |
+
+**P5 实现记录（2026-11-18）**
+
+- **T5.1 `/timer`**：一次性定时任务是 cron 的一种（kind = `timer`，`run_at` 指定时间），沿用 cron 的投递：忙时进队列、在自己的 agent 会话里跑、结果回到聊天。`/timer <时间> <内容>`，时间可以是延时（`30m`、`1h30m`、`2d`）、时刻（`14:30`，取下一个）或日期（`2026-11-20 09:00`、RFC 3339）；`/timer exec <时间> <命令>` 跑 shell；`/timer list`、`/timer del <id>`。运行后自动停用，在列表里显示一天再清掉；服务停机错过的定时，15 分钟内的启动后补跑，更久的记为“错过”不再补跑。定时任务不出现在 `/cron` 里，也不能被重新启用；排在忙碌聊天后面、又被 `/cancel`、`/new`、`/queue clear` 丢弃的定时，记为已结束并写明原因。
+- **T5.2 自定节奏**：`/loop auto <内容>` 让 agent 每次在回复末尾用 `<loop-control>next 20m</loop-control>` 决定下一次（1 分钟到 7 天，超出就取边界；没给就按 30 分钟），也可以用 `<loop-control>pause</loop-control>` 停下；普通 loop 开着 primitive 时同样认 `next`。`/goal` 原样交给 agent，不再提示“不是 echo-client 命令”。
+- **T5.3 cron**：本地 API（`/cron/add`、`cc-connect cron add`）可以建 cron、loop（`--loop 30m|auto`）、timer（`--at`），可以指定 `agent_session_id` 和这个任务自己的 model / effort / mode；mode 和 effort 按 agent 实际提供的选项检查，未知值拒绝；`/cron/edit` 改这些字段时同样检查。任务没设的项沿用绑定聊天当前的设置。卡片和列表本来就显示绑定的会话。
+- **T5.4**：`/cancel` = 停止当前轮次（结束 agent 进程）+ 丢弃这个聊天排队的消息 + 开新会话，保留 `/quiet`。单轮时限沿用已有的 `turn_timeout_mins`，同时认上游的名字 `max_turn_time_mins`，项目里可以用 `max_turn_time_mins` 单独设置。`agent_session_idle_timeout_mins`（全局或按项目）：常驻 agent 进程空闲这么久就关闭，会话 ID 保留，下一条消息起新进程续上；正在跑、有待回答的审批 / 问题、或聊天忙时不动。
+- **T5.5**：保留按聊天排队（cron 和用户消息在同一聊天里要串行），修订了 `2026-07-22-prompt-queue.md` 并标为已实现；共享同一 agent 会话的不同聊天由 agent 会话锁串行。
+- **T5.6 compact**：core 新增会话接口 `NativeCompactor`。Codex（app-server）用 `thread/compact/start`，压缩作为一轮跑完；exec 后端没有压缩，明确拒绝而不是把 “/compact” 当文字发给模型。Claude Code 的 `/compact` 本来就是原生命令。agy 的 print 模式没有压缩，Kimi 在 `-p` 下没有验证，两者放到 P6（ACP）。
+- **测试**：`core/p5_test.go`（时间解析、定时的运行 / 错过 / 清理、`/timer`、自定节奏、`/goal`、任务自己的设置、API、`/cancel`、空闲进程、原生压缩），`agent/codex` 的压缩场景，`config` 的新配置项。
+
+**P5 review（2026-11-18，Codex + Kimi Code）**：
+
+- **任务自己的设置（高）**：只有能按会话接收设置的 agent（Claude Code、Codex、Kimi、agy）才接受任务自己的 model / effort / mode；其它 agent（如 gemini）以前会接受 `mode = plan` 却按项目的 yolo 运行，现在直接拒绝。
+- **`/stop`、`/cancel` 能停掉定时任务的轮次（高）**：cron / loop / timer 在自己的 agent 会话里跑，不在聊天的进程表里；现在按聊天登记正在跑的定时轮次，`/stop`、`/cancel` 会取消它（记为“被用户停止”，不报失败）。`/cancel` 先开新会话、清队列，再停定时轮次和聊天进程。
+- **旧会话的轮次不会接管聊天（高）**：进程记住自己属于哪个本地会话，聊天换了会话（`/new`、`/switch`、`/cancel`）后不会再复用它；排在别的聊天后面等 agent 会话锁的轮次，轮到时如果聊天已经换了会话就丢弃并告知（以前会在旧会话里跑，进程还会留给新会话用）。
+- **空闲关闭**：关闭期间进来的消息排队后没人启动，现在关闭结束后会启动它；被标为待重启（stale）的空闲进程也会被关闭。
+- **loop 控制只看最后一行（中）**：`<loop-control>…</loop-control>` 只在回复最后一行的末尾才算数，前文引用的网页或工具输出里的标签不再能改期或暂停 loop。
+- **积压的运行（中）**：同一个任务在忙碌聊天的队列里最多等一份；agent 改期或暂停时，已排队的那一份丢弃，不会紧接着再跑一次。
+- **其它**：几秒后的定时不再被推迟到 30 秒后（启动时的宽限只用于已经过期的定时）；`/cancel` 保留“关闭安静模式”的选择。
+- **旧会话的轮次拿不到进程**：聊天已经换了会话时，旧会话的轮次在创建进程那一步（与 `/cancel` 同一把锁下）就被拒绝并告知，不会再起进程，也不会影响新会话的进程。
+- **排队中的定时跨重启**：定时在忙碌聊天里排队时记下 `queued_at`；重启后这样的定时照样运行，不按“错过”处理。正在执行时重启的定时仍按“过期 15 分钟内补跑”处理。
+- **改任务的项目**：`/cron/edit project` 会用目标项目的 agent 重新检查任务自己的设置，不合适就拒绝（以前换到不提供该模式的 agent 时，模式会在启动时被悄悄丢掉）。
+- **exec 后端的 `/compact`**：回复“不能压缩”，不再关闭当前进程（新错误 `ErrCompactUnsupported`）。
+- **说明**：agent 选的下一次时间只在内存里，服务重启后回到 loop 的间隔；正在执行的定时如果遇到重启，不能区分“已执行到一半”和“还没开始”。cron / timer 的 `exec` shell 命令不受 `/stop`、`/cancel` 影响（只受任务超时限制）。
 
 ### P6 agy / Kimi 进阶：ACP（约 5 天，可选）
 

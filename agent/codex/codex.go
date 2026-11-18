@@ -648,7 +648,15 @@ func (a *Agent) SkillDirs() []string {
 
 // ── ContextCompressor implementation ──────────────────────────
 
-func (a *Agent) CompressCommand() string { return "/compact" }
+// CompressCommand: compaction is native on the app-server backend
+// (thread/compact/start, see appServerSession.Compact); `codex exec` has no
+// way to compact, so the exec backend reports none.
+func (a *Agent) CompressCommand() string {
+	if a.appServer() {
+		return "/compact"
+	}
+	return ""
+}
 
 // ── MemoryFileProvider implementation ─────────────────────────
 

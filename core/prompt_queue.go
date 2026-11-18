@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -420,6 +421,9 @@ func (e *Engine) startQueuedCronRun(item queuedPrompt) bool {
 		e.failQueuedPrompt(item, "")
 		return true
 	}
+	if job.IsTimerJob() {
+		e.cronScheduler.Store().SetQueuedAt(item.JobID, time.Time{}) // runs now
+	}
 	go func() {
 		defer func() {
 			session.Unlock()
@@ -449,6 +453,13 @@ func (e *Engine) beginCronTurnOrEnqueue(job *CronJob, sessionKey string, msg *Me
 		e.promptQueues[queueKey] = state
 	}
 	if state.Running || len(state.Items) > 0 {
+		// One waiting run per job: runs that pile up behind a busy chat
+		// would otherwise go back to back, ignoring the schedule.
+		for _, item := range state.Items {
+			if item.isCron() && item.JobID == job.ID {
+				return false, nil
+			}
+		}
 		_, err := e.enqueuePromptLocked(state, queueKey, "", agentSessionID, "cron", job.ID, msg)
 		return false, err
 	}
@@ -535,6 +546,7 @@ func (e *Engine) cancelQueuedPromptsForSessionSwitch(sessionKey, newLocalSession
 				(item.OriginLocalSessionID == "" || item.OriginLocalSessionID != newLocalSessionID)
 			agentSessionChanged := item.AgentSessionIDSnapshot == "" || item.AgentSessionIDSnapshot != newAgentSessionID
 			if item.OriginSessionKey == sessionKey && (localSessionChanged || agentSessionChanged) {
+				e.finishDroppedCronItems([]queuedPrompt{item}, "dropped: the chat started another session")
 				cancelled++
 				continue
 			}
@@ -606,11 +618,56 @@ func (e *Engine) clearPromptQueue(queueKey string) int {
 		return 0
 	}
 	n := len(state.Items)
+	e.finishDroppedCronItems(state.Items, "dropped from the queue")
 	state.Items = nil
 	if !state.Running {
 		delete(e.promptQueues, queueKey)
 	}
 	return n
+}
+
+// dropQueuedCronRuns removes a job's waiting runs from every queue.
+func (e *Engine) dropQueuedCronRuns(jobID, reason string) int {
+	e.promptQueueMu.Lock()
+	defer e.promptQueueMu.Unlock()
+	dropped := 0
+	for key, state := range e.promptQueues {
+		if state == nil {
+			continue
+		}
+		kept := state.Items[:0]
+		for _, item := range state.Items {
+			if item.isCron() && item.JobID == jobID {
+				e.finishDroppedCronItems([]queuedPrompt{item}, reason)
+				dropped++
+				continue
+			}
+			kept = append(kept, item)
+		}
+		state.Items = kept
+		if !state.Running && len(state.Items) == 0 {
+			delete(e.promptQueues, key)
+		}
+	}
+	return dropped
+}
+
+// finishDroppedCronItems records queued cron runs dropped before they ran.
+// A one-shot timer is marked as run with the reason; otherwise it would stay
+// pending with nothing left to fire it. Repeating jobs just run next time.
+// Called with promptQueueMu held (the cron store never takes it).
+func (e *Engine) finishDroppedCronItems(items []queuedPrompt, reason string) {
+	if e.cronScheduler == nil {
+		return
+	}
+	for _, item := range items {
+		if !item.isCron() || item.JobID == "" {
+			continue
+		}
+		if job := e.cronScheduler.Store().Get(item.JobID); job != nil && job.IsTimerJob() && job.Enabled {
+			e.cronScheduler.Store().MarkRun(item.JobID, errors.New(reason))
+		}
+	}
 }
 
 func (e *Engine) deletePromptQueueItem(queueKey, idOrIndex string) bool {
@@ -625,6 +682,7 @@ func (e *Engine) deletePromptQueueItem(queueKey, idOrIndex string) bool {
 	if idx < 0 {
 		return false
 	}
+	e.finishDroppedCronItems(state.Items[idx:idx+1], "deleted from the queue")
 	copy(state.Items[idx:], state.Items[idx+1:])
 	state.Items = state.Items[:len(state.Items)-1]
 	if !state.Running && len(state.Items) == 0 {

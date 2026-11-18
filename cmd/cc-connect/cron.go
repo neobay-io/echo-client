@@ -42,6 +42,7 @@ func runCron(args []string) {
 
 func runCronAdd(args []string) {
 	var project, sessionKey, cronExpr, prompt, execCmd, desc, dataDir, configPath, sessionMode string
+	var loopSpec, runAt, agentSessionID, model, effort, mode string
 	var timeoutMins *int
 
 	var positional []string
@@ -92,6 +93,36 @@ func runCronAdd(args []string) {
 				i++
 				sessionMode = args[i]
 			}
+		case "--loop":
+			if i+1 < len(args) {
+				i++
+				loopSpec = args[i]
+			}
+		case "--at":
+			if i+1 < len(args) {
+				i++
+				runAt = args[i]
+			}
+		case "--agent-session":
+			if i+1 < len(args) {
+				i++
+				agentSessionID = args[i]
+			}
+		case "--model":
+			if i+1 < len(args) {
+				i++
+				model = args[i]
+			}
+		case "--effort", "--reasoning-level":
+			if i+1 < len(args) {
+				i++
+				effort = args[i]
+			}
+		case "--mode":
+			if i+1 < len(args) {
+				i++
+				mode = args[i]
+			}
 		case "--timeout-mins":
 			if i+1 < len(args) {
 				i++
@@ -118,8 +149,23 @@ func runCronAdd(args []string) {
 		sessionKey = os.Getenv("CC_SESSION_KEY")
 	}
 
+	kind := "cron"
+	switch {
+	case loopSpec != "" && runAt != "", (loopSpec != "" || runAt != "") && cronExpr != "":
+		fmt.Fprintln(os.Stderr, "Error: use one of --cron, --loop and --at")
+		os.Exit(1)
+	case loopSpec != "":
+		kind = "loop"
+	case runAt != "":
+		kind = "timer"
+	}
+
 	// If cron expr not provided via --cron, try positional: first 5 fields are cron, rest is prompt
-	if cronExpr == "" && len(positional) >= 6 {
+	if kind != "cron" {
+		if prompt == "" && execCmd == "" && len(positional) > 0 {
+			prompt = strings.Join(positional, " ")
+		}
+	} else if cronExpr == "" && len(positional) >= 6 {
 		cronExpr = strings.Join(positional[:5], " ")
 		if prompt == "" && execCmd == "" {
 			prompt = strings.Join(positional[5:], " ")
@@ -128,8 +174,8 @@ func runCronAdd(args []string) {
 		prompt = strings.Join(positional, " ")
 	}
 
-	if cronExpr == "" || (prompt == "" && execCmd == "") {
-		fmt.Fprintln(os.Stderr, "Error: cron expression and either --prompt or --exec are required")
+	if (kind == "cron" && cronExpr == "") || (prompt == "" && execCmd == "") {
+		fmt.Fprintln(os.Stderr, "Error: a schedule (--cron, --loop or --at) and either --prompt or --exec are required")
 		printCronAddUsage()
 		os.Exit(1)
 	}
@@ -159,6 +205,22 @@ func runCronAdd(args []string) {
 	if sessionMode != "" {
 		body["session_mode"] = sessionMode
 	}
+	body["kind"] = kind
+	if kind == "loop" {
+		if strings.EqualFold(loopSpec, "auto") {
+			body["self_paced"] = true
+		} else {
+			body["loop_interval"] = loopSpec
+		}
+	}
+	if kind == "timer" {
+		body["run_at"] = runAt
+	}
+	for key, value := range map[string]string{"agent_session_id": agentSessionID, "model": model, "reasoning_level": effort, "mode": mode} {
+		if value != "" {
+			body[key] = value
+		}
+	}
 	if timeoutMins != nil {
 		body["timeout_mins"] = *timeoutMins
 	}
@@ -183,7 +245,18 @@ func runCronAdd(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Cron job created: %s\n", result["id"])
-	fmt.Printf("Schedule: %s\n", result["cron_expr"])
+	switch kind {
+	case "loop":
+		if result["self_paced"] == true {
+			fmt.Printf("Schedule: every run picked by the agent (fallback %s)\n", result["loop_interval"])
+		} else {
+			fmt.Printf("Schedule: every %s\n", result["loop_interval"])
+		}
+	case "timer":
+		fmt.Printf("Runs once at: %s\n", result["run_at"])
+	default:
+		fmt.Printf("Schedule: %s\n", result["cron_expr"])
+	}
 	if execCmd != "" {
 		fmt.Printf("Command: %s\n", result["exec"])
 	} else {
@@ -421,7 +494,7 @@ func runCronEdit(args []string) {
 	id, field, rawValue := pos[0], pos[1], strings.Join(pos[2:], " ")
 	var value any = rawValue
 	switch field {
-	case "enabled", "mute", "silent":
+	case "enabled", "mute", "silent", "self_paced", "auto_pause_primitive":
 		b, err := strconv.ParseBool(rawValue)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: invalid bool for %s: %v\n", field, err)
@@ -498,7 +571,13 @@ Options:
       --prompt <text>        Task prompt
       --exec <command>       Shell command to execute
       --desc <text>          Short description
+      --loop <interval|auto> Repeat every interval (30m, 2h, 1d), or let the agent pick each next run
+      --at <when>            Run once: a delay (30m), a time (14:30) or a date ("2026-11-20 09:00")
       --session-mode <mode>  reuse | new_per_run
+      --agent-session <id>   Run in this existing agent session
+      --model <name>         Model for this job (default: the chat's)
+      --effort <level>       Reasoning effort for this job (default: the chat's)
+      --mode <mode>          Permission mode for this job (default: the chat's)
       --timeout-mins <mins>  omit for default (30m), 0=unlimited
       --config <path>        Config file used to resolve data_dir
       --data-dir <path>      Data directory (default: ~/.echo-client, fallback: ~/.cc-connect)
@@ -507,15 +586,18 @@ Options:
 Examples:
   %s cron add --cron "0 6 * * *" --prompt "Collect GitHub trending data" --desc "Daily Trending"
   %s cron add --cron "0 6 * * *" --exec "git status --short" --desc "Daily Git Check"
-  %s cron add 0 6 * * * Collect GitHub trending data and send me a summary`, appName, appName, appName, appName)
+  %s cron add 0 6 * * * Collect GitHub trending data and send me a summary
+  %s cron add --loop auto --prompt "Watch the deploy and report when it is done"
+  %s cron add --at 30m --prompt "Check whether CI passed"`, appName, appName, appName, appName, appName, appName)
 }
 
 func printCronEditUsage() {
 	fmt.Printf(`Usage: %s cron edit <id> <field> <value>
 
 Editable fields:
-  project session_key cron_expr prompt exec work_dir description
-  enabled silent mute session_mode timeout_mins
+  project session_key cron_expr loop_interval prompt exec work_dir description
+  enabled silent mute session_mode timeout_mins self_paced agent_session_id
+  model reasoning_level mode
 
 Examples:
   %s cron edit abc123 description Nightly sync

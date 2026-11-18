@@ -42,7 +42,14 @@ type Config struct {
 	IdleTimeoutMins       *int                `toml:"idle_timeout_mins,omitempty"`        // max minutes between agent events; 0 = no timeout; default 120
 	FirstEventTimeoutSecs *int                `toml:"first_event_timeout_secs,omitempty"` // max seconds to wait for first agent event; 0 = disabled; default 300
 	TurnTimeoutMins       *int                `toml:"turn_timeout_mins,omitempty"`        // max minutes for a single agent turn; 0 = disabled; default 45
-	Echo                  EchoConfig          `toml:"echo"`
+	// MaxTurnTimeMins is upstream's name for turn_timeout_mins (used when
+	// turn_timeout_mins is not set).
+	MaxTurnTimeMins *int `toml:"max_turn_time_mins,omitempty"`
+	// AgentSessionIdleTimeoutMins closes a chat's resident agent process
+	// after this many minutes without a turn (the session resumes on the
+	// next message); 0 or unset = never. Projects can override it.
+	AgentSessionIdleTimeoutMins *int       `toml:"agent_session_idle_timeout_mins,omitempty"`
+	Echo                        EchoConfig `toml:"echo"`
 }
 
 // CronConfig controls cron job behavior.
@@ -187,6 +194,11 @@ type ProjectConfig struct {
 	SkillDirs               []string          `toml:"skill_dirs,omitempty"`
 	IncludeDefaultSkillDirs *bool             `toml:"include_default_skill_dirs,omitempty"`
 	Echo                    EchoProjectConfig `toml:"echo"`
+	// MaxTurnTimeMins overrides the global turn time limit for this
+	// project; 0 = no limit.
+	MaxTurnTimeMins *int `toml:"max_turn_time_mins,omitempty"`
+	// AgentSessionIdleTimeoutMins overrides the global value for this project.
+	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
 }
 
 // EchoProjectConfig controls how a local project is exposed to Echo as a worker lane.
@@ -419,6 +431,18 @@ func (c *Config) validate() error {
 				return fmt.Errorf("config: %s.skill_dirs[%d] must be an absolute path", prefix, j)
 			}
 		}
+		if proj.MaxTurnTimeMins != nil && *proj.MaxTurnTimeMins < 0 {
+			return fmt.Errorf("config: %s.max_turn_time_mins must be >= 0", prefix)
+		}
+		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
+			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
+		}
+	}
+	if c.MaxTurnTimeMins != nil && *c.MaxTurnTimeMins < 0 {
+		return fmt.Errorf("config: max_turn_time_mins must be >= 0")
+	}
+	if c.AgentSessionIdleTimeoutMins != nil && *c.AgentSessionIdleTimeoutMins < 0 {
+		return fmt.Errorf("config: agent_session_idle_timeout_mins must be >= 0")
 	}
 	if c.AgentAuth.TimeoutSecs < 0 || c.AgentAuth.TimeoutSecs > 1800 {
 		return fmt.Errorf("config: agent_auth.timeout_secs must be between 0 and 1800")

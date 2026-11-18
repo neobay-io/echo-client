@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,6 +15,20 @@ import (
 type SessionUsageReporter interface {
 	SessionUsage(ctx context.Context) (*UsageReport, error)
 }
+
+// NativeCompactor is an agent session that compacts its context through
+// its own protocol instead of a "/compact" message (T5.6). Compact starts
+// the compaction, which then ends like a turn (EventResult or EventError).
+type NativeCompactor interface {
+	Compact(ctx context.Context) error
+}
+
+// ErrCompactUnsupported: the session cannot compact (e.g. Codex in exec
+// mode); /compact says so and leaves the session as it is.
+var ErrCompactUnsupported = errors.New("this agent session cannot compact its context")
+
+// compactStartTimeout bounds starting a native compaction.
+var compactStartTimeout = 30 * time.Second
 
 // usageTimeout covers agents that start a short-lived CLI to answer.
 var usageTimeout = 60 * time.Second

@@ -74,6 +74,13 @@ func newCodexSession(ctx context.Context, workDir, model, reasoningLevel, mode, 
 // Send launches a codex subprocess.
 // If a threadID exists (from a prior turn or resume), uses `codex exec resume <id> <prompt>`.
 // Otherwise uses `codex exec <prompt>` to start a new conversation.
+// Compact implements core.NativeCompactor: `codex exec` cannot compact, so
+// it refuses instead of sending "/compact" to the model as text (this
+// session is also the fallback when the app-server is unavailable).
+func (cs *codexSession) Compact(context.Context) error {
+	return fmt.Errorf("%w: compaction needs the Codex app-server backend; this Codex CLI runs in exec mode", core.ErrCompactUnsupported)
+}
+
 func (cs *codexSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	imagePaths := core.SaveImagesToDisk(cs.workDir, images)
 	if len(files) > 0 {

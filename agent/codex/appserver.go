@@ -658,6 +658,20 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
 	return nil
 }
 
+// Compact implements core.NativeCompactor (thread/compact/start): Codex
+// summarizes the thread in a turn of its own, reported through the usual
+// turn/started … turn/completed notifications.
+func (s *appServerSession) Compact(ctx context.Context) error {
+	if !s.Alive() {
+		return fmt.Errorf("session is closed")
+	}
+	s.mu.Lock()
+	s.pending = nil
+	s.mu.Unlock()
+	_, err := s.proc.rpc.call(ctx, "thread/compact/start", map[string]any{"threadId": s.CurrentSessionID()})
+	return err
+}
+
 // Steer implements core.Steerer (turn/steer into the running turn).
 func (s *appServerSession) Steer(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	s.mu.Lock()

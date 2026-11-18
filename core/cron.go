@@ -19,27 +19,40 @@ import (
 
 // CronJob represents a persisted scheduled task.
 type CronJob struct {
-	ID                 string    `json:"id"`
-	Project            string    `json:"project"`
-	SessionKey         string    `json:"session_key"`
-	Kind               string    `json:"kind,omitempty"`
-	CronExpr           string    `json:"cron_expr"`
-	LoopInterval       string    `json:"loop_interval,omitempty"`
-	Prompt             string    `json:"prompt"`
-	Exec               string    `json:"exec,omitempty"`     // shell command; mutually exclusive with Prompt
-	WorkDir            string    `json:"work_dir,omitempty"` // working directory for exec; empty = agent work_dir
-	Description        string    `json:"description"`
-	Enabled            bool      `json:"enabled"`
-	Silent             *bool     `json:"silent,omitempty"` // suppress start notification; nil = use global default
-	Mute               bool      `json:"mute,omitempty"`   // suppress all outbound messages for this job
-	AutoPausePrimitive bool      `json:"auto_pause_primitive,omitempty"`
-	SessionMode        string    `json:"session_mode,omitempty"`
-	AgentSessionID     string    `json:"agent_session_id,omitempty"` // cron's own agent session lineage; resumed each run, updated to the forked id
-	SessionLabel       string    `json:"session_label,omitempty"`    // display label for the associated session
-	TimeoutMins        *int      `json:"timeout_mins,omitempty"`     // nil=30m, 0=unlimited, >0=minutes
-	CreatedAt          time.Time `json:"created_at"`
-	LastRun            time.Time `json:"last_run,omitempty"`
-	LastError          string    `json:"last_error,omitempty"`
+	ID                 string `json:"id"`
+	Project            string `json:"project"`
+	SessionKey         string `json:"session_key"`
+	Kind               string `json:"kind,omitempty"`
+	CronExpr           string `json:"cron_expr"`
+	LoopInterval       string `json:"loop_interval,omitempty"`
+	Prompt             string `json:"prompt"`
+	Exec               string `json:"exec,omitempty"`     // shell command; mutually exclusive with Prompt
+	WorkDir            string `json:"work_dir,omitempty"` // working directory for exec; empty = agent work_dir
+	Description        string `json:"description"`
+	Enabled            bool   `json:"enabled"`
+	Silent             *bool  `json:"silent,omitempty"` // suppress start notification; nil = use global default
+	Mute               bool   `json:"mute,omitempty"`   // suppress all outbound messages for this job
+	AutoPausePrimitive bool   `json:"auto_pause_primitive,omitempty"`
+	SessionMode        string `json:"session_mode,omitempty"`
+	AgentSessionID     string `json:"agent_session_id,omitempty"` // cron's own agent session lineage; resumed each run, updated to the forked id
+	SessionLabel       string `json:"session_label,omitempty"`    // display label for the associated session
+	TimeoutMins        *int   `json:"timeout_mins,omitempty"`     // nil=30m, 0=unlimited, >0=minutes
+	// RunAt is when a one-shot timer (kind "timer") fires.
+	RunAt time.Time `json:"run_at,omitempty"`
+	// QueuedAt: the timer fired while its chat was busy and waits in the
+	// chat's queue (cleared when that run starts). A restart then runs it
+	// instead of treating it as missed.
+	QueuedAt time.Time `json:"queued_at,omitempty"`
+	// SelfPaced: the agent picks each next run of this loop with
+	// <loop-control>next 20m</loop-control> (LoopInterval is the fallback).
+	SelfPaced bool `json:"self_paced,omitempty"`
+	// Per-job agent settings; empty = the bound chat's current setting.
+	Model          string    `json:"model,omitempty"`
+	ReasoningLevel string    `json:"reasoning_level,omitempty"`
+	Mode           string    `json:"mode,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastRun        time.Time `json:"last_run,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
 }
 
 // IsShellJob returns true if the job executes a shell command directly.
@@ -53,9 +66,16 @@ func NormalizeCronJobKind(kind string) string {
 		return "cron"
 	case "loop":
 		return "loop"
+	case "timer":
+		return "timer"
 	default:
 		return strings.ToLower(strings.TrimSpace(kind))
 	}
+}
+
+// IsTimerJob reports a one-shot timer (/timer).
+func (j *CronJob) IsTimerJob() bool {
+	return j.JobKind() == "timer"
 }
 
 func (j *CronJob) JobKind() string {
@@ -111,9 +131,17 @@ func (j *CronJob) UsesNewSessionPerRun() bool {
 func validateCronJob(j *CronJob) error {
 	j.Kind = NormalizeCronJobKind(j.Kind)
 	switch j.Kind {
-	case "cron", "loop":
+	case "cron", "loop", "timer":
 	default:
 		return fmt.Errorf("invalid job kind %q", j.Kind)
+	}
+	if j.IsTimerJob() {
+		if j.RunAt.IsZero() {
+			return fmt.Errorf("timer needs a time to run at")
+		}
+		if strings.TrimSpace(j.Prompt) == "" && strings.TrimSpace(j.Exec) == "" {
+			return fmt.Errorf("timer prompt is required")
+		}
 	}
 	mode := NormalizeCronSessionMode(j.SessionMode)
 	if mode != "" && mode != "new_per_run" {
@@ -211,6 +239,22 @@ func (s *CronStore) SetEnabled(id string, enabled bool) bool {
 	return false
 }
 
+// SetQueuedAt records (or with a zero time clears) that a timer waits in
+// its chat's queue.
+func (s *CronStore) SetQueuedAt(id string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.ID == id {
+			j.QueuedAt = at
+			if err := s.save(); err != nil {
+				slog.Error("cron: failed to save jobs after queueing a timer", "id", id, "error", err)
+			}
+			return
+		}
+	}
+}
+
 func (s *CronStore) MarkRun(id string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -221,6 +265,10 @@ func (s *CronStore) MarkRun(id string, err error) {
 				j.LastError = err.Error()
 			} else {
 				j.LastError = ""
+			}
+			if j.IsTimerJob() {
+				j.Enabled = false // a timer runs once
+				j.QueuedAt = time.Time{}
 			}
 			if saveErr := s.save(); saveErr != nil {
 				slog.Error("cron: failed to save jobs after mark run", "id", id, "error", saveErr)
@@ -364,6 +412,26 @@ func updateCronJobField(job *CronJob, field string, value any) error {
 			job.SessionMode = NormalizeCronSessionMode(v)
 			return nil
 		}
+	case "model":
+		if v, ok := value.(string); ok {
+			job.Model = strings.TrimSpace(v)
+			return nil
+		}
+	case "reasoning_level", "effort":
+		if v, ok := value.(string); ok {
+			job.ReasoningLevel = strings.TrimSpace(v)
+			return nil
+		}
+	case "mode":
+		if v, ok := value.(string); ok {
+			job.Mode = strings.TrimSpace(v)
+			return nil
+		}
+	case "self_paced":
+		if v, ok := value.(bool); ok {
+			job.SelfPaced = v
+			return nil
+		}
 	case "agent_session_id":
 		if v, ok := value.(string); ok {
 			job.AgentSessionID = v
@@ -427,6 +495,7 @@ func (cs *CronScheduler) IsSilent(job *CronJob) bool {
 }
 
 func (cs *CronScheduler) Start() error {
+	cs.pruneFiredTimers()
 	jobs := cs.store.List()
 	for _, job := range jobs {
 		if job.Enabled {
@@ -440,6 +509,15 @@ func (cs *CronScheduler) Start() error {
 	return nil
 }
 
+// pruneFiredTimers deletes timers that ran more than a day ago.
+func (cs *CronScheduler) pruneFiredTimers() {
+	for _, job := range cs.store.List() {
+		if job.IsTimerJob() && !job.Enabled && !job.LastRun.IsZero() && time.Since(job.LastRun) > 24*time.Hour {
+			cs.store.Remove(job.ID)
+		}
+	}
+}
+
 func (cs *CronScheduler) Stop() {
 	cs.cron.Stop()
 }
@@ -450,7 +528,7 @@ func (cs *CronScheduler) AddJob(job *CronJob) error {
 	}
 	job.Kind = NormalizeCronJobKind(job.Kind)
 	job.SessionMode = NormalizeCronSessionMode(job.SessionMode)
-	if !job.IsLoopJob() {
+	if !job.IsLoopJob() && !job.IsTimerJob() {
 		if _, err := cron.ParseStandard(job.CronExpr); err != nil {
 			return fmt.Errorf("invalid cron expression %q: %w", job.CronExpr, err)
 		}
@@ -465,16 +543,22 @@ func (cs *CronScheduler) AddJob(job *CronJob) error {
 }
 
 func (cs *CronScheduler) RemoveJob(id string) bool {
+	// Store first: RescheduleLoopAfter checks the store under cs.mu, so it
+	// cannot schedule a job that is being removed.
+	removed := cs.store.Remove(id)
 	cs.mu.Lock()
 	if entryID, ok := cs.entries[id]; ok {
 		cs.cron.Remove(entryID)
 		delete(cs.entries, id)
 	}
 	cs.mu.Unlock()
-	return cs.store.Remove(id)
+	return removed
 }
 
 func (cs *CronScheduler) EnableJob(id string) error {
+	if j := cs.store.Get(id); j != nil && j.IsTimerJob() && !j.LastRun.IsZero() {
+		return fmt.Errorf("timer %q already ran; set a new one", id)
+	}
 	if !cs.store.SetEnabled(id, true) {
 		return fmt.Errorf("job %q not found", id)
 	}
@@ -504,7 +588,13 @@ func (cs *CronScheduler) UpdateJob(id, field string, value any) error {
 		return fmt.Errorf("job %q not found", id)
 	}
 	proposed := cloneCronJob(job)
-	if field == "cron_expr" && !proposed.IsLoopJob() {
+	if field == "enabled" && value == true && job.IsTimerJob() && !job.LastRun.IsZero() {
+		return fmt.Errorf("timer %q already ran; set a new one", id)
+	}
+	if field == "cron_expr" && proposed.JobKind() != "cron" {
+		return fmt.Errorf("cron_expr applies to cron jobs only")
+	}
+	if field == "cron_expr" {
 		expr, ok := value.(string)
 		if !ok {
 			return fmt.Errorf("cron_expr must be a string")
@@ -597,6 +687,25 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 		cs.cron.Remove(old)
 	}
 
+	if job.IsTimerJob() {
+		// A timer missed while the service was down fires shortly after
+		// start, unless it is long overdue: then it is recorded as missed.
+		at := job.RunAt
+		// A timer that had fired and was waiting in the chat's queue still
+		// runs: it was due, only the restart lost its place in the queue.
+		if overdue := time.Since(at); overdue > timerStaleAfter && job.QueuedAt.IsZero() {
+			slog.Warn("cron: timer missed while the service was down", "id", job.ID, "due", at)
+			cs.store.MarkRun(job.ID, fmt.Errorf("missed: due %s while the service was down", at.Format("2006-01-02 15:04")))
+			return nil
+		}
+		if now := time.Now(); !at.After(now) {
+			at = now.Add(timerMissedGrace)
+		}
+		jobID := job.ID
+		cs.entries[jobID] = cs.cron.Schedule(onceSchedule{at: at}, cron.FuncJob(func() { cs.executeJob(jobID) }))
+		return nil
+	}
+
 	spec, err := job.ScheduleSpec()
 	if err != nil {
 		return err
@@ -612,10 +721,72 @@ func (cs *CronScheduler) scheduleJob(job *CronJob) error {
 	return nil
 }
 
+// timerMissedGrace delays a timer whose time passed (service was down).
+var timerMissedGrace = 30 * time.Second
+
+// timerStaleAfter: a timer overdue by more than this is not run late.
+const timerStaleAfter = 15 * time.Minute
+
+// onceSchedule runs once at at (a /timer).
+type onceSchedule struct{ at time.Time }
+
+func (s onceSchedule) Next(t time.Time) time.Time {
+	if t.Before(s.at) {
+		return s.at
+	}
+	return time.Time{} // never again
+}
+
+// firstThenEvery runs at first, then every interval (a loop whose agent
+// asked for its next run).
+type firstThenEvery struct {
+	first time.Time
+	every time.Duration
+}
+
+func (s firstThenEvery) Next(t time.Time) time.Time {
+	if t.Before(s.first) {
+		return s.first
+	}
+	return t.Add(s.every)
+}
+
+// RescheduleLoopAfter makes a loop's next run happen after d (the agent's
+// <loop-control>next …</loop-control>), then continue at its interval.
+func (cs *CronScheduler) RescheduleLoopAfter(jobID string, d time.Duration) error {
+	// Checked under cs.mu: DisableJob / RemoveJob change the store before
+	// they take cs.mu to drop the entry, so a paused or deleted loop is
+	// never scheduled again here.
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	job := cs.store.Get(jobID)
+	if job == nil || !job.IsLoopJob() || !job.Enabled {
+		return fmt.Errorf("loop %s is not active", jobID)
+	}
+	every, _, err := ParseLoopIntervalSpec(job.LoopInterval)
+	if err != nil {
+		return err
+	}
+	if old, ok := cs.entries[jobID]; ok {
+		cs.cron.Remove(old)
+	}
+	cs.entries[jobID] = cs.cron.Schedule(firstThenEvery{first: time.Now().Add(d), every: every}, cron.FuncJob(func() { cs.executeJob(jobID) }))
+	return nil
+}
+
 func (cs *CronScheduler) executeJob(jobID string) {
 	job := cs.store.Get(jobID)
 	if job == nil || !job.Enabled {
 		return
+	}
+	if job.IsTimerJob() {
+		// Fired: drop the schedule entry (it never runs again).
+		cs.mu.Lock()
+		if entryID, ok := cs.entries[jobID]; ok {
+			cs.cron.Remove(entryID)
+			delete(cs.entries, jobID)
+		}
+		cs.mu.Unlock()
 	}
 
 	cs.mu.RLock()
@@ -647,6 +818,9 @@ func (cs *CronScheduler) executeJob(jobID string) {
 		// Chat was busy: the run was queued and a later drain will execute it
 		// (and MarkRun the real result). Don't record it as completed now.
 		slog.Info("cron: enqueued (chat busy), will run on drain", "id", jobID)
+		if job.IsTimerJob() {
+			cs.store.SetQueuedAt(jobID, time.Now())
+		}
 		return
 	}
 	if timeout > 0 && err == context.DeadlineExceeded {

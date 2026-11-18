@@ -1,6 +1,26 @@
 # Prompt Queue Design
 
-Status: proposed
+Status: implemented, with a different queue key (see "Implementation status")
+
+## Implementation status (2026-11-18)
+
+Implemented in `core/prompt_queue.go`, with these differences from the design
+below:
+
+- **Queue key: per chat, not per agent session.** The key is
+  `grp:<session-key>`. Cron and loop runs of a chat go through the same queue
+  as its user prompts, so they run one at a time even though a cron run uses its
+  own agent session. Two chats that `/switch` to the same agent session keep
+  separate queues; their turns are still serialized by the agent-session turn
+  lock (`lockAgentSessionTurn`), so they never run against the session at the
+  same time, but one chat does not see the other's queued prompts.
+- Each queued prompt keeps the local session ID and agent session ID it was
+  queued against; `/new`, `/switch` and `/cancel` drop the chat's prompts that
+  were queued against a different session.
+- Added since: a busy reply offers "Insert now" (`/queue steer <id>`, sends the
+  prompt into the running turn on agents that can steer); messages sent during
+  an agent CLI upgrade wait in the queue; `/cancel` stops the turn and drops the
+  chat's queue.
 
 This document describes a prompt queue for `echo-client` interactive chat turns.
 When a conversation is already running an agent turn, ordinary follow-up prompts

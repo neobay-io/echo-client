@@ -99,6 +99,18 @@ func runFakeAppServer() {
 			}
 			send(map[string]any{"id": id, "result": map[string]any{"turn": map[string]any{"id": "turn_1", "status": "inProgress"}}})
 			go playTurn(text, notify, send, replies, turnInterrupted)
+		case "thread/compact/start":
+			if params["threadId"] != "thr_1" {
+				send(map[string]any{"id": id, "error": map[string]any{"code": -32600, "message": "thread not found"}})
+				continue
+			}
+			send(map[string]any{"id": id, "result": map[string]any{}})
+			go func() {
+				notify("turn/started", map[string]any{"threadId": "thr_1", "turn": map[string]any{"id": "turn_c"}})
+				notify("item/started", map[string]any{"threadId": "thr_1", "turnId": "turn_c", "item": map[string]any{"type": "contextCompaction", "id": "cc"}})
+				notify("item/completed", map[string]any{"threadId": "thr_1", "turnId": "turn_c", "item": map[string]any{"type": "contextCompaction", "id": "cc"}})
+				notify("turn/completed", map[string]any{"threadId": "thr_1", "turn": map[string]any{"id": "turn_c", "status": "completed", "items": []any{}}})
+			}()
 		case "turn/steer":
 			send(map[string]any{"id": id, "result": map[string]any{}})
 		case "turn/interrupt":
@@ -764,5 +776,54 @@ func TestThreadNotFoundAndMissingThreadMethods(t *testing.T) {
 	defer func() { _ = sess.Close() }()
 	if _, ok := sess.(*codexSession); !ok {
 		t.Fatalf("session = %T, want exec fallback", sess)
+	}
+}
+
+// T5.6: /compact runs thread/compact/start; the compaction ends like a turn.
+func TestAppServerNativeCompact(t *testing.T) {
+	fake := installFakeAppServer(t)
+	a, s := startFakeSession(t, "default", "")
+	if a.CompressCommand() == "" {
+		t.Fatal("app-server backend reports no compaction")
+	}
+	var nc core.NativeCompactor = s
+	if err := nc.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ev := nextEvent(t, s)
+	if ev.Type != core.EventResult || ev.Content != "" {
+		t.Fatalf("event = %+v, want an empty result", ev)
+	}
+	if p := fake.last(t, "thread/compact/start"); p == nil || p["threadId"] != "thr_1" {
+		t.Fatalf("thread/compact/start = %v", p)
+	}
+	// The session takes turns again afterwards.
+	if err := s.Send("hello", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if ev := nextEvent(t, s); ev.Type == core.EventResult {
+			break
+		}
+	}
+}
+
+// T5.6: `codex exec` cannot compact; it refuses rather than sending
+// "/compact" to the model as text.
+func TestExecBackendCannotCompact(t *testing.T) {
+	raw, err := New(map[string]any{"work_dir": t.TempDir(), "backend": "exec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := raw.(*Agent).CompressCommand(); got != "" {
+		t.Fatalf("exec backend compress command = %q", got)
+	}
+	var cs any = &codexSession{}
+	nc, ok := cs.(core.NativeCompactor)
+	if !ok {
+		t.Fatal("exec session does not refuse compaction")
+	}
+	if err := nc.Compact(context.Background()); err == nil {
+		t.Fatal("exec session compacted")
 	}
 }

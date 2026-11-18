@@ -83,6 +83,14 @@ level = "info" # debug, info, warn, error
 # Set to 0 to disable. This complements idle_timeout_mins.
 # Agent 单轮超时：单轮处理允许的最大分钟数，超过后强制回收。设为 0 禁用。
 # turn_timeout_mins = 45  # default: 45 / 默认 45
+# (upstream cc-connect calls this max_turn_time_mins; both names work.
+#  上游 cc-connect 的名字是 max_turn_time_mins，两个都可以用。)
+
+# Close a chat's resident agent process (Claude Code, the Codex app-server)
+# after this many minutes without a turn. The chat keeps its session: the next
+# message starts a new process that resumes it. 0 or unset = never.
+# 聊天的常驻 agent 进程空闲这么多分钟后关闭以释放内存；会话保留，下一条消息起新进程续上。0 或不设 = 不关闭。
+# agent_session_idle_timeout_mins = 60
 
 # =============================================================================
 # Streaming Preview / 流式预览
@@ -478,6 +486,8 @@ name = "my-backend"
 # quiet = true  # Override global quiet for this project / 覆盖全局静默模式
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
+# max_turn_time_mins = 120               # This project's turn time limit (0 = none) / 本项目单轮时限（0 = 不限）
+# agent_session_idle_timeout_mins = 30   # Overrides the global value / 覆盖全局值
 
 [projects.agent]
 type = "claudecode"

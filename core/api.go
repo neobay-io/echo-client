@@ -275,6 +275,21 @@ type CronAddRequest struct {
 	Silent      *bool  `json:"silent,omitempty"`
 	SessionMode string `json:"session_mode,omitempty"`
 	TimeoutMins *int   `json:"timeout_mins,omitempty"`
+
+	// Kind is "cron" (default), "loop" or "timer" (T5.1–T5.3).
+	Kind string `json:"kind,omitempty"`
+	// LoopInterval for a loop ("30m"); SelfPaced lets its agent pick each
+	// next run (LoopInterval, default 30m, is the fallback).
+	LoopInterval string `json:"loop_interval,omitempty"`
+	SelfPaced    bool   `json:"self_paced,omitempty"`
+	// RunAt for a timer: RFC 3339, "2026-11-20 09:00", "14:30" or a delay ("30m").
+	RunAt string `json:"run_at,omitempty"`
+	// AgentSessionID binds the job to an existing agent session.
+	AgentSessionID string `json:"agent_session_id,omitempty"`
+	// Per-job agent settings; empty = the bound chat's current setting.
+	Model          string `json:"model,omitempty"`
+	ReasoningLevel string `json:"reasoning_level,omitempty"`
+	Mode           string `json:"mode,omitempty"`
 }
 
 type StartJobRequest struct {
@@ -379,8 +394,32 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.CronExpr == "" {
-		http.Error(w, "cron_expr is required", http.StatusBadRequest)
+	kind := NormalizeCronJobKind(req.Kind)
+	switch kind {
+	case "cron":
+		if req.CronExpr == "" {
+			http.Error(w, "cron_expr is required", http.StatusBadRequest)
+			return
+		}
+	case "loop":
+		if req.LoopInterval == "" && req.SelfPaced {
+			req.LoopInterval = defaultSelfPacedInterval
+		}
+		if req.LoopInterval == "" {
+			http.Error(w, "loop_interval is required for a loop", http.StatusBadRequest)
+			return
+		}
+	case "timer":
+		if strings.TrimSpace(req.RunAt) == "" {
+			http.Error(w, "run_at is required for a timer", http.StatusBadRequest)
+			return
+		}
+	default:
+		http.Error(w, fmt.Sprintf("invalid kind %q (want cron, loop or timer)", req.Kind), http.StatusBadRequest)
+		return
+	}
+	if req.SelfPaced && kind != "loop" {
+		http.Error(w, "self_paced applies to loops only", http.StatusBadRequest)
 		return
 	}
 	if req.Prompt == "" && req.Exec == "" {
@@ -427,20 +466,52 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := &CronJob{
-		ID:          GenerateCronID(),
-		Project:     project,
-		SessionKey:  sessionKey,
-		CronExpr:    req.CronExpr,
-		Prompt:      req.Prompt,
-		Exec:        req.Exec,
-		WorkDir:     req.WorkDir,
-		Description: req.Description,
-		Enabled:     true,
-		Silent:      req.Silent,
-		SessionMode: NormalizeCronSessionMode(req.SessionMode),
-		TimeoutMins: req.TimeoutMins,
+		ID:             GenerateCronID(),
+		Project:        project,
+		SessionKey:     sessionKey,
+		Kind:           kind,
+		CronExpr:       req.CronExpr,
+		Prompt:         req.Prompt,
+		Exec:           req.Exec,
+		WorkDir:        req.WorkDir,
+		Description:    req.Description,
+		Enabled:        true,
+		Silent:         req.Silent,
+		SessionMode:    NormalizeCronSessionMode(req.SessionMode),
+		TimeoutMins:    req.TimeoutMins,
+		LoopInterval:   req.LoopInterval,
+		SelfPaced:      req.SelfPaced,
+		AgentSessionID: strings.TrimSpace(req.AgentSessionID),
+		Model:          strings.TrimSpace(req.Model),
+		ReasoningLevel: strings.TrimSpace(req.ReasoningLevel),
+		Mode:           strings.TrimSpace(req.Mode),
 	}
 	job.CreatedAt = time.Now()
+	if kind == "loop" {
+		job.AutoPausePrimitive = true
+	}
+	if kind == "timer" {
+		at, used, err := parseTimerWhen(strings.Fields(req.RunAt), job.CreatedAt)
+		if err == nil && used != len(strings.Fields(req.RunAt)) {
+			err = fmt.Errorf("invalid run_at %q", req.RunAt)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		job.RunAt = at
+	}
+	s.mu.RLock()
+	engine := s.engines[project]
+	s.mu.RUnlock()
+	if engine == nil {
+		http.Error(w, fmt.Sprintf("project %q not found", project), http.StatusBadRequest)
+		return
+	}
+	if err := engine.normalizeJobSettings(job); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if err := s.cron.AddJob(job); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -552,6 +623,55 @@ func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
 	if req.ID == "" || req.Field == "" {
 		http.Error(w, "id and field are required", http.StatusBadRequest)
 		return
+	}
+	// Moving a job to another project: its own settings must suit that
+	// project's agent (a mode it does not offer would be dropped at start).
+	if req.Field == "project" {
+		value, _ := req.Value.(string)
+		existing := s.cron.Store().Get(req.ID)
+		s.mu.RLock()
+		engine := s.engines[value]
+		s.mu.RUnlock()
+		if existing == nil || engine == nil {
+			http.Error(w, fmt.Sprintf("project %q not found", value), http.StatusBadRequest)
+			return
+		}
+		probe := &CronJob{Model: existing.Model, ReasoningLevel: existing.ReasoningLevel, Mode: existing.Mode, AgentSessionID: existing.AgentSessionID}
+		if err := engine.normalizeJobSettings(probe); err != nil {
+			http.Error(w, fmt.Sprintf("the job's own settings do not suit project %q: %v", value, err), http.StatusBadRequest)
+			return
+		}
+	}
+	// Per-job agent settings are checked against the job's agent (T5.3).
+	switch req.Field {
+	case "model", "mode", "reasoning_level", "effort", "agent_session_id":
+		value, ok := req.Value.(string)
+		existing := s.cron.Store().Get(req.ID)
+		if ok && existing != nil && strings.TrimSpace(value) != "" {
+			s.mu.RLock()
+			engine := s.engines[existing.Project]
+			s.mu.RUnlock()
+			if engine == nil {
+				http.Error(w, fmt.Sprintf("project %q not found", existing.Project), http.StatusBadRequest)
+				return
+			}
+			probe := &CronJob{}
+			switch req.Field {
+			case "model":
+				probe.Model = strings.TrimSpace(value)
+			case "mode":
+				probe.Mode = strings.TrimSpace(value)
+			case "agent_session_id":
+				probe.AgentSessionID = strings.TrimSpace(value)
+			default:
+				probe.ReasoningLevel = strings.TrimSpace(value)
+			}
+			if err := engine.normalizeJobSettings(probe); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			req.Value = probe.Model + probe.Mode + probe.ReasoningLevel + probe.AgentSessionID
+		}
 	}
 	if err := s.cron.UpdateJob(req.ID, req.Field, req.Value); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
