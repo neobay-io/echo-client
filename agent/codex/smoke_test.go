@@ -42,7 +42,7 @@ func TestAgentSessionSmoke_UsesManagedWorkspaceAndExtraDirs(t *testing.T) {
 	t.Setenv("CODEX_CWD_FILE", cwdFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	agentRaw, err := New(map[string]any{"work_dir": repoDir})
+	agentRaw, err := New(map[string]any{"work_dir": repoDir, "backend": "exec"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestResumeOmitsAddDir(t *testing.T) {
 	t.Setenv("CODEX_CWD_FILE", cwdFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	agentRaw, err := New(map[string]any{"work_dir": repoDir})
+	agentRaw, err := New(map[string]any{"work_dir": repoDir, "backend": "exec"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

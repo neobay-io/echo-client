@@ -48,6 +48,13 @@ type ModelEffortProvider interface {
 	EffortsForModel(ctx context.Context, model string) []string
 }
 
+// PendingRequestWatcher reports when the agent stops waiting for the answer
+// to a permission request or question it sent (it resolved the request
+// itself, or its process ended), so the chat stops waiting too.
+type PendingRequestWatcher interface {
+	RequestDone(requestID string) <-chan struct{}
+}
+
 // UsageReport is what /usage shows.
 type UsageReport struct {
 	Plan           string

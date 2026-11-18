@@ -39,6 +39,9 @@ var permissionModeTables = map[string][]permissionModeEntry{
 		{Native: "acceptEdits", Canonical: PermissionModeAcceptEdits, Aliases: []string{"accept-edits", "accept_edits", "auto-edit", "autoedit", "auto_edit", "edit"}},
 		{Native: "auto", Canonical: PermissionModeAuto, Aliases: []string{"full-auto", "fullauto", "full_auto", "approve-for-me"}},
 		{Native: "bypassPermissions", Canonical: PermissionModeBypass, Aliases: []string{"bypass-permissions", "bypass_permissions", "yolo", "bypass", "dangerously-bypass"}},
+		// Only the app-server backend offers it (collaboration mode); the
+		// exec backend does not list it, so the engine drops it there.
+		{Native: "plan", Canonical: PermissionModePlan},
 	},
 	// agy: default forwards approvals to chat through a PreToolUse hook.
 	"antigravity": {

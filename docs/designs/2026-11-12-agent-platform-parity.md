@@ -424,6 +424,25 @@ Echo 侧（独立仓库，单独 PR）：
 | T4.4 | 审批转发（`requestApproval`）、提问（`requestUserInput`）卡片 | T4.1 | default 模式下聊天内审批 |
 | T4.5 | `thread/list`、`name/set`、`delete`；`thread/compact/start`；`account/rateLimits/read` 用于 `/usage`；登录改走 `account/login/start` | T4.1 | |
 
+**P4 实现记录（2026-11-18）**
+
+协议以本机 Codex 0.153 生成的 schema（`codex app-server generate-json-schema --experimental`）为准，并用真实 app-server 跑过：一轮对话、插话（同一轮内读到）、中断（轮次状态 `interrupted`）、`account/rateLimits/read`、`thread/tokenUsage/updated`。
+
+- **T4.1**：新的 `agent/codex/appserver.go`：每个聊天会话一个 `codex app-server --stdio` 进程（按进程组结束），`initialize`（开 experimentalApi，用于 plan）→ `thread/start` 或 `thread/resume`（找不到线程时报“会话不存在”，引擎会重置）→ 每条消息一个 `turn/start`。事件映射与 exec 版一致：中途的 agent 消息（phase 为 commentary，或在工具调用之前）算思考，最后的算回复；命令、文件修改、MCP、搜索算工具调用；`turn/completed` 的 completed / interrupted / failed 分别是结果、已中断、错误。项目选项 `backend = "app-server"`（默认）或 `"exec"`；CLI 起不了 app-server 时自动退回 exec。冒烟检查加了 `codex app-server --help` 的 `--stdio`。
+- **T4.2**：`/steer`、“立即插入”走 `turn/steer`（带 expectedTurnId）；`/stop` 走 `turn/interrupt`，进程和线程保留。
+- **T4.3**：model、effort、模式都是 `turn/start` 的参数，热切换不需要新进程，下一轮生效。这些覆盖会留在线程上，所以每一轮都完整给出：default 回到线程开始时 Codex 报告的设置（approvalPolicy、approvalsReviewer、sandbox、模型、effort）；acceptEdits = never + workspace-write；auto = on-request + auto_review + workspace-write；bypass = never + dangerFullAccess；plan = collaborationMode plan（离开 plan 时显式发 default）。额外目录作为 workspace-write 的 writableRoots。`/effort` 的选项来自 model/list 的 supportedReasoningEfforts，max / ultra 等能传给 Codex。
+- **T4.4**：`item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval`（以及旧版的 execCommandApproval / applyPatchApproval）变成聊天里的权限卡片，允许 / 拒绝回 accept / decline；`item/tool/requestUserInput` 变成 P3 的问题卡片，答案按问题 id 回给 Codex。其它服务端请求回“不支持”，不会卡住这一轮。
+- **T4.5**：`/usage` 用 `account/rateLimits/read`（运行中的进程或临时起一个）；`/context` 用最近一次 `thread/tokenUsage/updated`。会话列表、删除仍读 `~/.codex/sessions`（app-server 和 exec 共用同一份存储）。原生 `/compact` 和 `account/login/start` 登录留到 P5（T5.6）/ 不改（P2 的设备码登录已可用）。
+- **测试**：`agent/codex/appserver_test.go` 用测试二进制模拟 app-server（批准、问题、插话、中断、失败、线程不存在、退回 exec、按轮设置）；`go test -tags live -run TestAppServerLiveTurn ./agent/codex` 跑一轮真实对话。
+
+**P4 review（2026-11-18，Codex + Kimi Code）**：两边合并后 19 个问题（其中 1 个严重），全部修复：
+
+- **默认模式的来源（严重）**：turn/start 的覆盖会留在线程上，resume 后线程报告的是上一次的覆盖（比如 bypass 的 dangerFullAccess），不能当作默认值。现在 default 用 `config/read` 读到的用户 Codex 配置（approval_policy、sandbox_mode、writable_roots、model、effort），读不到时用 on-request + workspace-write + medium；额外目录加到 workspace-write 的 writableRoots。新进程的第一轮总是显式给出协作模式，resume 到停在 plan 的线程也能回到 default；turn/start 失败时不改变本地记录的 plan 状态；effort 回到“自动”时显式发配置里的 effort。
+- **传输**：写入超时或 turn/start 等不到回复时直接结束进程（不让晚到的请求以旧设置执行），下一条消息起新进程并 resume；所有写入（包括通知、错误回复）都有期限。
+- **退回 exec**：只有 CLI 明确没有 app-server（进程在 initialize 前退出、方法不存在，包括 thread/start）才退回；超时不退回；plan 模式不退回（报错，不会变成会编辑的 default）。只有明确的“线程不存在”才重置会话。
+- **审批与问题**：权限请求在卡片上完整列出（网络、每条读写路径），太长显示不下就拒绝；没有命令可看的审批（如向终端写入）拒绝；旧版审批的拒绝用 `{"denied":{"rejection":…}}`；要求保密输入的问题不在聊天里收集；同样文字的问题自动区分，答案各自回到自己的 id；Codex 自己结束等待（`serverRequest/resolved`）或进程退出时，聊天里的等待也结束（core 新增可选接口 `PendingRequestWatcher`）。
+- **其它**：resume 带 `excludeTurns`（不拉整段历史）；子线程（sub-agent）的通知不进聊天；plan 项作为最终回复；晚到的 turn/start 回复不会把已结束的轮次当成进行中。
+
 ### P5 通用功能拉齐（约 4 天）
 
 | ID | 任务 | 依赖 | 验收 |

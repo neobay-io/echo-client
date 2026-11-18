@@ -22,7 +22,7 @@ func TestNormalizeModeMapsLegacyAliasesToCanonicalKeys(t *testing.T) {
 		"auto":              "auto",
 		"yolo":              "bypassPermissions",
 		"bypassPermissions": "bypassPermissions",
-		"plan":              "default", // no plan mode in codex exec
+		"plan":              "plan", // app-server only; the exec backend does not offer it
 		"garbage":           "default",
 	}
 	for in, want := range tests {

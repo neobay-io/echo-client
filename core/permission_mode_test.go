@@ -14,7 +14,7 @@ func TestResolvePermissionMode(t *testing.T) {
 		{"codex", "AUTO", "auto", PermissionModeAuto, true},
 		{"codex", "yolo", "bypassPermissions", PermissionModeBypass, true},
 		{"codex", "bypassPermissions", "bypassPermissions", PermissionModeBypass, true},
-		{"codex", "plan", "", "", false},
+		{"codex", "plan", "plan", "plan", true}, // app-server collaboration mode (P4)
 		{"claudecode", "edit", "acceptEdits", PermissionModeAcceptEdits, true},
 		{"claudecode", "  DONTASK ", "dontAsk", "", true},
 		{"claudecode", "acceptedits", "acceptEdits", PermissionModeAcceptEdits, true},

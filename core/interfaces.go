@@ -332,6 +332,9 @@ type ModelSwitcher interface {
 type ModelOption struct {
 	Name string // model identifier passed to CLI
 	Desc string // short description (display_name or empty)
+	// Efforts are the reasoning efforts the model supports, when the agent's
+	// catalog says (Codex model/list); nil when unknown.
+	Efforts []string
 }
 
 // ReasoningLevelSwitcher is an optional interface for agents that support

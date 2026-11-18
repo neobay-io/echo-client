@@ -3324,9 +3324,25 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				idleTimer.Stop()
 			}
 
+			// The agent may stop waiting on its own (Codex resolves a
+			// non-blocking question, or its process ends): stop waiting too
+			// and keep reading the turn's events.
+			var agentDone <-chan struct{}
+			if w, ok := state.agentSession.(PendingRequestWatcher); ok {
+				agentDone = w.RequestDone(event.RequestID)
+			}
 			select {
 			case <-pending.Resolved:
 				slog.Info("permission resolved", "request_id", event.RequestID)
+			case <-agentDone:
+				slog.Info("permission request no longer awaited by the agent", "request_id", event.RequestID)
+				state.mu.Lock()
+				if state.pending == pending {
+					state.pending = nil
+				}
+				state.mu.Unlock()
+				e.clearInteractionPrompt(sessionKey)
+				pending.resolve()
 			case <-state.stopped:
 				return
 			case <-e.ctx.Done():

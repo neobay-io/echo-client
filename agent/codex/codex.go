@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -33,6 +35,8 @@ func init() {
 			Args:  []string{"exec", "resume", "--help"},
 			Flags: []string{"--json", "--skip-git-repo-check", "--model", "-c", "--image", "--dangerously-bypass-approvals-and-sandbox"},
 		},
+		// The app-server backend (P4).
+		core.AgentCLICheck{Args: []string{"app-server", "--help"}, Flags: []string{"--stdio"}},
 	)
 }
 
@@ -56,8 +60,18 @@ type Agent struct {
 	sessionEnv     []string
 	sessionOpts    core.AgentSessionOptions // per-chat overrides for the next StartSession
 	modelRunner    codexModelRunner
-	mu             sync.Mutex
+	// backend: "app-server" (default; P4) or "exec" (one `codex exec` per
+	// turn, the pre-P4 behavior).
+	backend string
+	// efforts caches each model's reasoning efforts from model/list.
+	efforts map[string][]string
+	mu      sync.Mutex
 }
+
+const (
+	backendAppServer = "app-server"
+	backendExec      = "exec"
+)
 
 type codexModelRunner func(ctx context.Context, workDir string, env []string) ([]core.ModelOption, error)
 
@@ -76,13 +90,29 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("codex: 'codex' CLI not found in PATH, install with: npm install -g @openai/codex")
 	}
 
+	backend := strings.ToLower(strings.TrimSpace(fmt.Sprint(opts["backend"])))
+	switch backend {
+	case backendExec:
+	case "", "<nil>", backendAppServer, "appserver":
+		backend = backendAppServer
+	default:
+		return nil, fmt.Errorf("codex: unknown backend %q (app-server or exec)", backend)
+	}
+
 	return &Agent{
 		workDir:        workDir,
 		model:          model,
 		reasoningLevel: reasoningLevel,
 		mode:           mode,
 		activeIdx:      -1,
+		backend:        backend,
 	}, nil
+}
+
+func (a *Agent) appServer() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.backend == backendAppServer
 }
 
 // normalizeMode maps config values and legacy aliases (suggest, auto-edit,
@@ -92,7 +122,9 @@ func normalizeMode(raw string) string {
 }
 
 func normalizeReasoningLevel(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
+	switch lower := strings.ToLower(strings.TrimSpace(raw)); lower {
+	case "", "auto", "default":
+		return ""
 	case "low":
 		return "low"
 	case "medium", "med":
@@ -102,18 +134,31 @@ func normalizeReasoningLevel(raw string) string {
 	case "xhigh", "x-high", "extra-high", "extra_high", "very-high":
 		return "xhigh"
 	default:
+		// Other levels a model lists in model/list (minimal, max, ultra, …)
+		// pass through; anything else is dropped.
+		if validEffortName.MatchString(lower) {
+			return lower
+		}
 		return ""
 	}
 }
 
+var validEffortName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
 func (a *Agent) Name() string { return "codex" }
 
 // Capabilities implements core.CapabilityProvider: chat login uses Codex's
-// device-code flow (`codex login --device-auth`).
+// device-code flow (`codex login --device-auth`); the app-server backend adds
+// live settings, steering, interrupt, usage and questions.
 func (a *Agent) Capabilities() core.AgentCapabilities {
-	return core.AgentCapabilities{
+	caps := core.AgentCapabilities{
 		Auth: core.AuthCaps{Login: true, Status: true, Logout: true, Flow: core.AuthFlowDeviceCode},
 	}
+	if a.appServer() {
+		caps.LiveModel, caps.LiveMode = true, true
+		caps.Steer, caps.Interrupt, caps.Usage, caps.AskUser = true, true, true, true
+	}
+	return caps
 }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -183,6 +228,15 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		runner = listCodexModels
 	}
 	if models, err := runner(ctx, workDir, env); err == nil && len(models) > 0 {
+		efforts := make(map[string][]string, len(models))
+		for _, m := range models {
+			if len(m.Efforts) > 0 {
+				efforts[m.Name] = m.Efforts
+			}
+		}
+		a.mu.Lock()
+		a.efforts = efforts
+		a.mu.Unlock()
 		return models
 	} else if err != nil {
 		slog.Debug("codex: failed to fetch models from app-server", "error", err)
@@ -295,9 +349,12 @@ func listCodexModels(ctx context.Context, workDir string, env []string) ([]core.
 		var result struct {
 			NextCursor string `json:"nextCursor"`
 			Data       []struct {
-				Model       string `json:"model"`
-				DisplayName string `json:"displayName"`
-				IsDefault   bool   `json:"isDefault"`
+				Model                     string `json:"model"`
+				DisplayName               string `json:"displayName"`
+				IsDefault                 bool   `json:"isDefault"`
+				SupportedReasoningEfforts []struct {
+					ReasoningEffort string `json:"reasoningEffort"`
+				} `json:"supportedReasoningEfforts"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(resultJSON, &result); err != nil {
@@ -314,7 +371,13 @@ func listCodexModels(ctx context.Context, workDir string, env []string) ([]core.
 			if model.IsDefault {
 				desc = strings.TrimSpace(desc + " (default)")
 			}
-			models = append(models, core.ModelOption{Name: name, Desc: desc})
+			var efforts []string
+			for _, e := range model.SupportedReasoningEfforts {
+				if e.ReasoningEffort != "" {
+					efforts = append(efforts, e.ReasoningEffort)
+				}
+			}
+			models = append(models, core.ModelOption{Name: name, Desc: desc, Efforts: efforts})
 		}
 		cursor = result.NextCursor
 		if cursor == "" {
@@ -426,9 +489,75 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	workDir := core.SessionWorkDirFromEnv(extraEnv, a.workDir)
 	extraDirs := core.SessionExtraDirsFromEnv(extraEnv)
+	backend := a.backend
 	a.mu.Unlock()
 
+	if backend == backendAppServer {
+		s, err := newAppServerSession(ctx, workDir, model, reasoningLevel, mode, sessionID, extraDirs, extraEnv)
+		if err == nil {
+			return s, nil
+		}
+		if !errors.Is(err, errAppServerUnavailable) {
+			return nil, err
+		}
+		if mode == "plan" {
+			// exec cannot plan; running the turn as default could edit.
+			return nil, fmt.Errorf("codex: plan mode needs the app-server, which this Codex CLI cannot run: %w", err)
+		}
+		slog.Warn("codex: app-server unavailable; using codex exec for this session", "error", err)
+	}
 	return newCodexSession(ctx, workDir, model, reasoningLevel, mode, sessionID, extraDirs, extraEnv)
+}
+
+// ApplyLiveSettings implements core.LiveSettingsApplier: with app-server,
+// model, effort and mode are turn/start parameters, so they apply from the
+// next turn in the same process.
+func (a *Agent) ApplyLiveSettings(_ context.Context, session core.AgentSession, opts core.AgentSessionOptions) error {
+	s, ok := session.(*appServerSession)
+	if !ok || !s.Alive() {
+		return errors.New("no running codex app-server session")
+	}
+	a.mu.Lock()
+	saved := a.sessionOpts
+	a.sessionOpts = opts
+	model, effort, mode := a.startSettingsLocked()
+	a.sessionOpts = saved
+	a.mu.Unlock()
+	s.setSettings(model, effort, mode)
+	return nil
+}
+
+// Usage implements core.UsageReporter: plan limits from
+// account/rateLimits/read, asked of the running app-server or a short-lived
+// one.
+func (a *Agent) Usage(ctx context.Context, session core.AgentSession) (*core.UsageReport, error) {
+	if s, ok := session.(*appServerSession); ok && s.Alive() {
+		return s.SessionUsage(ctx)
+	}
+	a.mu.Lock()
+	env := core.MergeEnv(os.Environ(), append(a.providerEnvLocked(), a.sessionEnv...))
+	workDir := a.workDir
+	a.mu.Unlock()
+	proc, err := startAppServer(ctx, workDir, env)
+	if err != nil {
+		return nil, err
+	}
+	defer proc.stop()
+	if err := proc.serve(ctx); err != nil {
+		return nil, err
+	}
+	return readRateLimits(ctx, proc.rpc)
+}
+
+// EffortsForModel implements core.ModelEffortProvider from the efforts the
+// last model listing reported ("" is the configured default model).
+func (a *Agent) EffortsForModel(_ context.Context, model string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if model == "" {
+		model = a.model
+	}
+	return append([]string(nil), a.efforts[model]...)
 }
 
 // startSettingsLocked resolves the model, reasoning level and permission mode
@@ -606,10 +735,14 @@ func (a *Agent) providerEnvLocked() []string {
 }
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
-	return []core.PermissionModeInfo{
+	modes := []core.PermissionModeInfo{
 		{Key: "default", Name: "Default", NameZh: "默认", Desc: "No overrides: follows your Codex config (~/.codex/config.toml)", DescZh: "不加覆盖，按 ~/.codex/config.toml 的设置执行"},
 		{Key: "acceptEdits", Name: "Accept Edits", NameZh: "接受编辑", Desc: "Edit and run commands inside the workspace sandbox; no escalation", DescZh: "可在工作区沙箱内编辑和执行命令，不允许越权"},
 		{Key: "auto", Name: "Auto", NameZh: "自动模式", Desc: "Workspace sandbox; escalation requests reviewed automatically (--approve-for-me)", DescZh: "工作区沙箱，越权请求由 Codex 自动审核（--approve-for-me）"},
 		{Key: "bypassPermissions", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},
 	}
+	if a.appServer() {
+		modes = append(modes, core.PermissionModeInfo{Key: "plan", Name: "Plan", NameZh: "计划模式", Desc: "Plan first; Codex asks before it acts (app-server collaboration mode)", DescZh: "先做计划，执行前询问（app-server 协作模式）"})
+	}
+	return modes
 }
