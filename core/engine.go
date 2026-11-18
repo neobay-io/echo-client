@@ -2546,7 +2546,7 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 	state.mu.Unlock()
 
 	if state.agentSession == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to start agent session"))
+		e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to start agent session"))
 		return
 	}
 	e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
@@ -2588,7 +2588,7 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 
 			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 			if state.agentSession == nil {
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
+				e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to restart agent session"))
 				return
 			}
 			e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
@@ -2705,7 +2705,7 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 	state.mu.Unlock()
 
 	if state.agentSession == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to start agent session"))
+		e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to start agent session"))
 		return nil, "", time.Time{}, nil, fmt.Errorf("failed to start agent session")
 	}
 	e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
@@ -2740,7 +2740,7 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 
 			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 			if state.agentSession == nil {
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
+				e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to restart agent session"))
 				return nil, "", time.Time{}, stopTyping, fmt.Errorf("failed to restart agent session")
 			}
 			e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
@@ -2778,6 +2778,15 @@ func (e *Engine) agentUpgradeBlocksNewTurns() bool {
 		return false
 	}
 	return e.agentUpgradeMgr.IsTargetRunning(e.agent.Name())
+}
+
+// agentStartFailedMessage is the reply when a chat got no agent session: the
+// upgrade notice if an upgrade began after the chat's earlier checks.
+func (e *Engine) agentStartFailedMessage(what string) string {
+	if e.agentUpgradeBlocksNewTurns() {
+		return e.agentUpgradeBlockedMessage()
+	}
+	return fmt.Sprintf(e.i18n.T(MsgError), what)
 }
 
 func (e *Engine) agentUpgradeBlockedMessage() string {
@@ -5586,7 +5595,7 @@ func (e *Engine) cmdCompress(p Platform, msg *Message) {
 
 		state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 		if state.agentSession == nil {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
+			e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to restart agent session"))
 			return
 		}
 		state.mu.Lock()
@@ -9027,7 +9036,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, chatID, message s
 	agentSessionID := session.AgentSessionID
 	session.mu.Unlock()
 
-	agentSession, err := e.startAgentSession(ctx, agentSessionID, relaySessionKey, envVars, session.Settings())
+	agentSession, err := e.startAgentSessionAfterUpgrade(ctx, agentSessionID, relaySessionKey, envVars, session.Settings())
 	if err != nil {
 		return "", fmt.Errorf("start relay session: %w", err)
 	}

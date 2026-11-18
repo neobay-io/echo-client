@@ -892,8 +892,12 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 // telegramUploadLimit is the Bot API's limit for files a bot uploads.
 const telegramUploadLimit = 50 << 20
 
-// telegramCaptionLimit is the longest caption Telegram accepts.
-const telegramCaptionLimit = 1024
+// telegramCaptionLimit and telegramMessageLimit are the longest caption and
+// message Telegram accepts, in UTF-16 code units (telegramTextLen).
+const (
+	telegramCaptionLimit = 1024
+	telegramMessageLimit = 4096
+)
 
 // SendFile sends a local file to the chat as a document (core.FileSender),
 // so agents can hand back files on Telegram as they do on Feishu.
@@ -909,29 +913,27 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, path string, caption 
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("telegram: SendFile: path must be absolute")
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("telegram: SendFile: %w", err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("telegram: SendFile: %s is a directory", filepath.Base(path))
-	}
-	if info.Size() > telegramUploadLimit {
-		return fmt.Errorf("telegram: SendFile: %s is %d MB; bots can upload at most 50 MB", filepath.Base(path), info.Size()>>20)
-	}
 	if p.bot == nil {
 		return fmt.Errorf("telegram: bot not initialized")
 	}
+	f, info, err := openUploadFile(path)
+	if err != nil {
+		return fmt.Errorf("telegram: SendFile: %w", err)
+	}
+	defer f.Close()
 
+	// A caption too long for Telegram goes out first as plain messages. If
+	// that fails the file is still sent.
+	var captionErr error
 	caption = strings.TrimSpace(caption)
-	if len([]rune(caption)) > telegramCaptionLimit {
-		// Too long for a caption: send it as its own message first.
-		if err := p.Send(ctx, rc, caption); err != nil {
-			return fmt.Errorf("telegram: send file caption: %w", err)
-		}
+	if telegramTextLen(caption) > telegramCaptionLimit {
+		captionErr = p.sendPlainText(rc.chatID, caption)
 		caption = ""
 	}
-	doc := tgbotapi.NewDocument(rc.chatID, tgbotapi.FilePath(path))
+	// Upload from our own handle, bounded to the size checked: the library
+	// would reopen the path and, on a failed upload, leave the file open.
+	upload := tgbotapi.FileReader{Name: filepath.Base(path), Reader: io.LimitReader(f, info.Size())}
+	doc := tgbotapi.NewDocument(rc.chatID, upload)
 	doc.Caption = caption
 	doc.ReplyToMessageID = rc.messageID
 	doc.AllowSendingWithoutReply = true
@@ -940,7 +942,104 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, path string, caption 
 		return fmt.Errorf("telegram: send file: %w", err)
 	}
 	p.rememberSentMessage(rc.chatID, sent.MessageID)
+	if captionErr != nil {
+		return fmt.Errorf("telegram: file sent, but its caption was not: %w", captionErr)
+	}
 	return nil
+}
+
+// openUploadFile opens path for upload: a regular file of at most
+// telegramUploadLimit bytes. FIFOs and devices are refused, since opening a
+// FIFO with no writer blocks and a device reports no real size.
+func openUploadFile(path string) (*os.File, os.FileInfo, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkUploadFile(path, info); err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Check what was opened too, in case the path changed after the Stat.
+	opened, err := f.Stat()
+	if err == nil {
+		err = checkUploadFile(path, opened)
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	return f, opened, nil
+}
+
+func checkUploadFile(path string, info os.FileInfo) error {
+	name := filepath.Base(path)
+	switch {
+	case info.IsDir():
+		return fmt.Errorf("%s is a directory", name)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", name)
+	case info.Size() > telegramUploadLimit:
+		return fmt.Errorf("%s is %d MB; bots can upload at most 50 MB", name, info.Size()>>20)
+	}
+	return nil
+}
+
+// sendPlainText sends text without formatting, split into messages Telegram
+// accepts.
+func (p *Platform) sendPlainText(chatID int64, text string) error {
+	for _, chunk := range splitTelegramText(text, telegramMessageLimit) {
+		sent, err := p.bot.Send(tgbotapi.NewMessage(chatID, chunk))
+		if err != nil {
+			return err
+		}
+		p.rememberSentMessage(chatID, sent.MessageID)
+	}
+	return nil
+}
+
+// telegramTextLen is the length of s as Telegram counts it: UTF-16 code units.
+func telegramTextLen(s string) int {
+	n := 0
+	for _, r := range s {
+		n += telegramRuneLen(r)
+	}
+	return n
+}
+
+func telegramRuneLen(r rune) int {
+	if r >= 0x10000 {
+		return 2
+	}
+	return 1
+}
+
+// splitTelegramText splits s into pieces of at most limit UTF-16 code units
+// (limit >= 2), at a line break when one falls in the second half.
+func splitTelegramText(s string, limit int) []string {
+	var chunks []string
+	for s != "" {
+		if telegramTextLen(s) <= limit {
+			return append(chunks, s)
+		}
+		units, cut := 0, len(s)
+		for i, r := range s {
+			if units+telegramRuneLen(r) > limit {
+				cut = i
+				break
+			}
+			units += telegramRuneLen(r)
+		}
+		if nl := strings.LastIndex(s[:cut], "\n"); nl >= cut/2 {
+			cut = nl + 1
+		}
+		chunks = append(chunks, s[:cut])
+		s = s[cut:]
+	}
+	return chunks
 }
 
 // DeletePreviewMessage deletes a stale preview message so the caller can send a fresh one.
@@ -1136,7 +1235,26 @@ func telegramCommandName(cmd string) string {
 // telegramBotCommands converts the engine's commands to Telegram's menu
 // (at most 100, descriptions at most 256 bytes) and returns the renamed
 // ones as Telegram name → engine name.
+//
+// Renaming is many-to-one ("foo-bar" and "foo_bar" both become "foo_bar"),
+// so a command already in Telegram's form keeps its name, and a renamed
+// command that would collide with it, or with another renamed command, is
+// left out with a warning rather than shadowing it.
 func telegramBotCommands(commands []core.BotCommandInfo) ([]tgbotapi.BotCommand, map[string]string) {
+	exact := make(map[string]bool)
+	renamed := make(map[string]map[string]bool) // Telegram name → engine names
+	for _, c := range commands {
+		name := telegramCommandName(c.Command)
+		if name == c.Command {
+			exact[name] = true
+			continue
+		}
+		if renamed[name] == nil {
+			renamed[name] = make(map[string]bool)
+		}
+		renamed[name][c.Command] = true
+	}
+
 	var tgCommands []tgbotapi.BotCommand
 	aliases := make(map[string]string)
 	seen := make(map[string]bool)
@@ -1144,6 +1262,10 @@ func telegramBotCommands(commands []core.BotCommandInfo) ([]tgbotapi.BotCommand,
 		name := telegramCommandName(c.Command)
 		if !isValidTelegramCommand(name) {
 			slog.Warn("telegram: command name not allowed by Telegram, skipping", "command", c.Command)
+			continue
+		}
+		if name != c.Command && (exact[name] || len(renamed[name]) > 1) {
+			slog.Warn("telegram: command collides with another command in Telegram's form, skipping", "command", c.Command, "telegram_name", name)
 			continue
 		}
 		if seen[name] {

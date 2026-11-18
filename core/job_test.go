@@ -451,10 +451,12 @@ func TestJobManagerReloadMarksNonTerminalJobsOrphaned(t *testing.T) {
 		t.Fatalf("NewJobManager: %v", err)
 	}
 
+	entered := make(chan struct{})
 	jm.RegisterRunner("echo", stubJobRunner{
 		run: func(ctx context.Context, req JobRequest, jobID string, onEvent func(JobEvent)) (*JobResult, error) {
 			_ = onEvent
 			_ = jobID
+			close(entered)
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -465,6 +467,13 @@ func TestJobManagerReloadMarksNonTerminalJobsOrphaned(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	waitForJobStatus(t, jm, job.ID, JobStatusRunning)
+	// The running state reaches disk just before the runner is called; the
+	// in-memory status flips earlier, so wait for the runner.
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner was not called")
+	}
 
 	reloaded, err := NewJobManager(dataDir)
 	if err != nil {

@@ -87,7 +87,7 @@ func TestAgentStartWaitsForUpgrade(t *testing.T) {
 
 	started := make(chan error, 1)
 	go func() {
-		_, err := engine.startAgentSession(context.Background(), "", "job:1", nil, AgentSessionOptions{})
+		_, err := engine.startAgentSessionAfterUpgrade(context.Background(), "", "job:1", nil, AgentSessionOptions{})
 		started <- err
 	}()
 	select {
@@ -110,7 +110,7 @@ func TestAgentStartWaitsForUpgrade(t *testing.T) {
 	defer mgr.endTargetRun("codex")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := engine.startAgentSession(ctx, "", "job:2", nil, AgentSessionOptions{}); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := engine.startAgentSessionAfterUpgrade(ctx, "", "job:2", nil, AgentSessionOptions{}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want deadline exceeded", err)
 	}
 }
@@ -163,8 +163,15 @@ func TestUpgradeSkipsWhenLockUnavailable(t *testing.T) {
 	if err != nil || len(results) != 1 {
 		t.Fatalf("Run = %+v, %v", results, err)
 	}
-	if !results[0].Skipped || !strings.Contains(results[0].Reason, "lock unavailable") {
+	// Review 3: reported as a failure, so it is notified and backs off.
+	if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "lock unavailable") {
 		t.Fatalf("result = %+v", results[0])
+	}
+	if text := upgradeNotificationText(results, true); !strings.Contains(text, "codex upgrade failed: upgrade lock unavailable") {
+		t.Fatalf("notification = %q", text)
+	}
+	if m.failureState("codex").ConsecutiveFailures != 1 {
+		t.Fatalf("failure not recorded: %+v", m.failureState("codex"))
 	}
 	for _, cmd := range ran {
 		if cmd == "codex-update" {

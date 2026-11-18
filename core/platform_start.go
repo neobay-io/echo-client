@@ -198,7 +198,9 @@ func (e *Engine) stopPlatformRetries() map[int]bool {
 		case platformStateStarting:
 			inFlight[i] = true
 			r.state = platformStateStopped
-		case platformStateRetrying:
+		case platformStateRetrying, platformStateUnknown:
+			// Unknown: Engine.Start has not reached this platform yet;
+			// beginInitialStart now skips it.
 			r.state = platformStateStopped
 		}
 		r.onRunning = nil

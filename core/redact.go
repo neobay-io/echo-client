@@ -41,19 +41,29 @@ func RedactArgs(args []string) []string {
 	return out
 }
 
-// promptFlags carry the user's prompt as their value (`kimi -p`, `agy -p`,
-// `--prompt=…`). Logs keep only its length: prompts can hold pasted secrets.
-var promptFlags = []string{"-p", "--prompt", "--print"}
+// promptFlags carry the user's prompt as their value (`agy -p <prompt>`,
+// `gemini -p <prompt>`, `--prompt=…`). Logs keep only its length: prompts can
+// hold pasted secrets. -p and --prompt always take the next argument, even one
+// starting with "-" (a prompt like "- my token is …"); --print is a switch in
+// some CLIs (claude, cursor, qoder), so a flag after it is left alone.
+var promptFlags = []struct {
+	name       string
+	takesValue bool
+}{
+	{"-p", true},
+	{"--prompt", true},
+	{"--print", false},
+}
 
 func redactPrompts(args []string) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		for _, f := range promptFlags {
-			if v, ok := strings.CutPrefix(arg, f+"="); ok {
-				args[i] = f + "=" + promptPlaceholder(v)
+			if v, ok := strings.CutPrefix(arg, f.name+"="); ok {
+				args[i] = f.name + "=" + promptPlaceholder(v)
 				break
 			}
-			if arg == f && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if arg == f.name && i+1 < len(args) && (f.takesValue || !strings.HasPrefix(args[i+1], "-")) {
 				args[i+1] = promptPlaceholder(args[i+1])
 				i++
 				break

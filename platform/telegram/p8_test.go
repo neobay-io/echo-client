@@ -22,7 +22,6 @@ func TestBotCommandsRenameHyphenatedCommands(t *testing.T) {
 		{Command: "agent-upgrade", Description: "Upgrade agent CLIs"},
 		{Command: "status", Description: "Show status"},
 		{Command: "loop", Description: ""},
-		{Command: "agent_upgrade", Description: "duplicate after renaming"},
 		{Command: "bad cmd!", Description: "x"},
 	})
 	var names []string
@@ -40,6 +39,39 @@ func TestBotCommandsRenameHyphenatedCommands(t *testing.T) {
 	cmds, _ = telegramBotCommands([]core.BotCommandInfo{{Command: "x", Description: long}})
 	if d := cmds[0].Description; len(d) > 256 || !strings.HasSuffix(d, "...") || !strings.HasPrefix(long, strings.TrimSuffix(d, "...")) {
 		t.Fatalf("long description cut badly: %d bytes", len(d))
+	}
+}
+
+// Review 3: a renamed command must never take over another command's name.
+func TestBotCommandsCollisionsDoNotShadow(t *testing.T) {
+	// Whatever the order, the command already named deploy_prod keeps the
+	// name and deploy-prod is left out.
+	for _, order := range [][]string{{"deploy-prod", "deploy_prod"}, {"deploy_prod", "deploy-prod"}} {
+		var in []core.BotCommandInfo
+		for _, c := range order {
+			in = append(in, core.BotCommandInfo{Command: c, Description: c})
+		}
+		cmds, aliases := telegramBotCommands(in)
+		if len(cmds) != 1 || cmds[0].Command != "deploy_prod" || cmds[0].Description != "deploy_prod" || len(aliases) != 0 {
+			t.Fatalf("order %v: menu = %v, aliases = %v", order, cmds, aliases)
+		}
+	}
+	// Two renamed commands with the same Telegram name: neither is offered.
+	cmds, aliases := telegramBotCommands([]core.BotCommandInfo{
+		{Command: "Deploy-Prod", Description: "a"},
+		{Command: "deploy-prod", Description: "b"},
+		{Command: "status", Description: "s"},
+	})
+	if len(cmds) != 1 || cmds[0].Command != "status" || len(aliases) != 0 {
+		t.Fatalf("menu = %v, aliases = %v", cmds, aliases)
+	}
+	// The same command listed twice is not a collision.
+	cmds, aliases = telegramBotCommands([]core.BotCommandInfo{
+		{Command: "agent-upgrade", Description: "first"},
+		{Command: "agent-upgrade", Description: "second"},
+	})
+	if len(cmds) != 1 || cmds[0].Description != "first" || aliases["agent_upgrade"] != "agent-upgrade" {
+		t.Fatalf("menu = %v, aliases = %v", cmds, aliases)
 	}
 }
 
@@ -63,9 +95,11 @@ func TestRestoreCommandMapsMenuNamesBack(t *testing.T) {
 
 // fakeBotAPI records sendDocument and sendMessage calls.
 type fakeBotAPI struct {
-	mu       sync.Mutex
-	calls    []string
-	document struct {
+	mu           sync.Mutex
+	calls        []string
+	messages     []string
+	failMessages bool
+	document     struct {
 		chatID, caption, replyTo, allowWithoutReply, filename, content string
 	}
 }
@@ -102,6 +136,14 @@ func newFakeBot(t *testing.T) (*tgbotapi.BotAPI, *fakeBotAPI) {
 			fake.mu.Unlock()
 			_, _ = fmt.Fprint(w, `{"ok":true,"result":{"message_id":99,"date":0,"chat":{"id":42,"type":"private"}}}`)
 		default: // sendMessage
+			fake.mu.Lock()
+			fake.messages = append(fake.messages, r.FormValue("text"))
+			fail := fake.failMessages
+			fake.mu.Unlock()
+			if fail {
+				_, _ = fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}`)
+				return
+			}
 			_, _ = fmt.Fprint(w, `{"ok":true,"result":{"message_id":98,"date":0,"chat":{"id":42,"type":"private"}}}`)
 		}
 	}))
@@ -143,6 +185,45 @@ func TestSendFileUploadsDocument(t *testing.T) {
 	}
 	if strings.Join(fake.calls, ",") != "sendMessage,sendDocument" || fake.document.caption != "" {
 		t.Fatalf("calls = %v, caption = %q", fake.calls, fake.document.caption)
+	}
+
+	// Review 3: a caption over Telegram's message limit is split, and the
+	// file still goes out.
+	fake.calls, fake.messages = nil, nil
+	long := strings.Repeat("y", 5000)
+	if err := p.SendFile(context.Background(), rc, path, long); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(fake.calls, ",") != "sendMessage,sendMessage,sendDocument" ||
+		strings.Join(fake.messages, "") != long || len(fake.messages[0]) != telegramMessageLimit {
+		t.Fatalf("calls = %v, message lengths = %d", fake.calls, len(fake.messages))
+	}
+
+	// If the caption cannot be sent, the file still is, and the error says so.
+	fake.calls = nil
+	fake.failMessages = true
+	err := p.SendFile(context.Background(), rc, path, long)
+	if err == nil || !strings.Contains(err.Error(), "file sent, but its caption was not") {
+		t.Fatalf("err = %v", err)
+	}
+	if fake.calls[len(fake.calls)-1] != "sendDocument" || fake.document.content != "# report" {
+		t.Fatalf("calls = %v", fake.calls)
+	}
+}
+
+func TestSplitTelegramText(t *testing.T) {
+	// Emoji outside the BMP count as two UTF-16 units.
+	chunks := splitTelegramText(strings.Repeat("😀", 5), 4)
+	if strings.Join(chunks, "|") != "😀😀|😀😀|😀" {
+		t.Fatalf("chunks = %q", chunks)
+	}
+	// A line break in the second half of a piece is preferred.
+	chunks = splitTelegramText("aaaa\nbbbbbb", 8)
+	if strings.Join(chunks, "|") != "aaaa\n|bbbbbb" {
+		t.Fatalf("chunks = %q", chunks)
+	}
+	if got := splitTelegramText("short", 8); len(got) != 1 || got[0] != "short" {
+		t.Fatalf("chunks = %q", got)
 	}
 }
 

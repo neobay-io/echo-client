@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -427,8 +428,12 @@ func (m *AgentUpgradeManager) loop(ctx context.Context) {
 		case <-timer.C:
 		}
 
+		// The config may have changed since this run was scheduled (a reload
+		// can race the timer), and the timer can fire late after the machine
+		// slept: run only if still allowed now, otherwise reschedule.
 		cfg = m.Snapshot()
-		if !cfg.Enabled || cfg.Policy == "off" {
+		if !autoRunAllowed(cfg, time.Now()) {
+			slog.Info("agent upgrade: scheduled run no longer allowed now; rescheduling", "window", cfg.Window)
 			nextRun = time.Time{}
 			m.updateScheduleState(time.Time{}, nextRun)
 			continue
@@ -463,6 +468,19 @@ func (m *AgentUpgradeManager) loop(ctx context.Context) {
 		m.updateScheduleState(completedAt, nextRun)
 		m.saveState()
 	}
+}
+
+// autoRunAllowed reports whether cfg allows an automatic run at now: enabled,
+// not policy "off", and now inside a valid window (if one is set).
+func autoRunAllowed(cfg AgentUpgradeConfig, now time.Time) bool {
+	if !cfg.Enabled || cfg.Policy == "off" {
+		return false
+	}
+	window, err := parseUpgradeWindow(cfg.Window)
+	if err != nil {
+		return false
+	}
+	return window == nil || window.contains(now)
 }
 
 // outputTail keeps the end of command output, where installers print errors.
@@ -610,10 +628,12 @@ func (m *AgentUpgradeManager) runWithOptions(ctx context.Context, target string,
 			release, locked, lockErr := acquireUpgradeLock(m.lockDirPath(), name)
 			if lockErr != nil {
 				// Without the lock another service could upgrade the same
-				// CLI at the same time, so do not upgrade.
-				slog.Warn("agent upgrade: cross-process lock unavailable; skipping", "agent", name, "error", lockErr)
-				res.Skipped = true
-				res.Reason = "upgrade lock unavailable: " + lockErr.Error()
+				// CLI at the same time, so do not upgrade. It counts as a
+				// failure so notifications and backoff see it; otherwise
+				// automatic upgrades could stop silently.
+				slog.Warn("agent upgrade: cross-process lock unavailable; not upgrading", "agent", name, "error", lockErr)
+				res.Err = fmt.Errorf("upgrade lock unavailable: %w", lockErr)
+				m.recordFailure(name, cfgTarget, res.Err.Error())
 				results = append(results, res)
 				return
 			}
@@ -1093,11 +1113,28 @@ func joinBlockedReasons(parts ...string) string {
 // this process's environment. A login shell re-reads ~/.profile and
 // path_helper and can resolve a different copy of the CLI than the agent
 // processes, which is how upgrades used to hit the wrong install.
+//
+// The shell runs in its own process group so a timeout kills the installer
+// it started too, and agentUpgradeWaitDelay bounds the wait for output from
+// children that outlive the shell; without both, a timed-out upgrade could
+// block forever on a pipe an installer child still holds.
 func defaultAgentUpgradeCommandRunner(ctx context.Context, cmd string) (string, error) {
 	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	UseProcessGroup(c)
+	c.WaitDelay = agentUpgradeWaitDelay
 	out, err := c.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
+		// The shell exited 0 but a child (a daemon the installer launched)
+		// kept its output open; the command itself succeeded.
+		slog.Warn("agent upgrade command left a child holding its output", "command", cmd)
+		err = nil
+	}
 	return string(out), err
 }
+
+// agentUpgradeWaitDelay is how long an upgrade command's output is read after
+// the shell exits or is killed.
+var agentUpgradeWaitDelay = 10 * time.Second
 
 func (m *AgentUpgradeManager) beginTargetRun(name string) bool {
 	m.mu.Lock()

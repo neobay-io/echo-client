@@ -71,7 +71,17 @@ func TestRedactArgs_Prompts(t *testing.T) {
 	if strings.Contains(joined, "sk-123") || strings.Contains(joined, "abc") {
 		t.Fatalf("prompt leaked: %q", out)
 	}
-	if out[2] != "--prompt=<prompt: 16 chars>" || out[4] != "<prompt: 21 chars>" || out[6] != "--next" {
+	if out[2] != "--prompt=<prompt: 16 chars>" || out[4] != "<prompt: 21 chars>" || out[6] != "<prompt: 6 chars>" {
+		t.Fatalf("out = %q", out)
+	}
+
+	// Review 3: a prompt starting with "-" is still a prompt after -p or
+	// --prompt (agy and gemini pass it that way); --print can be a switch.
+	out = RedactArgs([]string{"-p", "- my token is SECRET", "--prompt", "--SECRET", "--print", "--output-format", "json", "--print", "/model"})
+	if strings.Contains(strings.Join(out, " "), "SECRET") {
+		t.Fatalf("prompt leaked: %q", out)
+	}
+	if out[1] != "<prompt: 20 chars>" || out[3] != "<prompt: 8 chars>" || out[5] != "--output-format" || out[8] != "<prompt: 6 chars>" {
 		t.Fatalf("out = %q", out)
 	}
 }

@@ -252,6 +252,14 @@ func (r engineJobRunner) Run(
 	}
 }
 
+// ErrAgentUpgradeInProgress is returned by startAgentSession while the
+// agent's CLI is being upgraded.
+var ErrAgentUpgradeInProgress = errors.New("agent upgrade in progress")
+
+// startAgentSession starts an agent session, or refuses with
+// ErrAgentUpgradeInProgress while the agent's CLI is being upgraded. It never
+// waits: chat callers hold interactiveMu here. Background turns use
+// startAgentSessionAfterUpgrade.
 func (e *Engine) startAgentSession(
 	ctx context.Context,
 	sessionID string,
@@ -259,8 +267,8 @@ func (e *Engine) startAgentSession(
 	envVars []string,
 	opts AgentSessionOptions,
 ) (AgentSession, error) {
-	if err := e.waitForAgentUpgrade(ctx); err != nil {
-		return nil, err
+	if e.agentUpgradeBlocksNewTurns() {
+		return nil, fmt.Errorf("%s: %w", e.agent.Name(), ErrAgentUpgradeInProgress)
 	}
 	e.agentStartMu.Lock()
 	defer e.agentStartMu.Unlock()
@@ -287,6 +295,27 @@ func (e *Engine) startAgentSession(
 	return e.agent.StartSession(ctx, sessionID)
 }
 
+// startAgentSessionAfterUpgrade waits out an upgrade of the agent's CLI, then
+// starts the session. For Echo jobs, cron runs and relay turns, which hold no
+// lock shared with other chats while they wait.
+func (e *Engine) startAgentSessionAfterUpgrade(
+	ctx context.Context,
+	sessionID string,
+	sessionKey string,
+	envVars []string,
+	opts AgentSessionOptions,
+) (AgentSession, error) {
+	for {
+		if err := e.waitForAgentUpgrade(ctx); err != nil {
+			return nil, err
+		}
+		s, err := e.startAgentSession(ctx, sessionID, sessionKey, envVars, opts)
+		if !errors.Is(err, ErrAgentUpgradeInProgress) {
+			return s, err
+		}
+	}
+}
+
 // runIsolatedCronTurn starts a one-shot isolated agent session resuming
 // agentSessionID (empty = fresh), sends one prompt, drains events to the final
 // result, then closes the session. Like the job runner it never touches
@@ -303,7 +332,7 @@ func (e *Engine) runIsolatedCronTurn(
 	opts AgentSessionOptions,
 ) (finalSessionID string, output string, err error) {
 	defer e.trackBackgroundTurn()()
-	agentSession, err := e.startAgentSession(ctx, agentSessionID, syntheticKey, env, opts)
+	agentSession, err := e.startAgentSessionAfterUpgrade(ctx, agentSessionID, syntheticKey, env, opts)
 	if err != nil {
 		return "", "", fmt.Errorf("start isolated cron session: %w", cronResumeError(err, agentSessionID, false))
 	}
@@ -398,7 +427,7 @@ func (e *Engine) StartJobSession(
 	}
 	// Echo jobs always use the project defaults: chat-level /model, /effort and
 	// /mode choices must not leak into worker tasks.
-	return e.startAgentSession(ctx, "", sessionKey, e.jobEnv(req, jobID, sessionKey), AgentSessionOptions{})
+	return e.startAgentSessionAfterUpgrade(ctx, "", sessionKey, e.jobEnv(req, jobID, sessionKey), AgentSessionOptions{})
 }
 
 func (e *Engine) sessionEnv(sessionKey string) []string {
@@ -580,8 +609,8 @@ var agentUpgradePollInterval = time.Second
 
 // waitForAgentUpgrade holds a new agent session while this agent's CLI is
 // being upgraded (here or by another echo-client service). Chat messages are
-// turned away earlier with a notice; this catches Echo jobs, cron runs and
-// relay turns, and chats that raced the start of an upgrade. Background turns
+// turned away with a notice instead; this is for Echo jobs, cron runs and
+// relay turns. Background turns
 // register as active work (trackBackgroundTurn) before they get here, so an
 // upgrade either sees them and skips, or has already started and they wait.
 func (e *Engine) waitForAgentUpgrade(ctx context.Context) error {
