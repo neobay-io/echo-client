@@ -241,6 +241,56 @@ func TestResourceSentWholeWhenRangeIgnored(t *testing.T) {
 	}
 }
 
+// Feishu answers an image request 206 with the whole image and no
+// Content-Range, whatever range was asked for.
+func TestImageSentWholeAs206WithoutContentRange(t *testing.T) {
+	image := strings.Repeat("png-bytes", 4)
+	oldChunk := resourceChunkSize
+	resourceChunkSize = 8 // smaller than the image
+	t.Cleanup(func() { resourceChunkSize = oldChunk })
+	var calls atomic.Int32
+	_, p := newFakeFeishu(t, func(w http.ResponseWriter, r *http.Request, _ string) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(w, image)
+	})
+	got, _, err := p.downloadImage("om_1", "img_v3_x")
+	if err != nil || string(got) != image || calls.Load() != 1 {
+		t.Fatalf("got %q err=%v in %d requests", got, err, calls.Load())
+	}
+}
+
+// An image that cannot be downloaded is reported in the chat instead of
+// being dropped without a word.
+func TestFailedImageDownloadReported(t *testing.T) {
+	var replied atomic.Value
+	_, p := newFakeFeishu(t, func(w http.ResponseWriter, r *http.Request, body string) {
+		if strings.Contains(r.URL.Path, "/resources/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"code":234003,"msg":"File not in msg."}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/messages/om_img/reply") {
+			replied.Store(body)
+		}
+		writeJSON(w, `{"code":0,"data":{"message_id":"om_r"}}`)
+	})
+	h := &recordingHandler{}
+	p.handler = h.handle
+	ev := textEvent("om_img", "p2p", "")
+	ev.Event.Message.MessageType = strp("image")
+	ev.Event.Message.Content = strp(`{"image_key":"img_v3_x"}`)
+	_ = p.onMessage(ev)
+	if len(h.got()) != 0 {
+		t.Fatal("a message without its image reached the agent")
+	}
+	if body, _ := replied.Load().(string); !strings.Contains(body, "Could not download this image") || !strings.Contains(body, "234003") {
+		t.Fatalf("reply = %q", body)
+	}
+}
+
 func TestResourceErrorCodeReported(t *testing.T) {
 	_, p := newFakeFeishu(t, func(w http.ResponseWriter, r *http.Request, _ string) {
 		w.Header().Set("Content-Type", "application/json")

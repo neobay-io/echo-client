@@ -410,7 +410,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		imgData, mimeType, err := p.downloadImage(messageID, imgBody.ImageKey)
 		if err != nil {
-			slog.Error("feishu: download image failed", "error", err)
+			p.downloadFailed(rctx, "image", err)
 			return nil
 		}
 		p.dispatchImage(applyQuotedMessage(&core.Message{
@@ -433,7 +433,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		slog.Debug("feishu: audio received", "user", userID, "file_key", audioBody.FileKey)
 		audioData, err := p.downloadResource(messageID, audioBody.FileKey, "file")
 		if err != nil {
-			slog.Error("feishu: download audio failed", "error", err)
+			p.downloadFailed(rctx, "audio", err)
 			return nil
 		}
 		p.handler(p, applyQuotedMessage(&core.Message{
@@ -460,7 +460,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		fileData, err := p.downloadResource(messageID, fileBody.FileKey, "file")
 		if err != nil {
-			slog.Error("feishu: download file failed", "error", err)
+			p.downloadFailed(rctx, "file", err)
 			return nil
 		}
 		p.handler(p, applyQuotedMessage(&core.Message{
@@ -490,7 +490,7 @@ func (p *Platform) onMessage(event *larkim.P2MessageReceiveV1) error {
 		}
 		fileData, err := p.downloadResource(messageID, mediaBody.FileKey, "media")
 		if err != nil {
-			slog.Error("feishu: download media failed", "error", err)
+			p.downloadFailed(rctx, "media", err)
 			return nil
 		}
 		mimeType := detectMimeType(fileData)
@@ -558,6 +558,16 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	// A new message in the chat (not a reply).
 	_, err := p.postMessage(ctx, "send", "", rc.chatID, msgType, msgBody)
 	return err
+}
+
+// downloadFailed tells the chat that an attachment could not be fetched, so
+// the user does not wait for an answer about something the agent never got.
+func (p *Platform) downloadFailed(rctx replyContext, what string, err error) {
+	slog.Error("feishu: download "+what+" failed", "error", err)
+	text := fmt.Sprintf("⚠️ Could not download this %s from Feishu, so the agent did not get it: %v", what, err)
+	if rerr := p.Reply(p.runContext(), rctx, text); rerr != nil {
+		slog.Warn("feishu: could not report a failed download", "error", rerr)
+	}
 }
 
 // downloadImage fetches an image from Feishu by message_id and image_key.

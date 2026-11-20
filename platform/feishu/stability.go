@@ -473,7 +473,13 @@ func (p *Platform) fetchRangeWith(ctx context.Context, endpoint, token string, s
 		return rangePart{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	switch resp.StatusCode {
+	status := resp.StatusCode
+	if status == http.StatusPartialContent && strings.TrimSpace(resp.Header.Get("Content-Range")) == "" {
+		// Feishu ignores Range for images: it answers 206 with the whole
+		// image and no Content-Range (files get real ranges).
+		status = http.StatusOK
+	}
+	switch status {
 	case http.StatusPartialContent:
 		s, e, t, ok := parseContentRange(resp.Header.Get("Content-Range"))
 		if !ok {
