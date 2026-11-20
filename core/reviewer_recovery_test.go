@@ -175,7 +175,7 @@ func TestSuccessfulClaudeReplyMentioningSessionErrorKeepsBinding(t *testing.T) {
 	events <- Event{Type: EventResult, Content: "The old log says No conversation found. I have fixed it.", Done: true}
 	state := newInteractiveState(&eventfulStubAgentSession{events: events}, p, "ctx", false)
 	e.interactiveStates["test:chat"] = state
-	e.processInteractiveEvents(state, session, "test:chat", "msg", time.Now(), nil)
+	_ = e.processInteractiveEvents(state, session, "test:chat", "msg", time.Now(), nil)
 	if session.AgentSessionID != "keep-this-transcript" || session.NeedsReplay {
 		t.Fatal("normal explanation reset session")
 	}

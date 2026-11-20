@@ -261,6 +261,8 @@ type interactiveState struct {
 	// steerOK: the running turn can still take steered messages; false once
 	// its final result arrived (guarded by mu).
 	steerOK bool
+	// steered: a message was steered into the running turn (guarded by mu).
+	steered bool
 	// turnMu orders ending a turn against /stop sending an interrupt, so an
 	// interrupt meant for one turn can never reach the next.
 	turnMu sync.Mutex
@@ -305,6 +307,7 @@ func (s *interactiveState) beginTurn() func() {
 	s.mu.Lock()
 	s.turnDone = ch
 	s.steerOK = true
+	s.steered = false
 	s.lastActive = time.Now()
 	s.mu.Unlock()
 	var once sync.Once
@@ -330,6 +333,19 @@ func (s *interactiveState) turnFinishing() {
 	s.mu.Lock()
 	s.steerOK = false
 	s.mu.Unlock()
+}
+
+// markSteered records that a message went into the running turn.
+func (s *interactiveState) markSteered() {
+	s.mu.Lock()
+	s.steered = true
+	s.mu.Unlock()
+}
+
+func (s *interactiveState) wasSteered() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.steered
 }
 
 // steerable reports whether the running turn can still take a message.
@@ -2149,22 +2165,34 @@ func cloneFiles(files []FileAttachment) []FileAttachment {
 	return out
 }
 
-func (e *Engine) buildAgentPrompt(session *Session, msg *Message) string {
+// agentMessageText is the user's message as the agent gets it, with the
+// message it replies to (if any), and as the chat history keeps it.
+func agentMessageText(msg *Message) string {
 	base := strings.TrimSpace(msg.Content)
 	quoted := strings.TrimSpace(msg.QuotedContent)
-	if quoted != "" {
-		header := "Reply context"
-		if name := strings.TrimSpace(msg.QuotedUserName); name != "" {
-			header = fmt.Sprintf("Reply context from %s", name)
-		}
-
-		if base == "" {
-			base = fmt.Sprintf("%s:\n%s", header, quoted)
-		} else {
-			base = fmt.Sprintf("%s:\n%s\n\nUser message:\n%s", header, quoted, base)
-		}
+	if quoted == "" {
+		return base
 	}
+	header := "Reply context"
+	if name := strings.TrimSpace(msg.QuotedUserName); name != "" {
+		header = fmt.Sprintf("Reply context from %s", name)
+	}
+	if base == "" {
+		return fmt.Sprintf("%s:\n%s", header, quoted)
+	}
+	return fmt.Sprintf("%s:\n%s\n\nUser message:\n%s", header, quoted, base)
+}
 
+const (
+	replayHeader = "Previous conversation context:\n"
+	replayFooter = "\n\nContinue from that context.\n\n"
+)
+
+// buildAgentPrompt is the prompt for msg: after the chat's agent session was
+// reset, the chat's recent history comes first. Only agentMessageText(msg)
+// goes into the history, so a later replay does not contain this one.
+func (e *Engine) buildAgentPrompt(session *Session, msg *Message) string {
+	base := agentMessageText(msg)
 	if session == nil || !session.NeedsReplay {
 		return base
 	}
@@ -2175,10 +2203,25 @@ func (e *Engine) buildAgentPrompt(session *Session, msg *Message) string {
 	}
 
 	if base == "" {
-		return fmt.Sprintf("Previous conversation context:\n%s", replay)
+		return replayHeader + replay
 	}
+	return replayHeader + replay + replayFooter + base
+}
 
-	return fmt.Sprintf("Previous conversation context:\n%s\n\nContinue from that context.\n\n%s", replay, base)
+// stripReplay returns the user's own text of a history entry that older
+// versions saved with the replayed history in front of it.
+func stripReplay(content string) string {
+	if !strings.HasPrefix(content, replayHeader) {
+		return content
+	}
+	if i := strings.LastIndex(content, replayFooter); i >= 0 {
+		rest := content[i+len(replayFooter):]
+		if !strings.Contains(rest, "\nUser: ") && !strings.Contains(rest, "\nAssistant: ") {
+			return rest
+		}
+		// The footer of a replay nested inside a replay-only entry.
+	}
+	return "" // only a replay: the message itself had no text
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -2748,17 +2791,19 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 	}
 
 	turnStart := time.Now()
-	prompt := e.buildAgentPrompt(session, msg)
-
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", prompt)
 
 	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 	if state.replaced {
-		session.dropLastHistory("user", prompt)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueSkippedSessionChanged))
 		return
 	}
+	// Built after the state: starting it may have found the agent's session
+	// gone and asked for the history replay. The replay is taken before the
+	// message joins the history.
+	prompt := e.buildAgentPrompt(session, msg)
+	text := agentMessageText(msg)
+	session.AddHistory("user", text)
 
 	// Update reply context for this turn
 	state.mu.Lock()
@@ -2768,7 +2813,7 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 
 	if state.agentSession == nil {
 		if e.requeueForUpgrade(p, msg, session) {
-			session.dropLastHistory("user", prompt)
+			session.dropLastHistory("user", text)
 			return
 		}
 		e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to start agent session"))
@@ -2820,6 +2865,13 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 			if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
 				return
 			}
+			if session.NeedsReplay {
+				// The restart found the session gone: replay the history
+				// (without this message, which it already holds).
+				session.dropLastHistory("user", text)
+				prompt = e.buildAgentPrompt(session, msg)
+				session.AddHistory("user", text)
+			}
 			sendStart = time.Now()
 			if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
 				e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
@@ -2845,7 +2897,13 @@ func (e *Engine) processInteractiveMessageWithStartSignal(p Platform, msg *Messa
 	// agent state. Before this point, switching could let this state be created
 	// after cleanup and then reused by the newly active local session.
 	signalStarted()
-	e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn)
+	if lost := e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn); lost != nil {
+		if stopTyping != nil {
+			stopTyping()
+			stopTyping = nil
+		}
+		e.retryLostTurn(p, msg, session, agentTurn, lost)
+	}
 }
 
 func (e *Engine) processInteractiveMessageAsyncWithQueueKey(p Platform, msg *Message, session *Session, queueKey string, done func(error)) {
@@ -2883,7 +2941,7 @@ func (e *Engine) processInteractiveMessageAsyncWithQueueKey(p Platform, msg *Mes
 			completeQueue()
 			return
 		}
-		state, prompt, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session, agentTurn)
+		state, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session, agentTurn)
 		if err != nil {
 			if done != nil {
 				done(err)
@@ -2906,13 +2964,16 @@ func (e *Engine) processInteractiveMessageAsyncWithQueueKey(p Platform, msg *Mes
 			completeQueue()
 			return
 		}
-		session.AddHistory("user", prompt)
+		session.AddHistory("user", agentMessageText(msg))
 		if done != nil {
 			done(nil)
 		}
-		e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn)
+		lost := e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn)
 		if stopTyping != nil {
 			stopTyping()
+		}
+		if lost != nil {
+			e.retryLostTurn(p, msg, session, agentTurn, lost)
 		}
 		agentTurn.Unlock()
 		session.Unlock()
@@ -2920,21 +2981,21 @@ func (e *Engine) processInteractiveMessageAsyncWithQueueKey(p Platform, msg *Mes
 	}()
 }
 
-func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session, agentTurn *agentSessionTurnGuard) (*interactiveState, string, time.Time, func(), error) {
+func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session, agentTurn *agentSessionTurnGuard) (*interactiveState, time.Time, func(), error) {
 	if e.ctx.Err() != nil {
-		return nil, "", time.Time{}, nil, e.ctx.Err()
+		return nil, time.Time{}, nil, e.ctx.Err()
 	}
 
 	turnStart := time.Now()
-	prompt := e.buildAgentPrompt(session, msg)
-
 	e.i18n.DetectAndSet(msg.Content)
 
 	state := e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 	if state.replaced {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueSkippedSessionChanged))
-		return nil, "", time.Time{}, nil, errSessionReplaced
+		return nil, time.Time{}, nil, errSessionReplaced
 	}
+	// After the state, as in processInteractiveMessageWithStartSignal.
+	prompt := e.buildAgentPrompt(session, msg)
 
 	// Update reply context for this turn
 	state.mu.Lock()
@@ -2944,12 +3005,12 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 
 	if state.agentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to start agent session"))
-		return nil, "", time.Time{}, nil, fmt.Errorf("failed to start agent session")
+		return nil, time.Time{}, nil, fmt.Errorf("failed to start agent session")
 	}
 	e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
 	if agentTurn != nil {
 		if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
-			return nil, "", time.Time{}, nil, err
+			return nil, time.Time{}, nil, err
 		}
 	}
 
@@ -2969,7 +3030,7 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 		if errors.Is(err, ErrAgentSessionNotFound) {
 			e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
 			e.sendAgentError(p, msg.ReplyCtx, err)
-			return nil, "", time.Time{}, stopTyping, err
+			return nil, time.Time{}, stopTyping, err
 		}
 
 		if !state.agentSession.Alive() {
@@ -2979,23 +3040,24 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 			state = e.getOrCreateInteractiveState(msg.SessionKey, p, msg.ReplyCtx, session)
 			if state.agentSession == nil {
 				e.reply(p, msg.ReplyCtx, e.agentStartFailedMessage("failed to restart agent session"))
-				return nil, "", time.Time{}, stopTyping, fmt.Errorf("failed to restart agent session")
+				return nil, time.Time{}, stopTyping, fmt.Errorf("failed to restart agent session")
 			}
 			e.bindAgentSessionID(session, state.agentSession.CurrentSessionID())
 			if agentTurn != nil {
 				if err := agentTurn.Bind(e.ctx, state.agentSession.CurrentSessionID()); err != nil {
-					return nil, "", time.Time{}, stopTyping, err
+					return nil, time.Time{}, stopTyping, err
 				}
 			}
+			prompt = e.buildAgentPrompt(session, msg) // the restart may have asked for a replay
 			sendStart = time.Now()
 			if err := state.agentSession.Send(prompt, msg.Images, msg.Files); err != nil {
 				e.cleanupInteractiveTurn(msg.SessionKey, state, session, err)
 				e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-				return nil, "", time.Time{}, stopTyping, err
+				return nil, time.Time{}, stopTyping, err
 			}
 		} else {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-			return nil, "", time.Time{}, stopTyping, err
+			return nil, time.Time{}, stopTyping, err
 		}
 	}
 	if session.NeedsReplay {
@@ -3008,7 +3070,7 @@ func (e *Engine) startInteractiveTurn(p Platform, msg *Message, session *Session
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 
-	return state, prompt, turnStart, stopTyping, nil
+	return state, turnStart, stopTyping, nil
 }
 
 func (e *Engine) agentUpgradeBlocksNewTurns() bool {
@@ -3166,10 +3228,12 @@ func (e *Engine) getOrCreateInteractiveState(sessionKey string, p Platform, repl
 		// a turn finds it missing.
 		slog.Warn("agent session not found at start; starting a new one", "session_key", sessionKey, "agent_session", session.AgentSessionID)
 		session.mu.Lock()
+		oldAgentSessionID := session.AgentSessionID
 		session.AgentSessionID = ""
 		session.NeedsReplay = true
 		session.mu.Unlock()
 		e.sessions.Save()
+		e.keepQueuedPromptsAfterReset(sessionKey, session.ID, oldAgentSessionID)
 		agentSession, err = e.startAgentSession(e.ctx, "", sessionKey, envVars, session.Settings())
 	}
 	startElapsed := time.Since(startAt)
@@ -3214,8 +3278,10 @@ func (e *Engine) cleanupInteractiveTurn(key string, expected *interactiveState, 
 	}
 	reset := session != nil && err != nil &&
 		(errors.Is(err, ErrAgentSessionNotFound) || e.shouldResetAgentSessionOnResult(err.Error()))
+	var oldAgentSessionID string
 	if reset {
 		session.mu.Lock()
+		oldAgentSessionID = session.AgentSessionID
 		session.AgentSessionID = ""
 		session.NeedsReplay = true
 		session.mu.Unlock()
@@ -3225,6 +3291,7 @@ func (e *Engine) cleanupInteractiveTurn(key string, expected *interactiveState, 
 	e.interactiveMu.Unlock()
 	if reset {
 		e.sessions.Save()
+		e.keepQueuedPromptsAfterReset(key, session.ID, oldAgentSessionID)
 	}
 	e.closeInteractiveState(expected)
 }
@@ -3262,7 +3329,7 @@ const defaultEventIdleTimeout = 2 * time.Hour
 const defaultFirstEventTimeout = 5 * time.Minute
 const defaultTurnTimeout = 45 * time.Minute
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time, agentTurn *agentSessionTurnGuard) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessionKey string, msgID string, turnStart time.Time, agentTurn *agentSessionTurnGuard) error {
 	defer state.beginTurn()()
 	var textParts []string
 	toolCount := 0
@@ -3312,7 +3379,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				goto channelClosed
 			}
 		case <-state.stopped:
-			return
+			return nil
 		case <-firstEventCh:
 			slog.Error("agent session first event timeout: no initial event received",
 				"session_key", sessionKey, "timeout", e.firstEventTimeout, "elapsed", time.Since(turnStart))
@@ -3323,7 +3390,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out waiting for first response"))
 			e.cleanupInteractiveTurn(sessionKey, state, session, nil)
-			return
+			return nil
 		case <-turnCh:
 			slog.Error("agent session turn timeout: turn exceeded maximum duration",
 				"session_key", sessionKey, "timeout", e.turnTimeout, "elapsed", time.Since(turnStart),
@@ -3335,7 +3402,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out before completing the turn"))
 			e.cleanupInteractiveTurn(sessionKey, state, session, nil)
-			return
+			return nil
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
@@ -3346,9 +3413,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			e.cleanupInteractiveTurn(sessionKey, state, session, nil)
-			return
+			return nil
 		case <-e.ctx.Done():
-			return
+			return nil
 		}
 
 		lastEventAt = time.Now()
@@ -3383,7 +3450,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		e.bindAgentSessionID(session, event.SessionID)
 		if agentTurn != nil {
 			if err := agentTurn.Bind(e.ctx, event.SessionID); err != nil {
-				return
+				return nil
 			}
 		}
 
@@ -3526,9 +3593,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.clearInteractionPrompt(sessionKey)
 				pending.resolve()
 			case <-state.stopped:
-				return
+				return nil
 			case <-e.ctx.Done():
-				return
+				return nil
 			}
 
 			// Restart idle timer after permission is resolved
@@ -3543,12 +3610,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				sp.finish("")
 				e.sendAgentError(p, replyCtx, event.Error)
 				e.cleanupInteractiveTurn(sessionKey, state, session, event.Error)
-				return
+				return nil
 			}
 			e.bindAgentSessionID(session, event.SessionID)
 			if agentTurn != nil {
 				if err := agentTurn.Bind(e.ctx, event.SessionID); err != nil {
-					return
+					return nil
 				}
 			}
 
@@ -3591,7 +3658,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					for _, chunk := range splitMessage(displayResponse, maxPlatformMessageLen) {
 						if err := p.Send(e.ctx, replyCtx, chunk); err != nil {
 							slog.Error("failed to send reply", "error", err, "msg_id", msgID)
-							return
+							return nil
 						}
 					}
 				}
@@ -3631,18 +3698,24 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
-			return
+			return nil
 
 		case EventError:
 			state.turnFinishing()
 			cp.Finalize("error")
 			sp.finish("") // clean up preview on error
+			if errors.Is(event.Error, ErrAgentSessionNotFound) && len(textParts) == 0 && toolCount == 0 && !state.wasSteered() {
+				// Nothing ran: the caller retries in a new session. (A steered
+				// message would be lost by a retry.)
+				e.cleanupInteractiveTurn(sessionKey, state, session, event.Error)
+				return event.Error
+			}
 			if event.Error != nil {
 				slog.Error("agent error", "error", event.Error)
 				e.sendAgentError(p, replyCtx, event.Error)
 			}
 			e.cleanupInteractiveTurn(sessionKey, state, session, event.Error)
-			return
+			return nil
 		}
 	}
 
@@ -3668,6 +3741,36 @@ channelClosed:
 				e.send(p, replyCtx, chunk)
 			}
 		}
+	}
+	return nil
+}
+
+// retryLostTurn sends msg once more after the agent reported, before doing
+// anything, that the chat's session no longer exists (Claude Code deletes
+// old transcripts). The turn's cleanup has reset the session, so a new agent
+// session starts and gets the chat's recent history first.
+func (e *Engine) retryLostTurn(p Platform, msg *Message, session *Session, agentTurn *agentSessionTurnGuard, lost error) {
+	slog.Warn("agent session not found; sending the message again in a new session", "session_key", msg.SessionKey, "error", lost)
+	if e.ctx.Err() != nil || e.sessionReplaced(p, msg, session) {
+		return
+	}
+	e.send(p, msg.ReplyCtx, e.i18n.T(MsgKey("agent_session_lost_retry")))
+	// The replayed history must not contain the message itself.
+	text := agentMessageText(msg)
+	session.dropLastHistory("user", text)
+	state, turnStart, stopTyping, err := e.startInteractiveTurn(p, msg, session, agentTurn)
+	if stopTyping != nil {
+		defer stopTyping()
+	}
+	if errors.Is(err, errSessionReplaced) {
+		return
+	}
+	session.AddHistory("user", text)
+	if err != nil {
+		return // startInteractiveTurn told the user
+	}
+	if lost := e.processInteractiveEvents(state, session, msg.SessionKey, msg.MessageID, turnStart, agentTurn); lost != nil {
+		e.sendAgentError(p, msg.ReplyCtx, lost)
 	}
 }
 
@@ -3706,7 +3809,11 @@ func (e *Engine) formatSessionReplay(session *Session, limit int) string {
 
 	var lines []string
 	for _, entry := range history {
-		content := strings.TrimSpace(entry.Content)
+		content := entry.Content
+		if entry.Role == "user" {
+			content = stripReplay(content)
+		}
+		content = strings.TrimSpace(content)
 		if content == "" {
 			continue
 		}
@@ -7036,6 +7143,20 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) string {
 	return ""
 }
 
+// cronScheduleText is a job's schedule in words with its expression, or the
+// expression alone when it has no description in words. In markdown the
+// expression is code, so its "*" is not read as emphasis.
+func cronScheduleText(expr string, lang Language, markdown bool) string {
+	shown := expr
+	if markdown {
+		shown = "`" + expr + "`"
+	}
+	if human := CronExprToHuman(expr, lang); human != expr {
+		return human + " (" + shown + ")"
+	}
+	return shown
+}
+
 func (e *Engine) renderCronCard(sessionKey string, notice string) *Card {
 	if e.cronScheduler == nil {
 		return e.simpleCard("Cron Jobs", "orange", e.i18n.T(MsgCronNotAvailable))
@@ -7072,13 +7193,11 @@ func (e *Engine) renderCronCard(sessionKey string, notice string) *Card {
 		if j.Mute {
 			desc += " [mute]"
 		}
-		human := CronExprToHuman(j.CronExpr, lang)
-
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "%s %s\n", status, desc)
 		fmt.Fprintf(&sb, "ID: `%s`\n", j.ID)
 		sb.WriteString(cronSessionLine(j, true) + "\n")
-		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
+		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, cronScheduleText(j.CronExpr, lang, true)))
 		nextRun := e.cronScheduler.NextRun(j.ID)
 		if !nextRun.IsZero() {
 			fmtStr := cronTimeFormat(nextRun, now)
@@ -7494,8 +7613,7 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 		fmt.Fprintf(&sb, "ID: %s\n", j.ID)
 		sb.WriteString(cronSessionLine(j, false) + "\n")
 
-		human := CronExprToHuman(j.CronExpr, lang)
-		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
+		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, cronScheduleText(j.CronExpr, lang, false)))
 
 		nextRun := e.cronScheduler.NextRun(j.ID)
 		if !nextRun.IsZero() {

@@ -102,11 +102,16 @@ func TestInteractiveFailureAfterErrorSendKeepsNewState(t *testing.T) {
 			session := e.sessions.GetOrCreateActive("test:chat")
 			session.AgentSessionID = "old"
 			old := &trackedFailureSession{events: make(chan Event, 1)}
-			old.events <- Event{Type: kind, Error: ErrAgentSessionNotFound, Content: "missing"}
+			// An error that resets the session and is shown (a missing
+			// session before any output is retried instead).
+			old.events <- Event{Type: kind, Error: errors.New("No conversation found with session ID: old"), Content: "missing"}
 			state := newInteractiveState(old, p, "old", false)
 			e.interactiveStates["test:chat"] = state
 			done := make(chan struct{})
-			go func() { e.processInteractiveEvents(state, session, "test:chat", "msg", time.Now(), nil); close(done) }()
+			go func() {
+				_ = e.processInteractiveEvents(state, session, "test:chat", "msg", time.Now(), nil)
+				close(done)
+			}()
 			select {
 			case <-p.entered:
 			case <-time.After(time.Second):
@@ -170,7 +175,7 @@ func TestCompressFailureAllowsFreshChatTurn(t *testing.T) {
 			if session.AgentSessionID != "" || !session.NeedsReplay || !agent.sessions[0].closed {
 				t.Fatal("failed compress did not reset and close old process")
 			}
-			newState, _, _, _, err := e.startInteractiveTurn(p, &Message{SessionKey: "test:chat", Content: "small prompt", ReplyCtx: "ctx"}, session, nil)
+			newState, _, _, err := e.startInteractiveTurn(p, &Message{SessionKey: "test:chat", Content: "small prompt", ReplyCtx: "ctx"}, session, nil)
 			if err != nil || newState == state {
 				t.Fatalf("next turn did not recover: %v", err)
 			}
@@ -254,7 +259,7 @@ func TestLongAgentErrorIsDeliveredInChunks(t *testing.T) {
 	events <- Event{Type: EventError, Error: err}
 	state := newInteractiveState(&eventfulStubAgentSession{events: events}, p, "ctx", false)
 	e.interactiveStates["test:chat"] = state
-	e.processInteractiveEvents(state, session, "test:chat", "msg", time.Now(), nil)
+	_ = e.processInteractiveEvents(state, session, "test:chat", "msg", time.Now(), nil)
 	if len(p.sent) < 2 || strings.Join(p.sent, "") != fmt.Sprintf(e.i18n.T(MsgError), err) {
 		t.Fatal("long error was rejected or truncated")
 	}

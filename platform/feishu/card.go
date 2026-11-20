@@ -58,7 +58,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 		case core.CardMarkdown:
 			elements = append(elements, map[string]any{
 				"tag":     "markdown",
-				"content": e.Content,
+				"content": cardMarkdown(e.Content),
 			})
 		case core.CardDivider:
 			elements = append(elements, map[string]any{
@@ -143,7 +143,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 						"elements": []map[string]any{
 							{
 								"tag":     "markdown",
-								"content": e.Text,
+								"content": cardMarkdown(e.Text),
 							},
 						},
 					},
@@ -229,7 +229,7 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 			if !selectable {
 				formRowElements = append(formRowElements, map[string]any{
 					"tag":     "markdown",
-					"content": "▶ " + text,
+					"content": "▶ " + cardMarkdown(text),
 				})
 				continue
 			}
@@ -244,7 +244,7 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 				"checked": row.checked,
 				"text": map[string]any{
 					"tag":     "lark_md",
-					"content": row.text,
+					"content": cardMarkdown(row.text),
 				},
 			})
 		case core.CardNote:

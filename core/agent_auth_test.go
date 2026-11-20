@@ -413,7 +413,7 @@ func TestAuthRefreshAllowsRunningReplyToFinish(t *testing.T) {
 	e.interactiveStates["chat"] = state
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, "chat", "message", time.Now(), nil)
+		_ = e.processInteractiveEvents(state, session, "chat", "message", time.Now(), nil)
 		close(done)
 	}()
 	e.RefreshInteractiveAuth()

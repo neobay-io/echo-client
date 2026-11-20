@@ -1930,11 +1930,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "\nUse `/mode <nombre>` para cambiar.\nDisponibles: %s",
 	},
 	MsgCronScheduleLabel: {
-		LangEnglish:            "Schedule: %s (%s)\n",
-		LangChinese:            "调度: %s (%s)\n",
-		LangTraditionalChinese: "調度: %s (%s)\n",
-		LangJapanese:           "スケジュール: %s (%s)\n",
-		LangSpanish:            "Programación: %s (%s)\n",
+		LangEnglish:            "Schedule: %s\n",
+		LangChinese:            "调度: %s\n",
+		LangTraditionalChinese: "調度: %s\n",
+		LangJapanese:           "スケジュール: %s\n",
+		LangSpanish:            "Programación: %s\n",
 	},
 	MsgCronNextRunLabel: {
 		LangEnglish:            "Next run: %s\n",
@@ -2831,6 +2831,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgKey("steer_done"): {
 		LangEnglish: "📌 Added to the running turn; the agent reads it after its current step.",
 		LangChinese: "📌 已插入正在进行的这一轮，agent 会在当前步骤结束后读到。",
+	},
+	MsgKey("agent_session_lost_retry"): {
+		LangEnglish: "🔄 The agent no longer has this chat's previous session. Sending your message again in a new session, with the recent chat history.",
+		LangChinese: "🔄 Agent 已找不到这个对话之前的会话。正在新会话里重新发送你的消息，并附上最近的聊天记录。",
 	},
 	MsgKey("steer_btn_insert"): {
 		LangEnglish: "Insert now",

@@ -2925,7 +2925,7 @@ func TestProcessInteractiveEvents_BindsSessionIDFromResultEvent(t *testing.T) {
 		replyCtx:     "ctx",
 	}
 
-	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
+	_ = e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 
 	if session.AgentSessionID != "codex-thread-123" {
 		t.Fatalf("AgentSessionID = %q, want codex-thread-123", session.AgentSessionID)
@@ -3893,7 +3893,7 @@ func TestProcessInteractiveEvents_StripsOptionsXMLFromDisplayedReply(t *testing.
 		replyCtx:     "ctx",
 	}
 
-	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
+	_ = e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 
 	if len(p.sent) < 2 {
 		t.Fatalf("expected sanitized reply and follow-up buttons, got %#v", p.sent)
@@ -3929,7 +3929,7 @@ func TestProcessInteractiveEvents_FatalClaudeImageErrorCleansInteractiveState(t 
 	state := newInteractiveState(&eventfulStubAgentSession{events: events}, p, "ctx", false)
 	e.interactiveStates["test:user1"] = state
 
-	e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
+	_ = e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 
 	if session.AgentSessionID != "" {
 		t.Fatalf("AgentSessionID = %q, want empty", session.AgentSessionID)
@@ -3958,7 +3958,7 @@ func TestProcessInteractiveEvents_RequestTooLargeCleansInteractiveState(t *testi
 	state := newInteractiveState(&eventfulStubAgentSession{events: events}, p, "ctx", false)
 	e.interactiveStates["test:user2"] = state
 
-	e.processInteractiveEvents(state, session, "test:user2", "msg-2", time.Now(), nil)
+	_ = e.processInteractiveEvents(state, session, "test:user2", "msg-2", time.Now(), nil)
 
 	if session.AgentSessionID != "" {
 		t.Fatalf("AgentSessionID = %q, want empty", session.AgentSessionID)
@@ -3984,7 +3984,7 @@ func TestProcessInteractiveEvents_FirstEventTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
+		_ = e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 	}()
 
 	select {
@@ -4013,7 +4013,7 @@ func TestProcessInteractiveEvents_TurnTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
+		_ = e.processInteractiveEvents(state, session, "test:user1", "msg-1", time.Now(), nil)
 	}()
 
 	select {
@@ -5006,7 +5006,7 @@ func TestSessionIDPersistsAcrossReloadForAgentPatterns(t *testing.T) {
 				platform:     p,
 				replyCtx:     "ctx",
 			}
-			e1.processInteractiveEvents(state, session1, sessionKey, "msg-1", time.Now(), nil)
+			_ = e1.processInteractiveEvents(state, session1, sessionKey, "msg-1", time.Now(), nil)
 
 			if session1.AgentSessionID != tc.sessionID {
 				t.Fatalf("stored AgentSessionID = %q, want %q", session1.AgentSessionID, tc.sessionID)
@@ -5049,7 +5049,7 @@ func TestCmdStopReleasesBusySessionWhenEventLoopIsWaiting(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer session.Unlock()
-		e.processInteractiveEvents(state, session, sessionKey, "msg-1", time.Now(), nil)
+		_ = e.processInteractiveEvents(state, session, sessionKey, "msg-1", time.Now(), nil)
 	}()
 
 	e.cmdStop(p, &Message{SessionKey: sessionKey, ReplyCtx: "ctx"})

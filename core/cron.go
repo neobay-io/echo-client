@@ -938,122 +938,196 @@ func cronLangNames(lang Language) (weekdays [7]string, months [13]string) {
 	return
 }
 
-func isZhLikeLang(lang Language) bool {
-	return lang == LangChinese || lang == LangTraditionalChinese || lang == LangJapanese
+// cronPhrases are the words CronExprToHuman puts around the numbers.
+type cronPhrases struct {
+	everyMinute, everyMinutes, hourly, everyHours string
+	daily, weekly, monthly, yearly                string
+	oneDay, dayRange, listSep                     string
 }
 
-// CronExprToHuman converts a standard 5-field cron expression to a human-readable string.
+var cronPhrasesByLang = map[Language]cronPhrases{
+	LangEnglish: {
+		everyMinute: "Every minute", everyMinutes: "Every %d minutes",
+		hourly: "Every hour at :%02d", everyHours: "Every %d hours at :%02d",
+		daily: "Daily at %s", weekly: "%s at %s",
+		monthly: "Monthly on day %d at %s", yearly: "Every year on %s %d at %s",
+		oneDay: "Every %s", dayRange: "%s to %s", listSep: ", ",
+	},
+	LangChinese: {
+		everyMinute: "每分钟", everyMinutes: "每 %d 分钟",
+		hourly: "每小时第 %d 分", everyHours: "每 %d 小时，第 %d 分",
+		daily: "每天 %s", weekly: "%s %s",
+		monthly: "每月 %d 日 %s", yearly: "每年 %s%d日 %s",
+		oneDay: "每%s", dayRange: "每%s至%s", listSep: "、",
+	},
+	LangTraditionalChinese: {
+		everyMinute: "每分鐘", everyMinutes: "每 %d 分鐘",
+		hourly: "每小時第 %d 分", everyHours: "每 %d 小時，第 %d 分",
+		daily: "每天 %s", weekly: "%s %s",
+		monthly: "每月 %d 日 %s", yearly: "每年 %s%d日 %s",
+		oneDay: "每%s", dayRange: "每%s至%s", listSep: "、",
+	},
+	LangJapanese: {
+		everyMinute: "毎分", everyMinutes: "%d 分ごと",
+		hourly: "毎時 %d 分", everyHours: "%d 時間ごと（%d 分）",
+		daily: "毎日 %s", weekly: "%s %s",
+		monthly: "毎月 %d 日 %s", yearly: "毎年 %s%d日 %s",
+		oneDay: "毎週%s", dayRange: "毎週%s〜%s", listSep: "、",
+	},
+	LangSpanish: {
+		everyMinute: "Cada minuto", everyMinutes: "Cada %d minutos",
+		hourly: "Cada hora en el minuto %d", everyHours: "Cada %d horas en el minuto %d",
+		daily: "Diario a las %s", weekly: "%s a las %s",
+		monthly: "Mensual, día %d a las %s", yearly: "Cada año, el %[2]d de %[1]s a las %[3]s",
+		oneDay: "Cada %s", dayRange: "De %s a %s", listSep: ", ",
+	},
+}
+
+// CronExprToHuman describes a cron expression in words. Forms it cannot
+// describe exactly (names, ranges of hours, steps with offsets, ...) come
+// back as the expression itself.
 func CronExprToHuman(expr string, lang Language) string {
-	fields := strings.Fields(expr)
-	if len(fields) != 5 {
+	spec, tz := strings.TrimSpace(expr), ""
+	if f := strings.Fields(spec); len(f) == 6 && (strings.HasPrefix(f[0], "CRON_TZ=") || strings.HasPrefix(f[0], "TZ=")) {
+		tz = f[0][strings.IndexByte(f[0], '=')+1:]
+		spec = strings.Join(f[1:], " ")
+	}
+	human := cronSpecToHuman(spec, lang)
+	if human == "" {
 		return expr
 	}
-	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
-	weekdays, months := cronLangNames(lang)
-	cjk := isZhLikeLang(lang)
-
-	var parts []string
-
-	// Weekday
-	if dow != "*" {
-		var n int
-		if _, err := fmt.Sscanf(dow, "%d", &n); err == nil {
-			if n >= 0 && n <= 6 {
-				if cjk {
-					parts = append(parts, weekdays[n])
-				} else {
-					parts = append(parts, "Every "+weekdays[n])
-				}
-			}
-		} else {
-			parts = append(parts, "weekday("+dow+")")
-		}
+	if tz != "" {
+		human += " (" + tz + ")"
 	}
-
-	// Month
-	if month != "*" {
-		var n int
-		if _, err := fmt.Sscanf(month, "%d", &n); err == nil {
-			if n >= 1 && n <= 12 {
-				parts = append(parts, months[n])
-			}
-		}
-	}
-
-	// Day of month
-	if dom != "*" {
-		if cjk {
-			parts = append(parts, dom+"日")
-		} else {
-			parts = append(parts, "day "+dom)
-		}
-	}
-
-	// Time
-	if hour != "*" && minute != "*" {
-		parts = append(parts, fmt.Sprintf("%s:%s", padZero(hour), padZero(minute)))
-	} else if hour != "*" {
-		if cjk {
-			parts = append(parts, hour+"時")
-		} else {
-			parts = append(parts, "hour "+hour)
-		}
-	} else if minute != "*" {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			parts = append(parts, "每小时第"+minute+"分")
-		case LangJapanese:
-			parts = append(parts, "毎時"+minute+"分")
-		default:
-			parts = append(parts, "minute "+minute+" of every hour")
-		}
-	}
-
-	// Frequency hint
-	if dow == "*" && month == "*" && dom == "*" {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			return "每天 " + strings.Join(parts, " ")
-		case LangJapanese:
-			return "毎日 " + strings.Join(parts, " ")
-		case LangSpanish:
-			return "Diario a las " + strings.Join(parts, " ")
-		default:
-			return "Daily at " + strings.Join(parts, " ")
-		}
-	}
-	if dow != "*" && month == "*" && dom == "*" {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			return "每" + strings.Join(parts, " ")
-		case LangJapanese:
-			return "毎" + strings.Join(parts, " ")
-		default:
-			return strings.Join(parts, " at ")
-		}
-	}
-	if dom != "*" && month == "*" && dow == "*" {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			return "每月" + strings.Join(parts, " ")
-		case LangJapanese:
-			return "毎月" + strings.Join(parts, " ")
-		case LangSpanish:
-			return "Mensual, " + strings.Join(parts, ", ")
-		default:
-			return "Monthly, " + strings.Join(parts, ", ")
-		}
-	}
-
-	if cjk {
-		return strings.Join(parts, " ")
-	}
-	return strings.Join(parts, ", ")
+	return human
 }
 
-func padZero(s string) string {
-	if len(s) == 1 {
-		return "0" + s
+func cronSpecToHuman(spec string, lang Language) string {
+	f := strings.Fields(spec)
+	if len(f) != 5 {
+		return ""
 	}
-	return s
+	minute, hour, dom, month, dow := f[0], f[1], f[2], f[3], f[4]
+	t, ok := cronPhrasesByLang[lang]
+	if !ok {
+		t = cronPhrasesByLang[LangEnglish]
+	}
+	weekdays, months := cronLangNames(lang)
+	everyDay := dom == "*" && month == "*" && dow == "*"
+
+	if n, ok := cronStep(minute, 60); ok {
+		if hour != "*" || !everyDay {
+			return ""
+		}
+		if n == 1 {
+			return t.everyMinute
+		}
+		return fmt.Sprintf(t.everyMinutes, n)
+	}
+	m, ok := cronNumber(minute, 0, 59)
+	if !ok {
+		return ""
+	}
+	if hour == "*" {
+		if !everyDay {
+			return ""
+		}
+		return fmt.Sprintf(t.hourly, m)
+	}
+	if n, ok := cronStep(hour, 24); ok {
+		if !everyDay {
+			return ""
+		}
+		if n == 1 {
+			return fmt.Sprintf(t.hourly, m)
+		}
+		return fmt.Sprintf(t.everyHours, n, m)
+	}
+	hours, ok := cronNumberList(hour, 0, 23)
+	if !ok {
+		return ""
+	}
+	times := make([]string, len(hours))
+	for i, h := range hours {
+		times[i] = fmt.Sprintf("%02d:%02d", h, m)
+	}
+	at := strings.Join(times, t.listSep)
+
+	switch {
+	case everyDay:
+		return fmt.Sprintf(t.daily, at)
+	case dom == "*" && month == "*":
+		days := cronDaysText(dow, weekdays, t)
+		if days == "" {
+			return ""
+		}
+		return fmt.Sprintf(t.weekly, days, at)
+	case dow == "*" && month == "*":
+		if d, ok := cronNumber(dom, 1, 31); ok {
+			return fmt.Sprintf(t.monthly, d, at)
+		}
+	case dow == "*":
+		d, okD := cronNumber(dom, 1, 31)
+		mo, okM := cronNumber(month, 1, 12)
+		if okD && okM {
+			return fmt.Sprintf(t.yearly, months[mo], d, at)
+		}
+	}
+	return ""
+}
+
+// cronDaysText names the weekdays of a day-of-week field: one day, a range
+// ("1-5") or a list ("1,3,5"). Other forms give "".
+func cronDaysText(dow string, names [7]string, t cronPhrases) string {
+	name := func(n int) string { return names[n%7] } // 7 is Sunday too
+	if lo, hi, found := strings.Cut(dow, "-"); found {
+		a, okA := cronNumber(lo, 0, 7)
+		b, okB := cronNumber(hi, 0, 7)
+		if !okA || !okB || a >= b {
+			return ""
+		}
+		return fmt.Sprintf(t.dayRange, name(a), name(b))
+	}
+	days, ok := cronNumberList(dow, 0, 7)
+	if !ok {
+		return ""
+	}
+	out := make([]string, len(days))
+	for i, d := range days {
+		out[i] = name(d)
+	}
+	return fmt.Sprintf(t.oneDay, strings.Join(out, t.listSep))
+}
+
+// cronNumber parses a plain number within [lo, hi].
+func cronNumber(s string, lo, hi int) (int, bool) {
+	if s == "" || strings.TrimLeft(s, "0123456789") != "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil && n >= lo && n <= hi
+}
+
+// cronNumberList parses "n" or "n,m,..." with each number within [lo, hi].
+func cronNumberList(s string, lo, hi int) ([]int, bool) {
+	var out []int
+	for _, part := range strings.Split(s, ",") {
+		n, ok := cronNumber(part, lo, hi)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+// cronStep parses "*/n" where n divides period (60 minutes, 24 hours): only
+// then is it an even interval ("*/45" fires at :00 and :45).
+func cronStep(s string, period int) (int, bool) {
+	rest, ok := strings.CutPrefix(s, "*/")
+	if !ok {
+		return 0, false
+	}
+	n, ok := cronNumber(rest, 1, period)
+	return n, ok && n < period && period%n == 0
 }

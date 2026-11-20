@@ -66,7 +66,13 @@ func (e *Engine) steer(st Steerer, sessionKey string, msg *Message) error {
 	if err := st.Steer(prompt, msg.Images, msg.Files); err != nil {
 		return err
 	}
-	session.AddHistory("user", prompt)
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[sessionKey]
+	e.interactiveMu.Unlock()
+	if state != nil {
+		state.markSteered()
+	}
+	session.AddHistory("user", agentMessageText(msg))
 	e.sessions.Save()
 	return nil
 }

@@ -362,6 +362,29 @@ func (e *Engine) failQueuedPrompt(item queuedPrompt, reason string) {
 	go e.drainPromptQueue(item.QueueKey)
 }
 
+// keepQueuedPromptsAfterReset lets prompts queued in a chat against an agent
+// session the engine itself replaced (gone, or unusable) run in the new one.
+// Leaving a session by /new or /switch still skips them.
+func (e *Engine) keepQueuedPromptsAfterReset(sessionKey, localSessionID, oldAgentSessionID string) {
+	oldAgentSessionID = strings.TrimSpace(oldAgentSessionID)
+	if oldAgentSessionID == "" {
+		return
+	}
+	queueKey, _ := e.promptQueueKey(sessionKey, nil)
+	e.promptQueueMu.Lock()
+	defer e.promptQueueMu.Unlock()
+	state := e.promptQueues[queueKey]
+	if state == nil {
+		return
+	}
+	for i := range state.Items {
+		item := &state.Items[i]
+		if item.AgentSessionIDSnapshot == oldAgentSessionID && (item.OriginLocalSessionID == "" || item.OriginLocalSessionID == localSessionID) {
+			item.AgentSessionIDSnapshot = ""
+		}
+	}
+}
+
 func (e *Engine) startQueuedPrompt(item queuedPrompt) bool {
 	unlockTransition := e.lockSessionTransition(item.OriginSessionKey)
 	defer unlockTransition()
